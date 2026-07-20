@@ -161,3 +161,6 @@ cython_debug/
 
 .vscode/
 test/
+
+# Development testing and notes
+dev_local/

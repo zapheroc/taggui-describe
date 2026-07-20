@@ -3,7 +3,7 @@ from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCompleter, QDockWidget,
                                QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QTextEdit)
 from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -134,6 +134,8 @@ class ImageTagsList(QListView):
 
 
 class ImageTagsEditor(QDockWidget):
+    image_data_save_requested = Signal(Image)
+
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_counter_model: TagCounterModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
@@ -155,12 +157,25 @@ class ImageTagsEditor(QDockWidget):
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
         self.token_count_label = QLabel()
+        # Add description box
+        self.description_label = QLabel("Image Description")
+        self.description_editor = QTextEdit()
+        # Add a debounced timer to auto save the description
+        self.description_save_timer = QTimer(self)
+        self.description_save_timer.setSingleShot(True)
+        self.description_save_timer.setInterval(600)  # ms of silence before saving
+        self.description_save_timer.timeout.connect(self.save_image_description)
+        self.description_editor.textChanged.connect(self.on_description_changed)
+
+
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
         layout.addWidget(self.image_tags_list)
         layout.addWidget(self.token_count_label)
+        layout.addWidget(self.description_label)
+        layout.addWidget(self.description_editor)
         self.setWidget(container)
 
         # When a tag is added, select it and scroll to the bottom of the list.
@@ -205,20 +220,48 @@ class ImageTagsEditor(QDockWidget):
     def load_image_tags(self, proxy_image_index: QModelIndex):
         self.image_index = self.proxy_image_list_model.mapToSource(
             proxy_image_index)
-        image: Image = self.proxy_image_list_model.data(
+        # On image load save the image reference for later use
+        self.image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
+        self.set_image_tags()
+        self.set_image_description()
+
+    def set_image_tags(self):
         # If the string list already contains the image's tags, do not reload
         # them. This is the case when the tags are edited directly through the
         # image tags editor. Removing this check breaks the functionality of
         # reordering multiple tags at the same time because it gets interrupted
         # after one tag is moved.
         current_string_list = self.image_tag_list_model.stringList()
-        if current_string_list == image.tags:
+        if current_string_list == self.image.tags:
             return
-        self.image_tag_list_model.setStringList(image.tags)
+        self.image_tag_list_model.setStringList(self.image.tags)
         self.count_tokens()
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
+
+    def set_image_description(self):
+        print("Image: " + str(self.image))
+        current_description = self.description_editor.toPlainText()
+        if current_description == self.image.description:
+            return
+        self.description_editor.setPlainText(self.image.description)
+        # TODO: Add token counter for description?
+
+    @Slot()
+    def on_description_changed(self):
+        if self.image is None:
+            return
+        current_description = self.description_editor.toPlainText()
+        self.image.description = current_description
+        self.description_save_timer.start()
+
+    @Slot()
+    def save_image_description(self):
+        if self.image is None:
+            return
+        self.image.description = self.description_editor.toPlainText()
+        self.image_data_save_requested.emit(self.image)
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,

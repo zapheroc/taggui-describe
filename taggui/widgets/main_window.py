@@ -506,6 +506,8 @@ class MainWindow(QMainWindow):
                 self.image_tags_editor.isVisible()))
         self.image_tags_editor.tag_input_box.tags_addition_requested.connect(
             self.image_list_model.add_tags)
+        self.image_tags_editor.image_data_save_requested.connect(
+            self.image_list_model.write_image_tags_to_disk)
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):

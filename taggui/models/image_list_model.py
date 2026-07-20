@@ -146,17 +146,21 @@ class ImageListModel(QAbstractListModel):
                       f'{exception}', file=sys.stderr)
                 dimensions = None
             tags = []
+            description = ""
             text_file_path = image_path.with_suffix('.txt')
             if str(text_file_path) in text_file_path_strings:
                 # `errors='replace'` inserts a replacement marker such as '?'
                 # when there is malformed data.
                 caption = text_file_path.read_text(encoding='utf-8',
                                                    errors='replace')
-                if caption:
-                    tags = caption.split(self.tag_separator)
+                # TODO move the seperator to the settings
+                tags_raw, _, description = caption.partition('\n\n')
+                if tags_raw:
+                    tags = tags_raw.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
                     tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags)
+                description = description.strip()
+            image = Image(image_path, dimensions, tags, description)
             self.images.append(image)
         self.images.sort(key=lambda image_: image_.path)
         self.modelReset.emit()
@@ -170,10 +174,13 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    @Slot(Image)
     def write_image_tags_to_disk(self, image: Image):
         try:
+            # TODO move the seperator to the settings
+            image_text = self.tag_separator.join(image.tags) + '\n\n' + image.description
             image.path.with_suffix('.txt').write_text(
-                self.tag_separator.join(image.tags), encoding='utf-8',
+                image_text, encoding='utf-8',
                 errors='replace')
         except OSError:
             error_message_box = QMessageBox()
