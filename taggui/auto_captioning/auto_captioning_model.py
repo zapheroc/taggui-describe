@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from PIL import Image as PilImage
 from PIL.ImageOps import exif_transpose
-from transformers import (AutoModelForVision2Seq, AutoProcessor,
+from transformers import (AutoModelForImageTextToText, AutoProcessor,
                           BatchFeature, BitsAndBytesConfig)
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
@@ -43,7 +43,7 @@ class AutoCaptioningModel:
     # models that do not have a safetensors version.
     use_safetensors = True
     model_load_context_manager = nullcontext()
-    transformers_model_class = AutoModelForVision2Seq
+    transformers_model_class = AutoModelForImageTextToText
     image_mode = 'RGB'
 
     def __init__(self,

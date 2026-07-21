@@ -11,7 +11,7 @@ class Joycaption(AutoCaptioningModel):
 
     def monkey_patch_after_loading(self) -> None:
         if self.load_in_4_bit:
-            attention = self.model.vision_tower.vision_model.head.attention
+            attention = self.model.model.vision_tower.encoder.layers[-1].self_attn
             # JoyCaption's out-projection layer is not dynamically quantizable,
             # so if it was converted into `nn.Linear4bit`, replace it with the
             # original `nn.Linear`.

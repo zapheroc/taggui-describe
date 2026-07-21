@@ -9,6 +9,7 @@ from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
 from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.phi_3_vision import Phi3Vision
 from auto_captioning.models.wd_tagger import WdTagger
+from auto_captioning.models.gemma_4 import Gemma4
 
 MODELS = [
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
@@ -48,7 +49,8 @@ MODELS = [
     'Salesforce/blip2-opt-6.7b-coco',
     'Salesforce/blip2-flan-t5-xl',
     'Salesforce/blip2-flan-t5-xxl',
-    'microsoft/kosmos-2-patch14-224'
+    'microsoft/kosmos-2-patch14-224',
+    'google/gemma-4-31B'
 ]
 
 
@@ -80,4 +82,6 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return Phi3Vision
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
         return WdTagger
+    if 'gemma-4-31b' in lowercase_model_id:
+        return Gemma4
     return AutoCaptioningModel
