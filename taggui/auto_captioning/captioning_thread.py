@@ -12,10 +12,26 @@ from utils.enums import CaptionPosition
 from utils.image import Image
 from utils.settings import get_tag_separator
 
+def add_caption_to_description(description: str, caption: str,
+                               caption_position: CaptionPosition) -> str:
+    if not caption:
+        return None
+    separator = ' '
+    # Prevent white space from being added if there is no description
+    if not description:
+        separator = ''
+    if caption_position == CaptionPosition.BEFORE_DESCRIPTION:
+        return f"{caption}{separator}{description}"
+    if caption_position == CaptionPosition.AFTER_DESCRIPTION:
+        return f"{description}{separator}{caption}"
+    if caption_position == CaptionPosition.OVERWRITE_DESCRIPTION:
+        return caption
+    return None
+
 
 def add_caption_to_tags(tags: list[str], caption: str,
                         caption_position: CaptionPosition) -> list[str]:
-    if caption_position == CaptionPosition.DO_NOT_ADD or not caption:
+    if not caption:
         return tags
     tag_separator = get_tag_separator()
     new_tags = caption.split(tag_separator)
@@ -114,8 +130,10 @@ class CaptioningThread(QThread):
                 continue
             caption, console_output_caption = model.generate_caption(
                 model_inputs, image_prompt)
-            tags = add_caption_to_tags(image.tags, caption, caption_position)
-            self.caption_generated.emit(image_index, caption, tags)
+            if caption_position != CaptionPosition.DO_NOT_ADD:
+                tags = add_caption_to_tags(image.tags, caption, caption_position)
+                description = add_caption_to_description(image.description, caption, caption_position)
+                self.caption_generated.emit(image_index, description, tags)
             if are_multiple_images_selected:
                 self.progress_bar_update_requested.emit(i + 1)
             if i == 0 and not are_multiple_images_selected:

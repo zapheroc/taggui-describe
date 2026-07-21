@@ -471,6 +471,14 @@ class ImageListModel(QAbstractListModel):
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
 
+    def update_image_description(self, image_index: QModelIndex, description: str):
+        image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+        if image.description == description:
+            return
+        image.description = description
+        self.dataChanged.emit(image_index, image_index)
+        self.write_image_tags_to_disk(image)
+
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
         """Add one or more tags to one or more images."""

@@ -547,8 +547,11 @@ class MainWindow(QMainWindow):
 
     def connect_auto_captioner_signals(self):
         self.auto_captioner.caption_generated.connect(
-            lambda image_index, _, tags:
-            self.image_list_model.update_image_tags(image_index, tags))
+            lambda image_index, description, tags:
+                self.image_list_model.update_image_description(image_index, description)
+                if description else
+                self.image_list_model.update_image_tags(image_index, tags)
+            )
         self.auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             self.image_tags_editor.reload_image_tags_if_changed(image_index,
