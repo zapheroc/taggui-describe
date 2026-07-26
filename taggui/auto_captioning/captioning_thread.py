@@ -93,6 +93,7 @@ class CaptioningThread(QThread):
     def run_captioning(self):
         model_id = self.caption_settings['model_id']
         model_class = get_model_class(model_id)
+        # Inject the new more abstract class here that can run llama-cpp-python. 
         model: AutoCaptioningModel = model_class(
             captioning_thread_=self, caption_settings=self.caption_settings)
         error_message = model.get_error_message()
