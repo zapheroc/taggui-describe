@@ -37,10 +37,9 @@ def replace_template_variables(text: str, image: Image) -> str:
 
 class AutoCaptioningModel:
     dtype = torch.float16
-    # When loading a model, if the `use_safetensors` argument is not set and
-    # both a safetensors and a non-safetensors version of the model are
-    # available, both versions get downloaded. This should be set to `None` for
-    # models that do not have a safetensors version.
+    # MIGRATED (v5): Safetensors is now the only supported serialization format.
+    # `use_safetensors = None` (previously used for models without a safetensors
+    # version) is no longer valid — all models must provide safetensors weights.
     use_safetensors = True
     model_load_context_manager = nullcontext()
     transformers_model_class = AutoModelForImageTextToText

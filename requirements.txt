@@ -5,7 +5,6 @@ imagesize==2.0.0
 pillow==12.3.0
 pyparsing==3.3.2
 PySide6==6.11.1
-# Might as well upgrade higher and drop florence 2 support. Florence 2 requires  4.49.0
 transformers==5.14.1
 
 # Florence-2
@@ -22,7 +21,7 @@ torch==2.13.0; platform_system != "Windows"
 # https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp311-cp311-win_amd64.whl; platform_system == "Windows" and python_version == "3.11"
 
 # FlashAttention (Florence-2, Phi-3-Vision)
-https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3+cu130torch2.13-cp312-cp312-linux_x86_64.whl; platform_system != "Windows"
+https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-cp312-cp312-linux_x86_64.whl; platform_system != "Windows"
 # flash-attn==2.8.3; platform_system == "Linux"
 # https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl; platform_system == "Windows" and python_version == "3.12"
 # https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp311-cp311-win_amd64.whl; platform_system == "Windows" and python_version == "3.11"
