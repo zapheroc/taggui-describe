@@ -178,7 +178,8 @@ class ImageListModel(QAbstractListModel):
     def write_image_tags_to_disk(self, image: Image):
         try:
             # TODO move the seperator to the settings
-            image_text = self.tag_separator.join(image.tags) + '\n\n' + image.description
+            parts = [self.tag_separator.join(image.tags), image.description]
+            image_text = '\n\n'.join(part for part in parts if part)
             image.path.with_suffix('.txt').write_text(
                 image_text, encoding='utf-8',
                 errors='replace')
