@@ -24,6 +24,18 @@ def image_to_data_uri(image_path: Path) -> str:
     data = base64.b64encode(image_path.read_bytes()).decode('utf-8')
     return f'data:{mime};base64,{data}'
 
+@staticmethod
+def get_model_repo_id() -> str:
+    raise NotImplementedError("The model repo id must be overidden in a child class")
+
+@staticmethod
+def get_model_file_name() -> str:
+    raise NotImplementedError("The model file must be overidden in a child class")
+
+@staticmethod
+def get_vision_file_name() -> str:
+    raise NotImplementedError("The vision file must be overidden in a child class")
+
 class LlamaCaptioningModel(AutoCaptioningModel):
 
     def __init__(self,
@@ -63,16 +75,17 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             return
         # Clear the memory from the model
         super().clear_model_memory()
+        print(f'Loading {self.model_id}...')
         models_directory_path = self.thread.models_directory_path
 
         # TODO: Add custom directory support
         
         # TODO: Get the repo-id and filename from the child classes overrides
 
-        self.processor = Gemma4ChatHandler.from_pretrained(repo_id="unsloth/gemma-4-31B-it-GGUF",filename="mmproj-F16.gguf",)
+        self.processor = Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(),filename=self.get_vision_file_name())        
         llm = Llama.from_pretrained(
-            repo_id='llmfan46/gemma-4-31B-it-uncensored-heretic-GGUF',
-            filename='gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf',
+            repo_id=self.get_model_repo_id(),
+            filename=self.get_model_file_name(),
             chat_handler=self.processor,
             n_ctx=2048,
             n_gpu_layers=-1,
