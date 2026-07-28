@@ -1,7 +1,6 @@
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 
-
-class Kosmos2(AutoCaptioningModel):
+class Kosmos2(TransformersCaptioningModel):
     @staticmethod
     def format_prompt(prompt: str) -> str:
         return f'<grounding>{prompt}'

@@ -6,13 +6,13 @@ import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CodeGenTokenizerFast)
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
 
 MOONDREAM2_REVISION = '2024-08-26'
 
 
-class Moondream(AutoCaptioningModel):
+class Moondream(TransformersCaptioningModel):
     transformers_model_class = AutoModelForCausalLM
 
     @staticmethod

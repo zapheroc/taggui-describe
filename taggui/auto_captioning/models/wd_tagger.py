@@ -11,7 +11,7 @@ from PIL import Image as PilImage
 from onnxruntime import InferenceSession
 
 import auto_captioning.captioning_thread as captioning_thread
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
 
 KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
@@ -89,7 +89,7 @@ class WdTaggerModel:
         return tags, probabilities
 
 
-class WdTagger(AutoCaptioningModel):
+class WdTagger(TransformersCaptioningModel):
     image_mode = 'RGBA'
 
     def __init__(self,

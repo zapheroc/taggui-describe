@@ -103,7 +103,6 @@ class CaptioningThread(QThread):
             print(error_message)
             return
         model.load_processor_and_model()
-        model.monkey_patch_after_loading()
         if self.is_canceled:
             print('Canceled captioning.')
             return
@@ -165,3 +164,9 @@ class CaptioningThread(QThread):
 
     def write(self, text: str):
         self.text_outputted.emit(text)
+
+    def flush(self):
+        pass  # No buffering — each write() emits immediately via Qt signal
+
+    def isatty(self) -> bool:
+        return False  # Not a real TTY; prevents colour-code injection attempts

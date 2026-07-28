@@ -2,11 +2,11 @@ import torch
 from transformers import AutoModelForCausalLM, BatchFeature
 
 import auto_captioning.captioning_thread as captioning_thread
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
 
 
-class Phi3Vision(AutoCaptioningModel):
+class Phi3Vision(TransformersCaptioningModel):
     transformers_model_class = AutoModelForCausalLM
 
     def __init__(self,

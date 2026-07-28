@@ -1,7 +1,7 @@
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 
 
-class LlavaNext(AutoCaptioningModel):
+class LlavaNext(TransformersCaptioningModel):
     def get_processor(self):
         processor = super().get_processor()
         processor.tokenizer.padding_side = 'left'

@@ -1,12 +1,11 @@
 import numpy as np
 from transformers import AutoModelForCausalLM, BatchFeature
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from utils.utils import list_with_and
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 
-
-class Florence2(AutoCaptioningModel):
+class Florence2(TransformersCaptioningModel):
     use_safetensors = None
     transformers_model_class = AutoModelForCausalLM
     task_prompts = [
