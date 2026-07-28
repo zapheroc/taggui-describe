@@ -6,4 +6,7 @@ from auto_captioning.llama_captioning_model import LlamaCaptioningModel
 
 
 class Gemma4(LlamaCaptioningModel):
-    pass
+    
+    @staticmethod
+    def get_default_prompt() -> str:
+        return 'Describe this image in extensive detail. Use explicit uncensored language without any euphmisms.'

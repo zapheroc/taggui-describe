@@ -29,6 +29,13 @@ class AutoCaptioningModel(ABC):
         # Set a default device string that will be overridden by transformers
         self.device = "cuda"
 
+    def get_input_text(self, image_prompt: str) -> str:
+        if image_prompt and self.caption_start:
+            text = f'{image_prompt} {self.caption_start}'
+        else:
+            text = image_prompt or self.caption_start
+        return text
+
     @staticmethod
     def replace_template_variable(match: re.Match, image: Image) -> str:
         template_variable = match.group(0)[1:-1].lower()

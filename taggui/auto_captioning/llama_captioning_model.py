@@ -9,8 +9,6 @@ from llama_cpp.llama_chat_format import Llava15ChatHandler, Gemma4ChatHandler
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 
-DEFAULT_PROMPT = 'Describe this image in extensive detail. Use explicit uncensored language without any euphmisms'
-
 def image_to_data_uri(image_path: Path) -> str:
     """Encode an image file as a base64 data URI for the chat handler."""
     mime = 'image/jpeg'
@@ -36,15 +34,23 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def get_error_message(self):
         pass
 
-    def get_captioning_message(self, are_multiple_images_selected: bool, captioning_start_datetime: datetime) -> str:
-        pass
-
-    def get_image_prompt(self, image: Image) -> str | None:
-        pass
-
     def get_model_inputs(self, image_prompt: str,
                          image: Image) -> dict | np.ndarray:
-        pass
+        # Parse the image input text
+        text = self.get_input_text(image_prompt)
+        user_content = [
+            {'type': 'image_url',
+            'image_url': {'url': image_to_data_uri(Path(image.path))}
+            },
+            {'type': 'text', 'text': text}
+        ]  
+        # TODO: Allow config of system prompt
+        message = [
+            {'role': 'system',
+            'content': 'You are a helpful image captioner.'},
+            {'role': 'user', 'content': user_content},
+        ]
+        return message
 
 
     def load_processor_and_model(self):
@@ -84,20 +90,8 @@ class LlamaCaptioningModel(AutoCaptioningModel):
 
     def generate_caption(self, model_inputs: dict | np.ndarray,
                          image_prompt: str) -> tuple[str, str]:
-        user_content = [
-            {'type': 'image_url',
-            'image_url': {'url': image_to_data_uri(Path('/home/commander/git/auto-tag-images/dev_local/images/tumblr_mmsx7pknSD1qhttpto3_500.jpg'))}},
-        ]  
-        user_content.append({'type': 'text', 'text': DEFAULT_PROMPT})
-        
-        message = [
-            {'role': 'system',
-            'content': 'You are a helpful image captioner.'},
-            {'role': 'user', 'content': user_content},
-        ]
-
         response = self.model.create_chat_completion(
-            messages=message,
+            messages=model_inputs,
             max_tokens=2048,
             temperature=0.4,
         )

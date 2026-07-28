@@ -148,13 +148,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.thread_parent.model_device_type = self.device.type
         self.thread_parent.is_model_loaded_in_4_bit = self.load_in_4_bit
 
-    def get_input_text(self, image_prompt: str) -> str:
-        if image_prompt and self.caption_start:
-            text = f'{image_prompt} {self.caption_start}'
-        else:
-            text = image_prompt or self.caption_start
-        return text
-
     def load_image(self, image: Image) -> PilImage:
         pil_image = PilImage.open(image.path)
         # Rotate the image according to the orientation tag.
