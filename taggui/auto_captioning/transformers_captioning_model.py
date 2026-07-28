@@ -1,5 +1,5 @@
 import gc
-import re
+# import re
 from contextlib import nullcontext
 from datetime import datetime
 
@@ -15,25 +15,6 @@ import auto_captioning.captioning_thread as captioning_thread
 from utils.enums import CaptionDevice
 from utils.image import Image
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
-
-def replace_template_variable(match: re.Match, image: Image) -> str:
-    template_variable = match.group(0)[1:-1].lower()
-    if template_variable == 'tags':
-        return ', '.join(image.tags)
-    if template_variable == 'name':
-        return image.path.stem
-    if template_variable in ('directory', 'folder'):
-        return image.path.parent.name
-
-
-def replace_template_variables(text: str, image: Image) -> str:
-    # Replace template variables inside curly braces that are not escaped.
-    text = re.sub(r'(?<!\\){[^{}]+(?<!\\)}',
-                  lambda match: replace_template_variable(match, image), text)
-    # Unescape escaped curly braces.
-    text = re.sub(r'\\([{}])', r'\1', text)
-    return text
-
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
@@ -166,38 +147,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.thread_parent.model_id = self.model_id
         self.thread_parent.model_device_type = self.device.type
         self.thread_parent.is_model_loaded_in_4_bit = self.load_in_4_bit
-
-    @staticmethod
-    def get_captioning_start_datetime_string(
-            captioning_start_datetime: datetime) -> str:
-        return captioning_start_datetime.strftime('%Y-%m-%d %H:%M:%S')
-
-    def get_captioning_message(self, are_multiple_images_selected: bool,
-                               captioning_start_datetime: datetime) -> str:
-        if are_multiple_images_selected:
-            captioning_start_datetime_string = (
-                self.get_captioning_start_datetime_string(
-                    captioning_start_datetime))
-            return (f'Captioning... (device: {self.device}, start time: '
-                    f'{captioning_start_datetime_string})')
-        return f'Captioning... (device: {self.device})'
-
-    @staticmethod
-    def get_default_prompt() -> str:
-        return ''
-
-    @staticmethod
-    def format_prompt(prompt: str) -> str:
-        return prompt
-
-    def get_image_prompt(self, image: Image) -> str | None:
-        if self.prompt:
-            image_prompt = replace_template_variables(self.prompt, image)
-        else:
-            self.prompt = self.get_default_prompt()
-            image_prompt = self.prompt
-        image_prompt = self.format_prompt(image_prompt)
-        return image_prompt
 
     def get_input_text(self, image_prompt: str) -> str:
         if image_prompt and self.caption_start:
