@@ -6,6 +6,7 @@ from PIL import UnidentifiedImageError
 from PySide6.QtCore import QModelIndex, QThread, Qt, Signal
 
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+
 from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
@@ -91,45 +92,43 @@ class CaptioningThread(QThread):
         self.is_canceled = False
 
     def run_captioning(self):
-        model_id = self.caption_settings['model_id']
-        model_class = get_model_class(model_id)
-        # Inject the new more abstract class here that can run llama-cpp-python. 
-        model: AutoCaptioningModel = model_class(
-            captioning_thread_=self, caption_settings=self.caption_settings)
-        error_message = model.get_error_message()
-        if error_message:
-            self.is_error = True
-            self.clear_console_text_edit_requested.emit()
-            print(error_message)
+        manager = self.parent().model_manager
+
+        def log(text):
+            self.write(text)   # emits text_outputted -> console
+        # TODO: Settings are only passed in on thread creation, meaning prompts don't get updated
+        loaded = manager.ensure_model(
+            self.caption_settings, self.models_directory_path, self.tag_separator,
+            log=log,
+            on_loaded=lambda: None,
+            on_load_error=lambda msg: (setattr(self, 'is_error', True),
+                                        print(msg)))
+        if not loaded or self.is_canceled:
             return
-        model.load_processor_and_model()
-        if self.is_canceled:
-            print('Canceled captioning.')
-            return
-        self.clear_console_text_edit_requested.emit()
         selected_image_count = len(self.selected_image_indices)
         are_multiple_images_selected = selected_image_count > 1
         captioning_start_datetime = datetime.now()
-        captioning_message = model.get_captioning_message(
-            are_multiple_images_selected, captioning_start_datetime)
-        print(captioning_message)
+        # TODO: Consider removing these logs
+        # captioning_message = model.get_captioning_message(
+        #     are_multiple_images_selected, captioning_start_datetime)
+        # print(captioning_message)
         caption_position = self.caption_settings['caption_position']
         for i, image_index in enumerate(self.selected_image_indices):
             start_time = perf_counter()
             if self.is_canceled:
-                print('Canceled captioning.')
                 return
-            image: Image = self.image_list_model.data(image_index,
-                                                      Qt.ItemDataRole.UserRole)
-            image_prompt = model.get_image_prompt(image)
+            image = self.image_list_model.data(image_index, Qt.ItemDataRole.UserRole)
+            # Maybe prompt/caption settings to the payload to update whatever settings are needed?
+            payload = {
+                'path': str(image.path),
+                'tags': list(image.tags),
+                'description': getattr(image, 'description', ''),
+            }
             try:
-                model_inputs = model.get_model_inputs(image_prompt, image)
-            except UnidentifiedImageError:
-                print(f'Skipping {image.path.name} because its file format is '
-                      'not supported or it is a corrupted image.')
+                caption, console_output_caption = manager.caption(payload, log=log)
+            except RuntimeError as exception:
+                print(f'Skipping {image.path.name} due to error: {str(exception)}')
                 continue
-            caption, console_output_caption = model.generate_caption(
-                model_inputs, image_prompt)
             if caption_position != CaptionPosition.DO_NOT_ADD:
                 tags = add_caption_to_tags(image.tags, caption, caption_position)
                 description = add_caption_to_description(image.description, caption, caption_position)
@@ -153,6 +152,7 @@ class CaptioningThread(QThread):
                   f'{format_duration(total_captioning_duration)} '
                   f'({average_captioning_duration:.1f} s/image) at '
                   f'{captioning_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
+
 
     def run(self):
         try:

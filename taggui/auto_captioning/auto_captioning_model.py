@@ -1,18 +1,28 @@
 import gc
 import re
+import torch
 from datetime import datetime
 from abc import ABC, abstractmethod
 
 import numpy as np
-
 from transformers import (AutoModelForImageTextToText, AutoProcessor,
                           BatchFeature, BitsAndBytesConfig)
 
 from utils.image import Image
 
 
+def _replace_template_variable(match: re.Match, image: Image) -> str:
+    template_variable = match.group(0)[1:-1].lower()
+    if template_variable == 'tags':
+        return ', '.join(image.tags)
+    if template_variable == 'name':
+        return image.path.stem
+    if template_variable in ('directory', 'folder'):
+        return image.path.parent.name
+
 class AutoCaptioningModel(ABC):
 
+    # TODO: Rename captioning_thread since it is now a captioning context
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
                  caption_settings: dict):
@@ -37,37 +47,53 @@ class AutoCaptioningModel(ABC):
         return text
 
     @staticmethod
-    def replace_template_variable(match: re.Match, image: Image) -> str:
-        template_variable = match.group(0)[1:-1].lower()
-        if template_variable == 'tags':
-            return ', '.join(image.tags)
-        if template_variable == 'name':
-            return image.path.stem
-        if template_variable in ('directory', 'folder'):
-            return image.path.parent.name
-
-    @staticmethod
     def replace_template_variables(text: str, image: Image) -> str:
         # Replace template variables inside curly braces that are not escaped.
         text = re.sub(r'(?<!\\){[^{}]+(?<!\\)}',
-                    lambda match: replace_template_variable(match, image), text)
+                    lambda match: _replace_template_variable(match, image), text)
         # Unescape escaped curly braces.
         text = re.sub(r'\\([{}])', r'\1', text)
         return text
 
+    # TODO: Models no longer need to clear their memory
     def clear_model_memory(self):
-        processor = self.thread_parent.processor
-        model = self.thread_parent.model
-        if model:
+        
+        if self.thread_parent.model:
             print(f'Unloading {self.model_id}...')
-            # Garbage collect the previous processor and model to free up
-            # memory.
+            model = self.thread_parent.model
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            # Case 1: Hugging Face transformers model
+            if hasattr(model, "cpu") and callable(getattr(model, "cpu")):
+                try:
+                    model.cpu()          # ← UNCOMMENT THIS — it's the key step!
+                    print("Moved model to CPU.")
+                except Exception as e:
+                    print(f"Could not move to CPU: {e}")
+
+            # Case 2: llama-cpp-python model
+            elif hasattr(model, "model") and hasattr(model, "ctx"):
+                try:
+                    if hasattr(model, "close"):
+                        model.close()
+                    print("Closed Llama cpp model context.")
+                except Exception as e:
+                    print(f"Could not close Llama context: {e}")
+
+            # Clear references
             self.thread_parent.processor = None
             self.thread_parent.model = None
-            del processor
             del model
             gc.collect()
-            
+            gc.collect()
+            gc.collect()
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+
         self.thread.clear_console_text_edit_requested.emit()
 
 
@@ -103,6 +129,7 @@ class AutoCaptioningModel(ABC):
         else:
             self.prompt = self.get_default_prompt()
             image_prompt = self.prompt
+        # TODO: Gemma should use format prompt to format the prompt
         image_prompt = self.format_prompt(image_prompt)
         return image_prompt
 

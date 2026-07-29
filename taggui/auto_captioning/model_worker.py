@@ -25,7 +25,7 @@ def run_worker(request_q, response_q, caption_settings,
     try:
         from auto_captioning.models_list import get_model_class
         from auto_captioning.worker_context import WorkerContext
-        from utils.image import Image  # adapt import/ctor to your codebase ?????? TODO what does this mean...
+        from utils.image import Image
 
         ctx = WorkerContext(models_directory_path, tag_separator, cancel_event)
         model_class = get_model_class(caption_settings['model_id'])
@@ -47,9 +47,11 @@ def run_worker(request_q, response_q, caption_settings,
             if request[0] == 'caption':
                 data = request[1]
                 try:
-                    image = Image(path=Path(data['path']))  # adapt ctor TODO what does this mean?
-                    image.tags = data.get('tags', [])
-                    image.description = data.get('description', '')
+                    image = Image(
+                        path=Path(data['path']),
+                        dimensions=data.get('dimensions'),
+                        tags=list(data.get('tags', [])),
+                        description=data.get('description', ''))
                     prompt = model.get_image_prompt(image)
                     model_inputs = model.get_model_inputs(prompt, image)
                     caption, console_output = model.generate_caption(

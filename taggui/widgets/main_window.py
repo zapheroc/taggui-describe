@@ -181,7 +181,8 @@ class MainWindow(QMainWindow):
         self.image_tags_editor.tag_input_box.setFocus()
 
     def closeEvent(self, event: QCloseEvent):
-        """Save the window geometry and state before closing."""
+        """Close any captioning subprocess and save the window geometry and state before closing."""
+        self.auto_captioner.model_manager.shutdown()
         self.settings.setValue('geometry', self.saveGeometry())
         self.settings.setValue('window_state', self.saveState())
         super().closeEvent(event)

@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Llava15ChatHandler, Gemma4ChatHandler
+from llama_cpp.llama_chat_format import Gemma4ChatHandler
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 
@@ -68,6 +68,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def load_processor_and_model(self):
         processor = self.thread_parent.processor
         model = self.thread_parent.model
+        # TODO: We don't have to check for the model being loaded since subprocess manager handles that
         # The model is already loaded, don't load it again
         if (model and self.model_id == self.thread_parent.model_id):
             self.processor = processor
@@ -96,7 +97,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             type_v=8,
         )
         self.model = llm
-        self.thread_parent.processor = self.model
+        self.thread_parent.processor = self.processor
         self.thread_parent.model = self.model
         self.thread_parent.model_id = self.model_id
 

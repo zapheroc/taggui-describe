@@ -6,9 +6,10 @@ from PySide6.QtGui import QFontMetrics, QTextCursor
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPlainTextEdit, QProgressBar, QScrollArea,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QApplication)
 
 from auto_captioning.captioning_thread import CaptioningThread
+from auto_captioning.model_subprocess_manager import ModelSubprocessManager
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models_list import MODELS, get_model_class
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
@@ -360,11 +361,15 @@ class AutoCaptioner(QDockWidget):
         self.settings = get_settings()
         self.is_captioning = False
         self.captioning_thread = None
-        self.processor = None
-        self.model = None
-        self.model_id: str | None = None
-        self.model_device_type: str | None = None
-        self.is_model_loaded_in_4_bit = None
+        self.model_manager = ModelSubprocessManager()
+        # Ensure there are no orphaned processes on shutdown
+        QApplication.instance().aboutToQuit.connect(self.model_manager.shutdown)
+
+        # self.processor = None
+        # self.model = None
+        # self.model_id: str | None = None
+        # self.model_device_type: str | None = None
+        # self.is_model_loaded_in_4_bit = None
         # Whether the last block of text in the console text edit should be
         # replaced with the next block of text that is outputted.
         self.replace_last_console_text_edit_block = False
@@ -406,6 +411,7 @@ class AutoCaptioner(QDockWidget):
         if self.is_captioning:
             # Cancel captioning.
             self.captioning_thread.is_canceled = True
+            self.model_manager.cancel()
             self.start_cancel_button.setEnabled(False)
             self.start_cancel_button.setText('Canceling Auto-Captioning...')
         else:
@@ -511,3 +517,8 @@ class AutoCaptioner(QDockWidget):
         sys.stdout = self.captioning_thread
         sys.stderr = self.captioning_thread
         self.captioning_thread.start()
+
+
+    def closeEvent(self, event):
+        self.model_manager.shutdown()
+        super().closeEvent(event)
