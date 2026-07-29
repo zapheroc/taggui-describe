@@ -30,12 +30,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
                  captioning_thread_: 'captioning_thread.CaptioningThread',
                  caption_settings: dict):
         super().__init__(captioning_thread_, caption_settings)
-        # self.thread = captioning_thread_
-        # self.thread_parent = captioning_thread_.parent()
-        # self.caption_settings = caption_settings
-        # self.model_id = caption_settings['model_id']
-        # self.prompt = caption_settings['prompt']
-        # self.caption_start = caption_settings['caption_start']
         self.device_setting: CaptionDevice = caption_settings['device']
         self.device: torch.device = self._get_device()
         if self.dtype == torch.bfloat16:
@@ -49,10 +43,15 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.remove_tag_separators = caption_settings['remove_tag_separators']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
-        # self.processor = None
-        # self.model = None
-        # self.tokenizer = None
 
+    def update_caption_settings(caption_settings: dict):
+        super().update_caption_settings(caption_settings)
+        self.bad_words_string = caption_settings['bad_words']
+        self.forced_words_string = caption_settings['forced_words']
+        self.remove_tag_separators = caption_settings['remove_tag_separators']
+        self.generation_parameters = caption_settings['generation_parameters']
+        self.beam_count = self.generation_parameters['num_beams']
+    
     def _get_device(self) -> torch.device:
         if (self.device_setting == CaptionDevice.GPU
                 and torch.cuda.is_available()):
@@ -108,7 +107,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         return model
 
     def load_processor_and_model(self):
-        models_directory_path = self.thread.models_directory_path
+        models_directory_path = self.context.models_directory_path
         if models_directory_path:
             config_path = models_directory_path / self.model_id / 'config.json'
             tags_path = (models_directory_path / self.model_id
@@ -120,6 +119,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         model = self.thread_parent.model
         # Only GPUs support 4-bit quantization.
         self.load_in_4_bit = self.load_in_4_bit and self.device.type == 'cuda'
+        # TODO: No longer needed since this code will only run once in the subprocess
         if (model and self.thread_parent.model_id == self.model_id
                 and (self.thread_parent.model_device_type
                      == self.device.type)
@@ -129,16 +129,9 @@ class TransformersCaptioningModel(AutoCaptioningModel):
             self.model = model
             return
         # Load the new processor and model.
+        # TODO: No longer needed, remove
         super().clear_model_memory()
-        # if model:
-        #     # Garbage collect the previous processor and model to free up
-        #     # memory.
-        #     self.thread_parent.processor = None
-        #     self.thread_parent.model = None
-        #     del processor
-        #     del model
-        #     gc.collect()
-        self.thread.clear_console_text_edit_requested.emit()
+        self.context.clear_console_text_edit_requested.emit()
         print(f'Loading {self.model_id}...')
         self.processor = self.get_processor()
         self.thread_parent.processor = self.processor
@@ -231,7 +224,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
             caption = f'{self.caption_start.strip()} {generated_text.strip()}'
         caption = caption.strip()
         if self.remove_tag_separators:
-            caption = caption.replace(self.thread.tag_separator, ' ')
+            caption = caption.replace(self.context.tag_separator, ' ')
         return caption
 
     def generate_caption(self, model_inputs: BatchFeature | dict | np.ndarray,

@@ -30,6 +30,7 @@ class ModelSubprocessManager:
         signature = _config_signature(caption_settings)
         if self.is_alive() and signature == self.current_signature:
             self.cancel_event.clear()
+            self.request_q.put(('update-settings', caption_settings))
             return True  # reuse the already-loaded model
 
         self.shutdown()  # kill old process -> frees all its VRAM

@@ -364,12 +364,6 @@ class AutoCaptioner(QDockWidget):
         self.model_manager = ModelSubprocessManager()
         # Ensure there are no orphaned processes on shutdown
         QApplication.instance().aboutToQuit.connect(self.model_manager.shutdown)
-
-        # self.processor = None
-        # self.model = None
-        # self.model_id: str | None = None
-        # self.model_device_type: str | None = None
-        # self.is_model_loaded_in_4_bit = None
         # Whether the last block of text in the console text edit should be
         # replaced with the next block of text that is outputted.
         self.replace_last_console_text_edit_block = False

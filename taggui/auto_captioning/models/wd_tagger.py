@@ -150,9 +150,9 @@ class WdTagger(TransformersCaptioningModel):
                          image_prompt: str) -> tuple[str, str]:
         tags, probabilities = self.model.generate_tags(model_inputs,
                                                        self.wd_tagger_settings)
-        caption = self.thread.tag_separator.join(tags)
+        caption = self.context.tag_separator.join(tags)
         if self.show_probabilities:
-            console_output_caption = self.thread.tag_separator.join(
+            console_output_caption = self.context.tag_separator.join(
                 f'{tag} ({probability:.2f})'
                 for tag, probability in zip(tags, probabilities)
             )

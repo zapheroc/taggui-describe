@@ -9,7 +9,7 @@ from transformers import (AutoModelForImageTextToText, AutoProcessor,
                           BatchFeature, BitsAndBytesConfig)
 
 from utils.image import Image
-
+from auto_captioning.worker_context import WorkerContext
 
 def _replace_template_variable(match: re.Match, image: Image) -> str:
     template_variable = match.group(0)[1:-1].lower()
@@ -24,20 +24,23 @@ class AutoCaptioningModel(ABC):
 
     # TODO: Rename captioning_thread since it is now a captioning context
     def __init__(self,
-                 captioning_thread_: 'captioning_thread.CaptioningThread',
+                 worker_context: WorkerContext,
                  caption_settings: dict):
-        self.thread = captioning_thread_
-        self.thread_parent = captioning_thread_.parent()
+        self.context = worker_context
+        self.thread_parent = worker_context.parent()
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
         self.caption_start = caption_settings['caption_start']
-        # self.load_in_4_bit = caption_settings['load_in_4_bit']
         self.processor = None
         self.model = None
         self.tokenizer = None
         # Set a default device string that will be overridden by transformers
         self.device = "cuda"
+
+    def update_caption_settings(self, caption_settings: dict):
+        self.prompt = caption_settings['prompt']
+        self.caption_start = caption_settings['caption_start']
 
     def get_input_text(self, image_prompt: str) -> str:
         if image_prompt and self.caption_start:
@@ -94,7 +97,7 @@ class AutoCaptioningModel(ABC):
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-        self.thread.clear_console_text_edit_requested.emit()
+        self.context.clear_console_text_edit_requested.emit()
 
 
     def get_additional_error_message(self) -> str | None:

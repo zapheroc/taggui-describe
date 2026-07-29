@@ -77,7 +77,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         # Clear the memory from the model
         super().clear_model_memory()
         print(f'Loading {self.model_id}...')
-        models_directory_path = self.thread.models_directory_path
+        # models_directory_path = self.context.models_directory_path
 
         # TODO: Add custom directory support
         
