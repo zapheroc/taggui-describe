@@ -96,7 +96,6 @@ class CaptioningThread(QThread):
 
         def log(text):
             self.write(text)   # emits text_outputted -> console
-        # TODO: Settings are only passed in on thread creation, meaning prompts don't get updated
         loaded = manager.ensure_model(
             self.caption_settings, self.models_directory_path, self.tag_separator,
             log=log,

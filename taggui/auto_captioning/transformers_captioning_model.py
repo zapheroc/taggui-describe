@@ -44,7 +44,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
 
-    def update_caption_settings(caption_settings: dict):
+    def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
@@ -119,18 +119,8 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         model = self.thread_parent.model
         # Only GPUs support 4-bit quantization.
         self.load_in_4_bit = self.load_in_4_bit and self.device.type == 'cuda'
-        # TODO: No longer needed since this code will only run once in the subprocess
-        if (model and self.thread_parent.model_id == self.model_id
-                and (self.thread_parent.model_device_type
-                     == self.device.type)
-                and (self.thread_parent.is_model_loaded_in_4_bit
-                     == self.load_in_4_bit)):
-            self.processor = processor
-            self.model = model
-            return
         # Load the new processor and model.
-        # TODO: No longer needed, remove
-        super().clear_model_memory()
+        # TODO: Not sure if this request is working because it happens in a subprocess...
         self.context.clear_console_text_edit_requested.emit()
         print(f'Loading {self.model_id}...')
         self.processor = self.get_processor()

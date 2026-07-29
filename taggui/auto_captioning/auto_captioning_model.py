@@ -22,7 +22,6 @@ def _replace_template_variable(match: re.Match, image: Image) -> str:
 
 class AutoCaptioningModel(ABC):
 
-    # TODO: Rename captioning_thread since it is now a captioning context
     def __init__(self,
                  worker_context: WorkerContext,
                  caption_settings: dict):
@@ -57,47 +56,6 @@ class AutoCaptioningModel(ABC):
         # Unescape escaped curly braces.
         text = re.sub(r'\\([{}])', r'\1', text)
         return text
-
-    # TODO: Models no longer need to clear their memory
-    def clear_model_memory(self):
-        
-        if self.thread_parent.model:
-            print(f'Unloading {self.model_id}...')
-            model = self.thread_parent.model
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            # Case 1: Hugging Face transformers model
-            if hasattr(model, "cpu") and callable(getattr(model, "cpu")):
-                try:
-                    model.cpu()          # ← UNCOMMENT THIS — it's the key step!
-                    print("Moved model to CPU.")
-                except Exception as e:
-                    print(f"Could not move to CPU: {e}")
-
-            # Case 2: llama-cpp-python model
-            elif hasattr(model, "model") and hasattr(model, "ctx"):
-                try:
-                    if hasattr(model, "close"):
-                        model.close()
-                    print("Closed Llama cpp model context.")
-                except Exception as e:
-                    print(f"Could not close Llama context: {e}")
-
-            # Clear references
-            self.thread_parent.processor = None
-            self.thread_parent.model = None
-            del model
-            gc.collect()
-            gc.collect()
-            gc.collect()
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-
-        self.context.clear_console_text_edit_requested.emit()
 
 
     def get_additional_error_message(self) -> str | None:
@@ -144,7 +102,6 @@ class AutoCaptioningModel(ABC):
     def load_processor_and_model(self):
         pass
 
-    # TODO: Need to make this abstract to support llama-cpp-python.
     @abstractmethod
     def get_model_inputs(self, image_prompt: str,
                          image: Image) -> BatchFeature | dict | np.ndarray:

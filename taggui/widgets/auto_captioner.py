@@ -167,7 +167,7 @@ class CaptionSettingsForm(QVBoxLayout):
         self.min_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
             key='min_new_tokens', default=1, minimum=1, maximum=999)
         self.max_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_new_tokens', default=100, minimum=1, maximum=999)
+            key='max_new_tokens', default=1024, minimum=1, maximum=2048)
         self.beam_count_spin_box = FocusedScrollSettingsSpinBox(
             key='num_beams', default=1, minimum=1, maximum=99)
         self.length_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(

@@ -9,6 +9,7 @@ from llama_cpp.llama_chat_format import Gemma4ChatHandler
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 
+# TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
     """Encode an image file as a base64 data URI for the chat handler."""
     mime = 'image/jpeg'
@@ -68,23 +69,16 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def load_processor_and_model(self):
         processor = self.thread_parent.processor
         model = self.thread_parent.model
-        # TODO: We don't have to check for the model being loaded since subprocess manager handles that
-        # The model is already loaded, don't load it again
-        if (model and self.model_id == self.thread_parent.model_id):
-            self.processor = processor
-            self.model = model
-            return
-        # Clear the memory from the model
-        super().clear_model_memory()
+        # We don't have to check for the model being loaded since subprocess manager handles that
         print(f'Loading {self.model_id}...')
-        # models_directory_path = self.context.models_directory_path
 
         # TODO: Add custom directory support
         
         # TODO: Get the repo-id and filename from the child classes overrides
 
+        # TODO: The chat handler should be created in the subclass
         self.processor = Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(),filename=self.get_vision_file_name())        
-        llm = Llama.from_pretrained(
+        self.model = Llama.from_pretrained(
             repo_id=self.get_model_repo_id(),
             filename=self.get_model_file_name(),
             chat_handler=self.processor,
@@ -96,7 +90,6 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             type_k=8,
             type_v=8,
         )
-        self.model = llm
         self.thread_parent.processor = self.processor
         self.thread_parent.model = self.model
         self.thread_parent.model_id = self.model_id
