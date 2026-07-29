@@ -5,7 +5,6 @@ import numpy as np
 from datetime import datetime
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Gemma4ChatHandler
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 
@@ -25,17 +24,7 @@ def image_to_data_uri(image_path: Path) -> str:
     data = base64.b64encode(image_path.read_bytes()).decode('utf-8')
     return f'data:{mime};base64,{data}'
 
-@staticmethod
-def get_model_repo_id() -> str:
-    raise NotImplementedError("The model repo id must be overidden in a child class")
 
-@staticmethod
-def get_model_file_name() -> str:
-    raise NotImplementedError("The model file must be overidden in a child class")
-
-@staticmethod
-def get_vision_file_name() -> str:
-    raise NotImplementedError("The vision file must be overidden in a child class")
 
 class LlamaCaptioningModel(AutoCaptioningModel):
 
@@ -43,6 +32,21 @@ class LlamaCaptioningModel(AutoCaptioningModel):
                  captioning_thread_: 'captioning_thread.CaptioningThread',
                  caption_settings: dict):
         super().__init__(captioning_thread_, caption_settings)
+
+    @staticmethod
+    def get_model_repo_id() -> str:
+        raise NotImplementedError("The model repo id must be overidden in a child class")
+
+    @staticmethod
+    def get_model_file_name() -> str:
+        raise NotImplementedError("The model file must be overidden in a child class")
+
+    @staticmethod
+    def get_vision_file_name() -> str:
+        raise NotImplementedError("The vision file must be overidden in a child class")
+
+    def get_chat_handler(self) -> str:
+        raise NotImplementedError("The chat handler must be overridden in a child class")
 
     def get_error_message(self):
         pass
@@ -77,7 +81,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         # TODO: Get the repo-id and filename from the child classes overrides
 
         # TODO: The chat handler should be created in the subclass
-        self.processor = Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(),filename=self.get_vision_file_name())        
+        self.processor = self.get_chat_handler()     
         self.model = Llama.from_pretrained(
             repo_id=self.get_model_repo_id(),
             filename=self.get_model_file_name(),
