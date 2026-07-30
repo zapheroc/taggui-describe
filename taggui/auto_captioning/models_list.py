@@ -50,7 +50,7 @@ MODELS = [
     'Salesforce/blip2-flan-t5-xl',
     'Salesforce/blip2-flan-t5-xxl',
     'microsoft/kosmos-2-patch14-224',
-    'google/gemma-4-31B'
+    'llmfan46/gemma-4-31B-it-uncensored-heretic'
 ]
 
 

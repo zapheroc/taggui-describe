@@ -266,6 +266,7 @@ class CaptionSettingsForm(QVBoxLayout):
 
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
+        # TODO: Need to show and hide llama-cpp settings here
         wd_tagger_widgets = [self.wd_tagger_settings_form_container]
         non_wd_tagger_widgets = [
             self.prompt_label,
