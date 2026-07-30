@@ -25,5 +25,8 @@ class Gemma4(LlamaCaptioningModel):
     def get_vision_file_name() -> str:
         return 'gemma-4-31B-it-mmproj-BF16.gguf'
 
-    def get_chat_handler(self):
-        return Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(), filename=self.get_vision_file_name())   
+    def get_chat_handler(self, models_directory_path):
+        if models_directory_path:
+            vision_path = models_directory_path / self.get_vision_file_name()
+            return Gemma4ChatHandler(clip_model_path=str(vision_path))
+        return Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(), filename=self.get_vision_file_name())

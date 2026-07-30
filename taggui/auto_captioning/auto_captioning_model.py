@@ -56,7 +56,6 @@ class AutoCaptioningModel(ABC):
         text = re.sub(r'\\([{}])', r'\1', text)
         return text
 
-
     def get_additional_error_message(self) -> str | None:
         return None
 

@@ -58,7 +58,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def get_vision_file_name() -> str:
         raise NotImplementedError("The vision file must be overidden in a child class")
 
-    def get_chat_handler(self) -> str:
+    def get_chat_handler(self, models_directory_path: str):
         raise NotImplementedError("The chat handler must be overridden in a child class")
 
     def get_error_message(self):
@@ -84,27 +84,36 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         return message
 
     def load_processor_and_model(self):
-        # We don't have to check for the model being loaded since subprocess manager handles that
         print(f'Loading {self.model_id}...')
-
-        # TODO: Add custom directory support
-
-        # TODO: Get the repo-id and filename from the child classes overrides
-
-        # TODO: The chat handler should be created in the subclass
-        self.processor = self.get_chat_handler()
-        self.model = Llama.from_pretrained(
-            repo_id=self.get_model_repo_id(),
-            filename=self.get_model_file_name(),
-            chat_handler=self.processor,
-            n_ctx=2048,
-            n_gpu_layers=-1,
-            logits_all=False,
-            flash_attn=True,
-            verbose=False,
-            type_k=8,
-            type_v=8,
-        )
+        models_directory_path = self.context.models_directory_path
+        self.processor = self.get_chat_handler(models_directory_path)
+        if models_directory_path:
+            model_path = models_directory_path / self.get_model_file_name()
+            self.model = Llama(
+                model_path=str(model_path),
+                chat_handler=self.processor,
+                n_ctx=2048,
+                n_gpu_layers=-1,
+                # logits_all=False,
+                flash_attn=True,
+                verbose=False,
+                type_k=8,
+                type_v=8,
+            )
+        else:
+            self.model = Llama.from_pretrained(
+                repo_id=self.get_model_repo_id(),
+                filename=self.get_model_file_name(),
+                chat_handler=self.processor,
+                n_ctx=2048,
+                n_gpu_layers=-1,
+                # logits_all=False,
+                flash_attn=True,
+                verbose=False,
+                type_k=8,
+                type_v=8,
+            )
+        # TODO: Are these relevant with thread parent deprecated?
         self.thread_parent.processor = self.processor
         self.thread_parent.model = self.model
         self.thread_parent.model_id = self.model_id
