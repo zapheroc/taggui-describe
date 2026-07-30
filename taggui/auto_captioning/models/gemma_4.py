@@ -1,7 +1,13 @@
 from auto_captioning.llama_captioning_model import LlamaCaptioningModel
 from llama_cpp.llama_chat_format import Gemma4ChatHandler
+from auto_captioning.worker_context import WorkerContext
 
 class Gemma4(LlamaCaptioningModel):
+
+    def __init__(self,
+                 worker_context: WorkerContext,
+                 caption_settings: dict):
+        super().__init__(worker_context, caption_settings)
 
     @staticmethod
     def get_default_prompt() -> str:
@@ -20,4 +26,4 @@ class Gemma4(LlamaCaptioningModel):
         return 'gemma-4-31B-it-mmproj-BF16.gguf'
 
     def get_chat_handler(self):
-        Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(), filename=self.get_vision_file_name())   
+        return Gemma4ChatHandler.from_pretrained(repo_id=self.get_model_repo_id(), filename=self.get_vision_file_name())   

@@ -4,15 +4,15 @@ from transformers import AutoModelForCausalLM, BatchFeature
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
-
+from auto_captioning.worker_context import WorkerContext
 
 class Phi3Vision(TransformersCaptioningModel):
     transformers_model_class = AutoModelForCausalLM
 
     def __init__(self,
-                 captioning_thread_: 'captioning_thread.CaptioningThread',
+                 worker_context: WorkerContext,
                  caption_settings: dict):
-        super().__init__(captioning_thread_, caption_settings)
+        super().__init__(worker_context, caption_settings)
         self.input_length = None
 
     @staticmethod

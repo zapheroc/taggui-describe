@@ -15,6 +15,7 @@ import auto_captioning.captioning_thread as captioning_thread
 from utils.enums import CaptionDevice
 from utils.image import Image
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.worker_context import WorkerContext
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
@@ -27,9 +28,9 @@ class TransformersCaptioningModel(AutoCaptioningModel):
     image_mode = 'RGB'
 
     def __init__(self,
-                 captioning_thread_: 'captioning_thread.CaptioningThread',
+                 worker_context: WorkerContext,
                  caption_settings: dict):
-        super().__init__(captioning_thread_, caption_settings)
+        super().__init__(worker_context, caption_settings)
         self.device_setting: CaptionDevice = caption_settings['device']
         self.device: torch.device = self._get_device()
         if self.dtype == torch.bfloat16:

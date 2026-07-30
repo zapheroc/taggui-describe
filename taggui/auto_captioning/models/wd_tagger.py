@@ -13,6 +13,7 @@ from onnxruntime import InferenceSession
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
+from auto_captioning.worker_context import WorkerContext
 
 KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
             '>_<', '3_3', '6_9', '>_o', '@_@', '^_^', 'o_o', 'u_u', 'x_x',
@@ -93,9 +94,9 @@ class WdTagger(TransformersCaptioningModel):
     image_mode = 'RGBA'
 
     def __init__(self,
-                 captioning_thread_: 'captioning_thread.CaptioningThread',
+                 worker_context: WorkerContext,
                  caption_settings: dict):
-        super().__init__(captioning_thread_, caption_settings)
+        super().__init__(worker_context, caption_settings)
         self.wd_tagger_settings = self.caption_settings['wd_tagger_settings']
         self.show_probabilities = self.wd_tagger_settings['show_probabilities']
 

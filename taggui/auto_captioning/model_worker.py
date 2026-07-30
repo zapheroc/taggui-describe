@@ -29,7 +29,7 @@ def run_worker(request_q, response_q, caption_settings,
 
         ctx = WorkerContext(models_directory_path, tag_separator, cancel_event)
         model_class = get_model_class(caption_settings['model_id'])
-        model = model_class(captioning_thread_=ctx,
+        model = model_class(worker_context=ctx,
                             caption_settings=caption_settings)
 
         error_message = model.get_error_message()

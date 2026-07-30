@@ -7,6 +7,7 @@ from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
+from auto_captioning.worker_context import WorkerContext
 
 # TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
@@ -29,9 +30,9 @@ def image_to_data_uri(image_path: Path) -> str:
 class LlamaCaptioningModel(AutoCaptioningModel):
 
     def __init__(self,
-                 captioning_thread_: 'captioning_thread.CaptioningThread',
+                 worker_context: WorkerContext,
                  caption_settings: dict):
-        super().__init__(captioning_thread_, caption_settings)
+        super().__init__(worker_context, caption_settings)
 
     @staticmethod
     def get_model_repo_id() -> str:
@@ -81,7 +82,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         # TODO: Get the repo-id and filename from the child classes overrides
 
         # TODO: The chat handler should be created in the subclass
-        self.processor = self.get_chat_handler()     
+        self.processor = self.get_chat_handler()
         self.model = Llama.from_pretrained(
             repo_id=self.get_model_repo_id(),
             filename=self.get_model_file_name(),
