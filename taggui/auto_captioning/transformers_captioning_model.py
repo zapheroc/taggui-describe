@@ -39,7 +39,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.load_in_4_bit = caption_settings['load_in_4_bit']
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
-        self.remove_tag_separators = caption_settings['remove_tag_separators']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
 
@@ -47,7 +46,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         super().update_caption_settings(caption_settings)
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
-        self.remove_tag_separators = caption_settings['remove_tag_separators']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
 
