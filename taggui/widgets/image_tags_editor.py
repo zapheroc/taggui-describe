@@ -3,7 +3,7 @@ from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCompleter, QDockWidget,
                                QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget, QTextEdit)
+                               QVBoxLayout, QWidget, QTextEdit, QSplitter)
 from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -167,15 +167,29 @@ class ImageTagsEditor(QDockWidget):
         self.description_save_timer.timeout.connect(self.save_image_description)
         self.description_editor.textChanged.connect(self.on_description_changed)
 
-
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
-        layout.addWidget(self.image_tags_list)
-        layout.addWidget(self.token_count_label)
-        layout.addWidget(self.description_label)
-        layout.addWidget(self.description_editor)
+        # Small container for the tags list
+        tags_widget = QWidget()
+        tags_layout = QVBoxLayout(tags_widget)
+        tags_layout.setContentsMargins(0, 0, 0, 0)
+        tags_layout.addWidget(self.image_tags_list)
+        tags_layout.addWidget(self.token_count_label)
+        # Small container for the description box
+        description_widget = QWidget()
+        description_layout = QVBoxLayout(description_widget)
+        description_layout.setContentsMargins(0, 0, 0, 0)
+        description_layout.addWidget(self.description_label)
+        description_layout.addWidget(self.description_editor)
+        # Put both sections in a resizable splitter.
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(tags_widget)
+        splitter.addWidget(description_widget)
+        # Prevent a section from being collapsed to zero.
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter)
         self.setWidget(container)
 
         # When a tag is added, select it and scroll to the bottom of the list.
