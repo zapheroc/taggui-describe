@@ -164,14 +164,16 @@ class CaptionSettingsForm(QVBoxLayout):
                                      self.bad_words_line_edit)
         bad_forced_words_form.addRow('Include in caption',
                                      self.forced_words_line_edit)
+        # TODO: Show and hide some of these that are transformers / llama-cpp-python specific
         self.min_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
             key='min_new_tokens', default=1, minimum=1, maximum=999)
         self.max_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_new_tokens', default=1024, minimum=1, maximum=2048)
+            key='max_new_tokens', default=512, minimum=1, maximum=2048)
         self.beam_count_spin_box = FocusedScrollSettingsSpinBox(
             key='num_beams', default=1, minimum=1, maximum=99)
         self.length_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='length_penalty', default=1, minimum=-5, maximum=5)
+        # TODO: Add seed parameter for reproducible results
         self.length_penalty_spin_box.setSingleStep(0.1)
         self.use_sampling_check_box = SettingsBigCheckBox(key='do_sample',
                                                           default=False)
@@ -180,9 +182,9 @@ class CaptionSettingsForm(QVBoxLayout):
             key='temperature', default=1, minimum=0.01, maximum=2)
         self.temperature_spin_box.setSingleStep(0.01)
         self.top_k_spin_box = FocusedScrollSettingsSpinBox(
-            key='top_k', default=50, minimum=0, maximum=200)
+            key='top_k', default=64, minimum=0, maximum=200)
         self.top_p_spin_box = FocusedScrollSettingsDoubleSpinBox(
-            key='top_p', default=1, minimum=0, maximum=1)
+            key='top_p', default=0.95, minimum=0, maximum=1)
         self.top_p_spin_box.setSingleStep(0.01)
         self.repetition_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='repetition_penalty', default=1, minimum=1, maximum=2)

@@ -1,13 +1,11 @@
 import base64
-import sys
 from pathlib import Path
 import numpy as np
-from datetime import datetime
-from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
+
 
 # TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
@@ -26,13 +24,27 @@ def image_to_data_uri(image_path: Path) -> str:
     return f'data:{mime};base64,{data}'
 
 
-
 class LlamaCaptioningModel(AutoCaptioningModel):
 
     def __init__(self,
                  worker_context: WorkerContext,
                  caption_settings: dict):
         super().__init__(worker_context, caption_settings)
+        generation_params = caption_settings['generation_parameters']
+        self.max_tokens = generation_params['max_new_tokens']
+        self.temperature = generation_params['temperature']
+        self.top_k = generation_params['top_k']
+        self.top_p = generation_params['top_p']
+        self.repeat_penalty = generation_params['repetition_penalty']
+
+    def update_caption_settings(self, caption_settings: dict):
+        super().update_caption_settings(caption_settings)
+        generation_params = caption_settings['generation_parameters']
+        self.max_tokens = generation_params['max_new_tokens']
+        self.temperature = generation_params['temperature']
+        self.top_k = generation_params['top_k']
+        self.top_p = generation_params['top_p']
+        self.repeat_penalty = generation_params['repetition_penalty']
 
     @staticmethod
     def get_model_repo_id() -> str:
@@ -57,28 +69,26 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         # Parse the image input text
         text = self.get_input_text(image_prompt)
         user_content = [
-            {'type': 'image_url',
-            'image_url': {'url': image_to_data_uri(Path(image.path))}
+            {
+                'type': 'image_url', 'image_url': {'url': image_to_data_uri(Path(image.path))}
             },
             {'type': 'text', 'text': text}
-        ]  
+        ]
         # TODO: Allow config of system prompt
         message = [
-            {'role': 'system',
-            'content': 'You are a helpful image captioner.'},
+            {
+                'role': 'system', 'content': 'You are a helpful image captioner.'
+            },
             {'role': 'user', 'content': user_content},
         ]
         return message
 
-
     def load_processor_and_model(self):
-        processor = self.thread_parent.processor
-        model = self.thread_parent.model
         # We don't have to check for the model being loaded since subprocess manager handles that
         print(f'Loading {self.model_id}...')
 
         # TODO: Add custom directory support
-        
+
         # TODO: Get the repo-id and filename from the child classes overrides
 
         # TODO: The chat handler should be created in the subclass
@@ -99,13 +109,15 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         self.thread_parent.model = self.model
         self.thread_parent.model_id = self.model_id
 
-
     def generate_caption(self, model_inputs: dict | np.ndarray,
                          image_prompt: str) -> tuple[str, str]:
         response = self.model.create_chat_completion(
             messages=model_inputs,
-            max_tokens=2048,
-            temperature=0.4,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            repeat_penalty=self.repeat_penalty
         )
         caption = response['choices'][0]['message']['content'].strip()
         return caption, caption

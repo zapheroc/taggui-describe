@@ -2,16 +2,12 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from PIL import UnidentifiedImageError
 from PySide6.QtCore import QModelIndex, QThread, Qt, Signal
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
-
-from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
-from utils.image import Image
 from utils.settings import get_tag_separator
+
 
 def add_caption_to_description(description: str, caption: str,
                                caption_position: CaptionPosition) -> str:
@@ -151,7 +147,6 @@ class CaptioningThread(QThread):
                   f'{format_duration(total_captioning_duration)} '
                   f'({average_captioning_duration:.1f} s/image) at '
                   f'{captioning_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
-
 
     def run(self):
         try:

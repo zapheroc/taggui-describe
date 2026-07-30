@@ -8,11 +8,14 @@ class _QueueWriter:
     """Redirects stdout/stderr into the response queue as log messages."""
     def __init__(self, queue):
         self._queue = queue
+
     def write(self, text):
         if text:
             self._queue.put(('log', text))
+
     def flush(self):
         pass
+
     def isatty(self):
         return False
 

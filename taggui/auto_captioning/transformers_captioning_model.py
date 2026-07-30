@@ -1,7 +1,5 @@
-import gc
-# import re
+import re
 from contextlib import nullcontext
-from datetime import datetime
 
 import numpy as np
 import torch
@@ -11,11 +9,11 @@ from transformers import (AutoModelForImageTextToText, AutoProcessor,
                           BatchFeature, BitsAndBytesConfig)
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
-import auto_captioning.captioning_thread as captioning_thread
 from utils.enums import CaptionDevice
 from utils.image import Image
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.worker_context import WorkerContext
+
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
@@ -52,7 +50,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.remove_tag_separators = caption_settings['remove_tag_separators']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
-    
+
     def _get_device(self) -> torch.device:
         if (self.device_setting == CaptionDevice.GPU
                 and torch.cuda.is_available()):
@@ -115,9 +113,6 @@ class TransformersCaptioningModel(AutoCaptioningModel):
                          / 'selected_tags.csv')
             if config_path.is_file() or tags_path.is_file():
                 self.model_id = str(models_directory_path / self.model_id)
-        # If the processor and model were previously loaded, use them.
-        processor = self.thread_parent.processor
-        model = self.thread_parent.model
         # Only GPUs support 4-bit quantization.
         self.load_in_4_bit = self.load_in_4_bit and self.device.type == 'cuda'
         # Load the new processor and model.

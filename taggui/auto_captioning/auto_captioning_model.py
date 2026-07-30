@@ -1,15 +1,12 @@
-import gc
 import re
-import torch
-from datetime import datetime
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 import numpy as np
-from transformers import (AutoModelForImageTextToText, AutoProcessor,
-                          BatchFeature, BitsAndBytesConfig)
-
-from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
+from transformers import BatchFeature
+from utils.image import Image
+
 
 def _replace_template_variable(match: re.Match, image: Image) -> str:
     template_variable = match.group(0)[1:-1].lower()
@@ -19,6 +16,7 @@ def _replace_template_variable(match: re.Match, image: Image) -> str:
         return image.path.stem
     if template_variable in ('directory', 'folder'):
         return image.path.parent.name
+
 
 class AutoCaptioningModel(ABC):
 
@@ -31,6 +29,7 @@ class AutoCaptioningModel(ABC):
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
         self.caption_start = caption_settings['caption_start']
+        # TODO: May not need these variables anymore
         self.processor = None
         self.model = None
         self.tokenizer = None
@@ -52,7 +51,7 @@ class AutoCaptioningModel(ABC):
     def replace_template_variables(text: str, image: Image) -> str:
         # Replace template variables inside curly braces that are not escaped.
         text = re.sub(r'(?<!\\){[^{}]+(?<!\\)}',
-                    lambda match: _replace_template_variable(match, image), text)
+                        lambda match: _replace_template_variable(match, image), text)
         # Unescape escaped curly braces.
         text = re.sub(r'\\([{}])', r'\1', text)
         return text
