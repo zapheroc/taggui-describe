@@ -6,6 +6,7 @@ import numpy as np
 from auto_captioning.worker_context import WorkerContext
 from transformers import BatchFeature
 from utils.image import Image
+from auto_captioning.settings_group import SettingGroup
 
 
 def _replace_template_variable(match: re.Match, image: Image) -> str:
@@ -36,6 +37,16 @@ class AutoCaptioningModel(ABC):
         self.tokenizer = None
         # Set a default device string that will be overridden by transformers
         self.device = "cuda"
+
+    @classmethod
+    def get_setting_groups(cls) -> set[SettingGroup]:
+        # Backends declare their own. Default to the universally-shared rows.
+        return {
+            # TODO decide the group of config items that are shared by all
+            SettingGroup.PROMPT,
+            SettingGroup.CAPTION_START,
+            SettingGroup.REMOVE_TAG_SEPARATORS,
+        }
 
     def update_caption_settings(self, caption_settings: dict):
         self.prompt = caption_settings['prompt']

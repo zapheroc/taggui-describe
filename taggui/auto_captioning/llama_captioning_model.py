@@ -5,7 +5,7 @@ from llama_cpp import Llama
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
-
+from auto_captioning.settings_group import SettingGroup
 
 # TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
@@ -36,6 +36,15 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         self.top_k = generation_params['top_k']
         self.top_p = generation_params['top_p']
         self.repeat_penalty = generation_params['repetition_penalty']
+
+    @classmethod
+    def get_setting_groups(cls) -> set[SettingGroup]:
+        # TODO configure these groups
+        return super().get_setting_groups() | {
+            SettingGroup.LLAMA_MAX_TOKENS,
+            SettingGroup.SAMPLING,          # reuse the same temperature/top_k/top_p rows
+            SettingGroup.REPETITION_PENALTY,
+        }
 
     def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)

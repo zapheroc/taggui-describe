@@ -13,7 +13,7 @@ from utils.enums import CaptionDevice
 from utils.image import Image
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.worker_context import WorkerContext
-
+from auto_captioning.settings_group import SettingGroup
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
@@ -41,6 +41,21 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.forced_words_string = caption_settings['forced_words']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
+
+    @classmethod
+    def get_setting_groups(cls) -> set[SettingGroup]:
+        # TODO: Setup the groups here
+        return super().get_setting_groups() | {
+            SettingGroup.DEVICE,            # device combo (drives load_in_4_bit)
+            SettingGroup.GPU_INDEX,
+            SettingGroup.BAD_FORCED_WORDS,  # get_bad_words_ids / get_forced_words_ids
+            SettingGroup.MIN_MAX_TOKENS,
+            SettingGroup.NUM_BEAMS,         # self.beam_count
+            SettingGroup.LENGTH_PENALTY,
+            SettingGroup.SAMPLING,          # do_sample, temperature, top_k, top_p
+            SettingGroup.REPETITION_PENALTY,
+            SettingGroup.NO_REPEAT_NGRAM,
+        }
 
     def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)
