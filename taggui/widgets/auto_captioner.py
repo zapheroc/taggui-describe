@@ -133,7 +133,7 @@ class CaptionSettingsForm(QVBoxLayout):
         self.load_in_4_bit_check_box = SettingsBigCheckBox(
             key='load_in_4_bit', default=True)
         self.load_in_4_bit_container = self._register(self.basic_settings_form, 'Load in 4-bit (requires bitsandbytes)',
-                                                      self.load_in_4_bit_check_box, {SettingGroup.DEVICE}, label_position=LabelPosition.BESIDE)
+                                                      self.load_in_4_bit_check_box, {SettingGroup.LOAD_IN_4_BIT}, label_position=LabelPosition.BESIDE)
 
         # WD Tagger settings — built as a sub-form, registered as one composite.
         self.wd_tagger_settings_form = QFormLayout()
@@ -195,12 +195,12 @@ class CaptionSettingsForm(QVBoxLayout):
         # Banned words
         self.bad_words_line_edit = SettingsLineEdit(key='bad_words')
         self._register(self.advanced_settings_form, 'Discourage from caption',
-                       self.bad_words_line_edit, {SettingGroup.BAD_FORCED_WORDS}, label_position=LabelPosition.ABOVE)
+                       self.bad_words_line_edit, {SettingGroup.DISCOURAGED_WORDS}, label_position=LabelPosition.ABOVE)
 
         # Forced words
         self.forced_words_line_edit = SettingsLineEdit(key='forced_words')
         self._register(self.advanced_settings_form, 'Include in caption',
-                       self.forced_words_line_edit, {SettingGroup.BAD_FORCED_WORDS}, label_position=LabelPosition.ABOVE)
+                       self.forced_words_line_edit, {SettingGroup.FORCED_WORDS}, label_position=LabelPosition.ABOVE)
 
         # Add seperator line
         self.advanced_settings_form.addRow(HorizontalLine())
@@ -210,13 +210,13 @@ class CaptionSettingsForm(QVBoxLayout):
             key='min_new_tokens', default=1, minimum=1, maximum=4096)
         self._register(self.advanced_settings_form, 'Minimum tokens',
                        self.min_new_tokens_spin_box,
-                       {SettingGroup.MIN_MAX_TOKENS}, is_advanced=True)
+                       {SettingGroup.MIN_TOKENS}, is_advanced=True)
 
         self.max_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='max_new_tokens', default=512, minimum=1, maximum=4096)
         self._register(self.advanced_settings_form, 'Maximum tokens',
                        self.max_new_tokens_spin_box,
-                       {SettingGroup.MIN_MAX_TOKENS}, is_advanced=True)
+                       {SettingGroup.MAX_TOKENS}, is_advanced=True)
 
         # Number of beams.
         self.num_beams_spin_box = FocusedScrollSettingsSpinBox(
@@ -238,27 +238,27 @@ class CaptionSettingsForm(QVBoxLayout):
             key='do_sample', default=False)
         self._register(self.advanced_settings_form, 'Use sampling',
                        self.use_sampling_check_box,
-                       {SettingGroup.SAMPLING}, is_advanced=True)
+                       {SettingGroup.USE_SAMPLING}, is_advanced=True)
 
         self.temperature_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='temperature', default=1, minimum=0.01, maximum=2)
         self.temperature_spin_box.setSingleStep(0.01)
         self._register(self.advanced_settings_form, 'Temperature',
                        self.temperature_spin_box,
-                       {SettingGroup.SAMPLING}, is_advanced=True)
+                       {SettingGroup.TEMPERATURE}, is_advanced=True)
 
         self.top_k_spin_box = FocusedScrollSettingsSpinBox(
             key='top_k', default=64, minimum=0, maximum=200)
         self._register(self.advanced_settings_form, 'Top-k',
                        self.top_k_spin_box,
-                       {SettingGroup.SAMPLING}, is_advanced=True)
+                       {SettingGroup.TOP_K}, is_advanced=True)
 
         self.top_p_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='top_p', default=0.95, minimum=0, maximum=1)
         self.top_p_spin_box.setSingleStep(0.01)
         self._register(self.advanced_settings_form, 'Top-p',
                        self.top_p_spin_box,
-                       {SettingGroup.SAMPLING}, is_advanced=True)
+                       {SettingGroup.TOP_P}, is_advanced=True)
 
         # Repetition penalty — shared by transformers and llama.
         self.repetition_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
@@ -276,7 +276,7 @@ class CaptionSettingsForm(QVBoxLayout):
                        {SettingGroup.NO_REPEAT_NGRAM}, is_advanced=True)
 
         # Add seperator line
-        self.advanced_settings_form.addRow(HorizontalLine())
+        self._register(self.advanced_settings_form, None, HorizontalLine(), {SettingGroup.GPU_INDEX}, is_advanced=True)
 
         # GPU index.
         self.gpu_index_spin_box = FocusedScrollSettingsSpinBox(
@@ -323,6 +323,7 @@ class CaptionSettingsForm(QVBoxLayout):
         container.setLayout(layout)
         return container
 
+    # TODO: Use the label from the enum value
     def _register(self, form: QFormLayout, label: str | None, field: QWidget,
                   groups: set[SettingGroup], is_advanced: bool = False,
                   label_position: LabelPosition = LabelPosition.DEFAULT):
@@ -419,7 +420,7 @@ class CaptionSettingsForm(QVBoxLayout):
             self.basic_settings_form.setRowVisible(
                 self.load_in_4_bit_container, False)
             return
-        visible = (SettingGroup.DEVICE in active_groups
+        visible = (SettingGroup.LOAD_IN_4_BIT in active_groups
                    and device == CaptionDevice.GPU
                    and BITSANDBYTES_AVAILABLE)
         self.basic_settings_form.setRowVisible(

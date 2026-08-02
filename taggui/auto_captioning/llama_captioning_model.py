@@ -41,8 +41,10 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def get_setting_groups(cls) -> set[SettingGroup]:
         # TODO configure these groups
         return super().get_setting_groups() | {
-            SettingGroup.LLAMA_MAX_TOKENS,
-            SettingGroup.SAMPLING,          # reuse the same temperature/top_k/top_p rows
+            SettingGroup.MAX_TOKENS,
+            SettingGroup.TEMPERATURE,
+            SettingGroup.TOP_K,
+            SettingGroup.TOP_P,
             SettingGroup.REPETITION_PENALTY,
         }
 

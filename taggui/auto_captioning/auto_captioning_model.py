@@ -35,8 +35,6 @@ class AutoCaptioningModel(ABC):
         self.processor = None
         self.model = None
         self.tokenizer = None
-        # Set a default device string that will be overridden by transformers
-        self.device = "cuda"
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:

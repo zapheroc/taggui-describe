@@ -29,6 +29,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
                  worker_context: WorkerContext,
                  caption_settings: dict):
         super().__init__(worker_context, caption_settings)
+        # TODO: Add device setting option to llama-cpp
         self.device_setting: CaptionDevice = caption_settings['device']
         self.device: torch.device = self._get_device()
         if self.dtype == torch.bfloat16:
@@ -46,15 +47,20 @@ class TransformersCaptioningModel(AutoCaptioningModel):
     def get_setting_groups(cls) -> set[SettingGroup]:
         # TODO: Setup the groups here
         return super().get_setting_groups() | {
-            SettingGroup.DEVICE,            # device combo (drives load_in_4_bit)
-            SettingGroup.GPU_INDEX,
-            SettingGroup.BAD_FORCED_WORDS,  # get_bad_words_ids / get_forced_words_ids
-            SettingGroup.MIN_MAX_TOKENS,
-            SettingGroup.NUM_BEAMS,         # self.beam_count
+            SettingGroup.DEVICE,
+            SettingGroup.DISCOURAGED_WORDS,
+            SettingGroup.FORCED_WORDS,
+            SettingGroup.MIN_TOKENS,
+            SettingGroup.MAX_TOKENS,
+            SettingGroup.NUM_BEAMS,
             SettingGroup.LENGTH_PENALTY,
-            SettingGroup.SAMPLING,          # do_sample, temperature, top_k, top_p
+            SettingGroup.USE_SAMPLING,
+            SettingGroup.TEMPERATURE,
+            SettingGroup.TOP_K,
+            SettingGroup.TOP_P,
             SettingGroup.REPETITION_PENALTY,
             SettingGroup.NO_REPEAT_NGRAM,
+            SettingGroup.GPU_INDEX,
         }
 
     def update_caption_settings(self, caption_settings: dict):
