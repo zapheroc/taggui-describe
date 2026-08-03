@@ -9,6 +9,7 @@ from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
 from auto_captioning.settings_group import SettingGroup
 
+
 # TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
     """Encode an image file as a base64 data URI for the chat handler.
