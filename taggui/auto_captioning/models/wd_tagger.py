@@ -96,7 +96,12 @@ class WdTagger(TransformersCaptioningModel):
                  worker_context: WorkerContext,
                  caption_settings: dict):
         super().__init__(worker_context, caption_settings)
-        self.wd_tagger_settings = self.caption_settings['wd_tagger_settings']
+        self.wd_tagger_settings = caption_settings['wd_tagger_settings']
+        self.show_probabilities = self.wd_tagger_settings['show_probabilities']
+
+    def update_caption_settings(self, caption_settings: dict):
+        super().update_caption_settings(caption_settings)
+        self.wd_tagger_settings = caption_settings['wd_tagger_settings']
         self.show_probabilities = self.wd_tagger_settings['show_probabilities']
 
     @classmethod
