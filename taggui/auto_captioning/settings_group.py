@@ -15,6 +15,7 @@ class SettingGroup(Enum):
     REMOVE_TAG_SEPARATORS = ("Remove tag separators in captions", False)
     DISCOURAGED_WORDS = ("Discourage from caption", True)
     FORCED_WORDS = ("Include in caption", True)
+    SEED = ("Seed", True)
     MIN_TOKENS = ("Minimum tokens", True)
     MAX_TOKENS = ("Maximum tokens", True)
     NUM_BEAMS = ("Number of beams", True)

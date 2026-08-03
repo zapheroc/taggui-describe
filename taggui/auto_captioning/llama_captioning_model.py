@@ -59,11 +59,13 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         self.top_k = generation_params['top_k']
         self.top_p = generation_params['top_p']
         self.repeat_penalty = generation_params['repetition_penalty']
+        self.seed = caption_settings['seed']
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
         # TODO configure these groups
         return super().get_setting_groups() | {
+            SettingGroup.SEED,
             SettingGroup.MAX_TOKENS,
             SettingGroup.TEMPERATURE,
             SettingGroup.TOP_K,
@@ -79,6 +81,8 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         self.top_k = generation_params['top_k']
         self.top_p = generation_params['top_p']
         self.repeat_penalty = generation_params['repetition_penalty']
+        self.seed = caption_settings['seed']
+
 
     @staticmethod
     def get_model_repo_id() -> str:
@@ -157,7 +161,8 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             temperature=self.temperature,
             top_k=self.top_k,
             top_p=self.top_p,
-            repeat_penalty=self.repeat_penalty
+            repeat_penalty=self.repeat_penalty,
+            seed=self.seed
         )
         caption = response['choices'][0]['message']['content'].strip()
         return caption, caption

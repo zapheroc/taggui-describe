@@ -204,6 +204,13 @@ class CaptionSettingsForm(QVBoxLayout):
         # Add seperator line
         self._register(self.advanced_settings_form, HorizontalLine(), label=None, group=SettingGroup.FORCED_WORDS)
 
+        # Seed
+        self.seed_spin_box = FocusedScrollSettingsSpinBox(
+            key='min_new_tokens', default=-1, minimum=-1, maximum=2147483647)
+        self._register(self.advanced_settings_form,
+                       self.seed_spin_box,
+                       SettingGroup.SEED)
+
         # Min / max new tokens.
         self.min_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='min_new_tokens', default=1, minimum=1, maximum=4096)
@@ -297,9 +304,6 @@ class CaptionSettingsForm(QVBoxLayout):
             self.show_settings_for_model)
 
         # Initial state: advanced collapsed, correct groups for current model.
-        # show_settings_for_model computes container visibility itself, so no
-        # separate setVisible(False) is needed (and it would be immediately
-        # overwritten anyway).
         self.show_settings_for_model(self.model_combo_box.currentText())
 
     @staticmethod
@@ -457,6 +461,7 @@ class CaptionSettingsForm(QVBoxLayout):
                 self.remove_tag_separators_check_box.isChecked(),
             'bad_words': self.bad_words_line_edit.text(),
             'forced_words': self.forced_words_line_edit.text(),
+            'seed': self.seed_spin_box.value(),
             'generation_parameters': {
                 'min_new_tokens': self.min_new_tokens_spin_box.value(),
                 'max_new_tokens': self.max_new_tokens_spin_box.value(),
