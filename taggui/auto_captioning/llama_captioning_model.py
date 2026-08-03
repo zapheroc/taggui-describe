@@ -15,6 +15,7 @@ def image_to_data_uri(image_path: Path) -> str:
 
     llama-cpp-python does not support WebP, so WebP images are converted
     to PNG in-memory using PIL before encoding.
+    If llama-cpp adds support for webp this won't be necessary: https://github.com/ggml-org/llama.cpp/pull/24217
     """
     suffix = image_path.suffix.lower()
 
