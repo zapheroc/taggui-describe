@@ -1,7 +1,6 @@
 from enum import Enum
 
 
-# TODO Fix up these settings groups. I might do a 1-1 mapping of settings item here
 class SettingGroup(Enum):
     def __new__(cls, label, is_advanced):
         obj = object.__new__(cls)
@@ -11,7 +10,7 @@ class SettingGroup(Enum):
 
     PROMPT = ("Prompt", False)
     CAPTION_START = ("Start caption with", False)
-    DEVICE = ("False", False)
+    DEVICE = ("Device", False)
     LOAD_IN_4_BIT = ("Load in 4-bit (requires bitsandbytes)", False)
     REMOVE_TAG_SEPARATORS = ("Remove tag separators in captions", False)
     DISCOURAGED_WORDS = ("Discourage from caption", True)

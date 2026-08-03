@@ -45,8 +45,8 @@ class TransformersCaptioningModel(AutoCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        # TODO: Setup the groups here
         return super().get_setting_groups() | {
+            SettingGroup.LOAD_IN_4_BIT,
             SettingGroup.DEVICE,
             SettingGroup.DISCOURAGED_WORDS,
             SettingGroup.FORCED_WORDS,
@@ -102,7 +102,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
             )
             arguments['quantization_config'] = quantization_config
         if self.device.type == 'cuda':
-            arguments['torch_dtype'] = self.dtype
+            arguments['dtype'] = self.dtype
         return arguments
 
     def load_model(self, model_load_arguments: dict):
@@ -222,11 +222,11 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         generated_text = self.postprocess_generated_text(generated_text)
         if image_prompt.strip() and generated_text.startswith(image_prompt):
             caption = generated_text[len(image_prompt):]
-        elif (self.caption_start.strip()
+        elif (self.caption_start
               and generated_text.startswith(self.caption_start)):
             caption = generated_text
         else:
-            caption = f'{self.caption_start.strip()} {generated_text.strip()}'
+            caption = f'{self.caption_start} {generated_text.strip()}'
         caption = caption.strip()
         if self.remove_tag_separators:
             caption = caption.replace(self.context.tag_separator, ' ')

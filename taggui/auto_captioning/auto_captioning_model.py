@@ -29,7 +29,7 @@ class AutoCaptioningModel(ABC):
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
-        self.caption_start = caption_settings['caption_start']
+        self.caption_start = caption_settings['caption_start'].strip()
         self.remove_tag_separators = caption_settings['remove_tag_separators']
         # TODO: May not need these variables anymore
         self.processor = None
@@ -48,7 +48,7 @@ class AutoCaptioningModel(ABC):
 
     def update_caption_settings(self, caption_settings: dict):
         self.prompt = caption_settings['prompt']
-        self.caption_start = caption_settings['caption_start']
+        self.caption_start = caption_settings['caption_start'].strip()
         self.remove_tag_separators = caption_settings['remove_tag_separators']
 
     def get_input_text(self, image_prompt: str) -> str:

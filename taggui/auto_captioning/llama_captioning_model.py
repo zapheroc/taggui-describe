@@ -140,6 +140,8 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             repeat_penalty=self.repeat_penalty
         )
         caption = response['choices'][0]['message']['content'].strip()
+        if self.caption_start:
+            caption = f'{self.caption_start} {caption}'
         if self.remove_tag_separators:
             caption = caption.replace(self.context.tag_separator, ' ')
         return caption, caption

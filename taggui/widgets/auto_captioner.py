@@ -67,7 +67,7 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Registry: (owning form, field widget, groups, is_advanced)
         self.registered_rows: list[
-            tuple[QFormLayout, QWidget, set[SettingGroup], bool]] = []
+            tuple[QFormLayout, QWidget, SettingGroup, bool]] = []
         self.advanced_expanded = False
 
         # ------------------------------------------------------------------
@@ -89,36 +89,35 @@ class CaptionSettingsForm(QVBoxLayout):
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
-        self._register(self.basic_settings_form, 'Model',
-                       self.model_combo_box, groups=set())
+        self._register(self.basic_settings_form,
+                       self.model_combo_box, label='Model', group=None)
 
         # Caption position — always visible (empty group set).
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
             key='caption_position')
         self.caption_position_combo_box.addItems(list(CaptionPosition))
-        self._register(self.basic_settings_form, 'Caption position',
-                       self.caption_position_combo_box, groups=set())
+        self._register(self.basic_settings_form,
+                       self.caption_position_combo_box, label='Caption position', group=None)
 
         # Prompt.
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         set_text_edit_height(self.prompt_text_edit, 4)
-        self._register(self.basic_settings_form, 'Prompt',
-                       self.prompt_text_edit, {SettingGroup.PROMPT})
+        self._register(self.basic_settings_form,
+                       self.prompt_text_edit, SettingGroup.PROMPT)
 
         # Caption start.
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
         self.caption_start_line_edit.setClearButtonEnabled(True)
-        self._register(self.basic_settings_form, 'Start caption with',
+        self._register(self.basic_settings_form,
                        self.caption_start_line_edit,
-                       {SettingGroup.CAPTION_START})
+                       SettingGroup.CAPTION_START)
 
         # Remove tag separators.
         self.remove_tag_separators_check_box = SettingsBigCheckBox(
             key='remove_tag_separators', default=True)
         self._register(self.basic_settings_form,
-                       'Remove tag separators in captions',
                        self.remove_tag_separators_check_box,
-                       {SettingGroup.REMOVE_TAG_SEPARATORS}, label_position=LabelPosition.BESIDE)
+                       SettingGroup.REMOVE_TAG_SEPARATORS, label_position=LabelPosition.BESIDE)
         
         # Add seperator line
         self.basic_settings_form.addRow(HorizontalLine())
@@ -126,14 +125,14 @@ class CaptionSettingsForm(QVBoxLayout):
         # Device.
         self.device_combo_box = FocusedScrollSettingsComboBox(key='device')
         self.device_combo_box.addItems(list(CaptionDevice))
-        self._register(self.basic_settings_form, 'Device',
-                       self.device_combo_box, {SettingGroup.DEVICE})
+        self._register(self.basic_settings_form,
+                       self.device_combo_box, SettingGroup.DEVICE)
 
         # Load in 4-bit — arrives as its own layout, so wrap it in a widget.
         self.load_in_4_bit_check_box = SettingsBigCheckBox(
             key='load_in_4_bit', default=True)
-        self.load_in_4_bit_container = self._register(self.basic_settings_form, 'Load in 4-bit (requires bitsandbytes)',
-                                                      self.load_in_4_bit_check_box, {SettingGroup.LOAD_IN_4_BIT}, label_position=LabelPosition.BESIDE)
+        self.load_in_4_bit_container = self._register(self.basic_settings_form,
+                                                      self.load_in_4_bit_check_box, SettingGroup.LOAD_IN_4_BIT, label_position=LabelPosition.BESIDE)
 
         # WD Tagger settings — built as a sub-form, registered as one composite.
         self.wd_tagger_settings_form = QFormLayout()
@@ -154,7 +153,7 @@ class CaptionSettingsForm(QVBoxLayout):
                                             self.min_probability_spin_box)
 
         self.max_tags_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_tags', default=50, minimum=1, maximum=999)
+            key='max_tags', default=100, minimum=1, maximum=999)
         self.wd_tagger_settings_form.addRow('Maximum tags',
                                             self.max_tags_spin_box)
 
@@ -167,9 +166,9 @@ class CaptionSettingsForm(QVBoxLayout):
         self.wd_tagger_settings_container = QWidget()
         self.wd_tagger_settings_container.setLayout(
             self.wd_tagger_settings_form)
-        self._register(self.basic_settings_form, None,
+        self._register(self.basic_settings_form,
                        self.wd_tagger_settings_container,
-                       {SettingGroup.WD_TAGGER})
+                       SettingGroup.WD_TAGGER, label=None)
 
         self.addLayout(self.basic_settings_form)
 
@@ -194,95 +193,96 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Banned words
         self.bad_words_line_edit = SettingsLineEdit(key='bad_words')
-        self._register(self.advanced_settings_form, 'Discourage from caption',
-                       self.bad_words_line_edit, {SettingGroup.DISCOURAGED_WORDS}, label_position=LabelPosition.ABOVE)
+        self._register(self.advanced_settings_form,
+                       self.bad_words_line_edit, SettingGroup.DISCOURAGED_WORDS, label_position=LabelPosition.ABOVE)
 
         # Forced words
         self.forced_words_line_edit = SettingsLineEdit(key='forced_words')
-        self._register(self.advanced_settings_form, 'Include in caption',
-                       self.forced_words_line_edit, {SettingGroup.FORCED_WORDS}, label_position=LabelPosition.ABOVE)
+        self._register(self.advanced_settings_form,
+                       self.forced_words_line_edit, SettingGroup.FORCED_WORDS, label_position=LabelPosition.ABOVE)
 
         # Add seperator line
-        self.advanced_settings_form.addRow(HorizontalLine())
-        
+        self._register(self.advanced_settings_form, HorizontalLine(), label=None, group=SettingGroup.FORCED_WORDS)
+
         # Min / max new tokens.
         self.min_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='min_new_tokens', default=1, minimum=1, maximum=4096)
-        self._register(self.advanced_settings_form, 'Minimum tokens',
+        self._register(self.advanced_settings_form,
                        self.min_new_tokens_spin_box,
-                       {SettingGroup.MIN_TOKENS}, is_advanced=True)
+                       SettingGroup.MIN_TOKENS)
 
         self.max_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='max_new_tokens', default=512, minimum=1, maximum=4096)
-        self._register(self.advanced_settings_form, 'Maximum tokens',
+        self._register(self.advanced_settings_form,
                        self.max_new_tokens_spin_box,
-                       {SettingGroup.MAX_TOKENS}, is_advanced=True)
+                       SettingGroup.MAX_TOKENS)
 
         # Number of beams.
         self.num_beams_spin_box = FocusedScrollSettingsSpinBox(
             key='num_beams', default=1, minimum=1, maximum=100)
-        self._register(self.advanced_settings_form, 'Number of beams',
+        self._register(self.advanced_settings_form,
                        self.num_beams_spin_box,
-                       {SettingGroup.NUM_BEAMS}, is_advanced=True)
+                       SettingGroup.NUM_BEAMS)
 
         # Length penalty.
         self.length_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='length_penalty', default=1, minimum=-5, maximum=5)
         self.length_penalty_spin_box.setSingleStep(0.1)
-        self._register(self.advanced_settings_form, 'Length penalty',
+        self._register(self.advanced_settings_form,
                        self.length_penalty_spin_box,
-                       {SettingGroup.LENGTH_PENALTY}, is_advanced=True)
+                       SettingGroup.LENGTH_PENALTY)
 
         # Sampling — shared by transformers and llama.
         self.use_sampling_check_box = SettingsBigCheckBox(
             key='do_sample', default=False)
-        self._register(self.advanced_settings_form, 'Use sampling',
+        self._register(self.advanced_settings_form,
                        self.use_sampling_check_box,
-                       {SettingGroup.USE_SAMPLING}, is_advanced=True)
+                       SettingGroup.USE_SAMPLING)
 
         self.temperature_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='temperature', default=1, minimum=0.01, maximum=2)
         self.temperature_spin_box.setSingleStep(0.01)
-        self._register(self.advanced_settings_form, 'Temperature',
+        self._register(self.advanced_settings_form,
                        self.temperature_spin_box,
-                       {SettingGroup.TEMPERATURE}, is_advanced=True)
+                       SettingGroup.TEMPERATURE)
 
         self.top_k_spin_box = FocusedScrollSettingsSpinBox(
             key='top_k', default=64, minimum=0, maximum=200)
-        self._register(self.advanced_settings_form, 'Top-k',
+        self._register(self.advanced_settings_form,
                        self.top_k_spin_box,
-                       {SettingGroup.TOP_K}, is_advanced=True)
+                       SettingGroup.TOP_K)
 
         self.top_p_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='top_p', default=0.95, minimum=0, maximum=1)
         self.top_p_spin_box.setSingleStep(0.01)
-        self._register(self.advanced_settings_form, 'Top-p',
+        self._register(self.advanced_settings_form,
                        self.top_p_spin_box,
-                       {SettingGroup.TOP_P}, is_advanced=True)
+                       SettingGroup.TOP_P)
 
         # Repetition penalty — shared by transformers and llama.
         self.repetition_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='repetition_penalty', default=1, minimum=1, maximum=2)
         self.repetition_penalty_spin_box.setSingleStep(0.01)
-        self._register(self.advanced_settings_form, 'Repetition penalty',
+        self._register(self.advanced_settings_form,
                        self.repetition_penalty_spin_box,
-                       {SettingGroup.REPETITION_PENALTY}, is_advanced=True)
+                       SettingGroup.REPETITION_PENALTY)
 
         # No-repeat n-gram size.
         self.no_repeat_ngram_size_spin_box = FocusedScrollSettingsSpinBox(
             key='no_repeat_ngram_size', default=3, minimum=0, maximum=100)
-        self._register(self.advanced_settings_form, 'No-repeat n-gram size',
+        self._register(self.advanced_settings_form,
                        self.no_repeat_ngram_size_spin_box,
-                       {SettingGroup.NO_REPEAT_NGRAM}, is_advanced=True)
+                       SettingGroup.NO_REPEAT_NGRAM)
 
         # Add seperator line
-        self._register(self.advanced_settings_form, None, HorizontalLine(), {SettingGroup.GPU_INDEX}, is_advanced=True)
+        self._register(self.advanced_settings_form, HorizontalLine(),
+                       label=None, group=SettingGroup.GPU_INDEX)
 
         # GPU index.
         self.gpu_index_spin_box = FocusedScrollSettingsSpinBox(
             key='gpu_index', default=0, minimum=0, maximum=100)
-        self._register(self.advanced_settings_form, 'GPU index',
-                       self.gpu_index_spin_box, {SettingGroup.GPU_INDEX})
+        self._register(self.advanced_settings_form,
+                       self.gpu_index_spin_box, SettingGroup.GPU_INDEX)
         # Add advanced settings
         self.advanced_settings_container = QWidget()
         self.advanced_settings_container.setLayout(self.advanced_settings_form)
@@ -323,10 +323,15 @@ class CaptionSettingsForm(QVBoxLayout):
         container.setLayout(layout)
         return container
 
-    # TODO: Use the label from the enum value
-    def _register(self, form: QFormLayout, label: str | None, field: QWidget,
-                  groups: set[SettingGroup], is_advanced: bool = False,
+    def _register(self, form: QFormLayout, field: QWidget,
+                  group: SettingGroup,
+                  label: str = '',
                   label_position: LabelPosition = LabelPosition.DEFAULT):
+        is_advanced = False,
+        if group:
+            is_advanced = group.is_advanced
+            if label == '':
+                label = group.value
         if label is not None and label_position is not LabelPosition.DEFAULT:
             # Build our own stacked label+field and add it as a spanning row.
             row_widget = self._position_label(label, field, label_position=label_position)
@@ -339,7 +344,7 @@ class CaptionSettingsForm(QVBoxLayout):
             form.addRow(label, field)
             registered_field = field
         self.registered_rows.append(
-            (form, registered_field, groups, is_advanced))
+            (form, registered_field, group, is_advanced))
         return registered_field
 
     def _active_groups(self) -> set[SettingGroup] | None:
@@ -392,8 +397,8 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Does this model have any relevant advanced rows?
         has_advanced = any(
-            is_advanced and ((not groups) or bool(groups & active_groups))
-            for _form, _field, groups, is_advanced in self.registered_rows)
+            group and group.is_advanced and group in active_groups
+            for _form, _field, group, is_advanced in self.registered_rows)
 
         if not has_advanced:
             self.advanced_expanded = False
@@ -406,8 +411,8 @@ class CaptionSettingsForm(QVBoxLayout):
         self.advanced_settings_container.setVisible(
             has_advanced and self.advanced_expanded)
 
-        for form, field, groups, _is_advanced in self.registered_rows:
-            visible = (not groups) or bool(groups & active_groups)
+        for form, field, group, _is_advanced in self.registered_rows:
+            visible = (not group) or group in active_groups
             form.setRowVisible(field, visible)
 
         # bitsandbytes / device override for the load-in-4-bit row.
