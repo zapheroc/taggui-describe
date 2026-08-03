@@ -154,7 +154,12 @@ class ImageListModel(QAbstractListModel):
                 caption = text_file_path.read_text(encoding='utf-8',
                                                    errors='replace')
                 # TODO move the seperator to the settings
-                tags_raw, _, description = caption.partition('\n\n')
+                # If \n\n is in the captions, there are tags
+                if '\n\n' in caption:
+                    tags_raw, _, description = caption.partition('\n\n')
+                else:
+                    tags_raw = None
+                    description = caption
                 if tags_raw:
                     tags = tags_raw.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
@@ -178,8 +183,11 @@ class ImageListModel(QAbstractListModel):
     def write_image_tags_to_disk(self, image: Image):
         try:
             # TODO move the seperator to the settings
-            parts = [self.tag_separator.join(image.tags), image.description]
-            image_text = '\n\n'.join(part for part in parts if part)
+            # If there are tags, always append \n\n to the file
+            if image.tags:
+                image_text = self.tag_separator.join(image.tags) + '\n\n' + image.description
+            else:
+                image_text = image.description
             image.path.with_suffix('.txt').write_text(
                 image_text, encoding='utf-8',
                 errors='replace')

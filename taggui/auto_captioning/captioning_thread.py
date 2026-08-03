@@ -121,6 +121,8 @@ class CaptioningThread(QThread):
             }
             try:
                 caption, console_output_caption = manager.caption(payload, log=log)
+                # Strip the description separator to prevent descriptions from bleeding into tags, and vice versa
+                caption = caption.replace('\n\n', '\n')
             except RuntimeError as exception:
                 print(f'Skipping {image.path.name} due to error: {str(exception)}')
                 continue
