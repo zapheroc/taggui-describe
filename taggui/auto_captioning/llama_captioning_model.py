@@ -101,12 +101,11 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def get_model_inputs(self, image_prompt: str,
                          image: Image) -> dict | np.ndarray:
         # Parse the image input text
-        text = self.get_input_text(image_prompt)
         user_content = [
             {
                 'type': 'image_url', 'image_url': {'url': image_to_data_uri(Path(image.path))}
             },
-            {'type': 'text', 'text': text}
+            {'type': 'text', 'text': image_prompt}
         ]
         # TODO: Allow config of system prompt
         message = [
@@ -163,8 +162,4 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             repeat_penalty=self.repeat_penalty
         )
         caption = response['choices'][0]['message']['content'].strip()
-        if self.caption_start:
-            caption = f'{self.caption_start} {caption}'
-        if self.remove_tag_separators:
-            caption = caption.replace(self.context.tag_separator, ' ')
         return caption, caption

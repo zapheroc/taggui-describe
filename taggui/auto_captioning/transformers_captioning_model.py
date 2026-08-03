@@ -37,6 +37,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
                 self.dtype = torch.float16
         self.dtype_argument = ({'dtype': self.dtype}
                                if self.device.type == 'cuda' else {})
+        self.caption_start = caption_settings['caption_start'].strip()
         self.load_in_4_bit = caption_settings['load_in_4_bit']
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
@@ -46,6 +47,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
         return super().get_setting_groups() | {
+            SettingGroup.CAPTION_START,
             SettingGroup.LOAD_IN_4_BIT,
             SettingGroup.DEVICE,
             SettingGroup.DISCOURAGED_WORDS,
@@ -65,6 +67,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
 
     def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)
+        self.caption_start = caption_settings['caption_start'].strip()
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
         self.generation_parameters = caption_settings['generation_parameters']
@@ -152,6 +155,13 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         pil_image = exif_transpose(pil_image)
         pil_image = pil_image.convert(self.image_mode)
         return pil_image
+
+    def get_input_text(self, image_prompt: str) -> str:
+        if image_prompt and self.caption_start:
+            text = f'{image_prompt} {self.caption_start}'
+        else:
+            text = image_prompt or self.caption_start
+        return text
 
     def get_model_inputs(self, image_prompt: str,
                          image: Image) -> BatchFeature | dict | np.ndarray:
