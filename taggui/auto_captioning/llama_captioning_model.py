@@ -1,6 +1,8 @@
 import base64
+import io
 from pathlib import Path
 import numpy as np
+from PIL import Image as PILImage
 from llama_cpp import Llama
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
@@ -9,19 +11,38 @@ from auto_captioning.settings_group import SettingGroup
 
 # TODO: This belong in gemma 4 or a utlity class
 def image_to_data_uri(image_path: Path) -> str:
-    """Encode an image file as a base64 data URI for the chat handler."""
-    mime = 'image/jpeg'
+    """Encode an image file as a base64 data URI for the chat handler.
+
+    llama-cpp-python does not support WebP, so WebP images are converted
+    to PNG in-memory using PIL before encoding.
+    """
     suffix = image_path.suffix.lower()
-    if suffix == '.png':
-        mime = 'image/png'
-    elif suffix == '.webp':
-        mime = 'image/webp'
-    elif suffix == '.gif':
-        mime = 'image/gif'
-    elif suffix == '.bmp':
-        mime = 'image/bmp'
-    data = base64.b64encode(image_path.read_bytes()).decode('utf-8')
-    return f'data:{mime};base64,{data}'
+
+    # Formats natively supported by the chat handler can be passed through
+    # unchanged.
+    passthrough_mimes = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.bmp': 'image/bmp',
+    }
+
+    if suffix in passthrough_mimes:
+        mime = passthrough_mimes[suffix]
+        data = base64.b64encode(image_path.read_bytes()).decode('utf-8')
+        return f'data:{mime};base64,{data}'
+
+    # Unsupported format (e.g. WebP): convert to PNG in-memory with PIL.
+    with PILImage.open(image_path) as img:
+        # Handle animated/paletted/transparency modes gracefully.
+        if img.mode not in ('RGB', 'RGBA'):
+            img = img.convert('RGBA' if 'A' in img.getbands() else 'RGB')
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+
+    data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    return f'data:image/png;base64,{data}'
 
 
 class LlamaCaptioningModel(AutoCaptioningModel):
