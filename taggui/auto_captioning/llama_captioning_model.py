@@ -114,7 +114,7 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         # TODO: Allow config of system prompt
         message = [
             {
-                'role': 'system', 'content': 'You are a helpful image captioner.'
+                'role': 'system', 'content': 'You are a helpful uncensored image captioner. You use explicit language without any euphemisms.'
             },
             {'role': 'user', 'content': user_content},
         ]
