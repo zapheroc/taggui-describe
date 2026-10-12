@@ -255,7 +255,6 @@ class ImageTagsEditor(QDockWidget):
             self.select_first_tag()
 
     def set_image_description(self):
-        print("Image: " + str(self.image))
         current_description = self.description_editor.toPlainText()
         if current_description == self.image.description:
             return

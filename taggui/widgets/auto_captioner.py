@@ -331,7 +331,7 @@ class CaptionSettingsForm(QVBoxLayout):
                   group: SettingGroup,
                   label: str = '',
                   label_position: LabelPosition = LabelPosition.DEFAULT):
-        is_advanced = False,
+        is_advanced = False
         if group:
             is_advanced = group.is_advanced
             if label == '':
