@@ -1,5 +1,13 @@
 import multiprocessing as mp
+import queue
+
 from auto_captioning.model_worker import run_worker
+
+# How often to poll the response queue while waiting for the worker. This
+# bounds the wait when the worker process dies without sending a final
+# message (e.g. it was killed by the OOM killer or crashed), instead of
+# blocking the caller forever.
+_RESPONSE_POLL_INTERVAL = 0.5
 
 
 def _config_signature(caption_settings):
@@ -25,6 +33,16 @@ class ModelSubprocessManager:
     def is_alive(self):
         return self.process is not None and self.process.is_alive()
 
+    def _get_response(self):
+        """Return the next message from the worker, or `None` if the worker
+        process died without sending it."""
+        while True:
+            try:
+                return self.response_q.get(timeout=_RESPONSE_POLL_INTERVAL)
+            except queue.Empty:
+                if not self.is_alive():
+                    return None
+
     def ensure_model(self, caption_settings, models_directory_path,
                      tag_separator, log, on_loaded, on_load_error):
         signature = _config_signature(caption_settings)
@@ -46,7 +64,12 @@ class ModelSubprocessManager:
         self.current_signature = signature
 
         while True:
-            kind, *rest = self.response_q.get()
+            message = self._get_response()
+            if message is None:
+                on_load_error('The model loading process died unexpectedly.')
+                self.shutdown()
+                return False
+            kind, *rest = message
             if kind == 'log':
                 log(rest[0])
             elif kind == 'loaded':
@@ -60,7 +83,10 @@ class ModelSubprocessManager:
     def caption(self, payload, log):
         self.request_q.put(('caption', payload))
         while True:
-            kind, *rest = self.response_q.get()
+            message = self._get_response()
+            if message is None:
+                raise RuntimeError('The captioning process died unexpectedly.')
+            kind, *rest = message
             if kind == 'log':
                 log(rest[0])
             elif kind == 'caption':

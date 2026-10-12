@@ -122,6 +122,12 @@ class CaptioningThread(QThread):
             try:
                 caption, console_output_caption = manager.caption(payload, log=log)
             except RuntimeError as exception:
+                if not manager.is_alive():
+                    # The worker process is gone, so no further images can be
+                    # captioned. Stop the whole run and mark it as an error.
+                    print(f'Aborting captioning: {str(exception)}')
+                    self.is_error = True
+                    return
                 print(f'Skipping {image.path.name} due to error: {str(exception)}')
                 continue
             if caption_position != CaptionPosition.DO_NOT_ADD:
