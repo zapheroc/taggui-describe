@@ -206,7 +206,7 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Seed
         self.seed_spin_box = FocusedScrollSettingsSpinBox(
-            key='min_new_tokens', default=-1, minimum=-1, maximum=2147483647)
+            key='seed', default=-1, minimum=-1, maximum=2147483647)
         self._register(self.advanced_settings_form,
                        self.seed_spin_box,
                        SettingGroup.SEED)

@@ -27,4 +27,4 @@ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0
 
 # Install CUDA accelerated llama-cpp-python
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu132 
-llama-cpp-python
+llama-cpp-python==0.3.36
