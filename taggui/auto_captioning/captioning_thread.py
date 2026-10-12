@@ -95,7 +95,7 @@ class CaptioningThread(QThread):
         loaded = manager.ensure_model(
             self.caption_settings, self.models_directory_path, self.tag_separator,
             log=log,
-            on_loaded=lambda: None,
+            on_loaded=self.clear_console_text_edit_requested.emit,
             on_load_error=lambda msg: (setattr(self, 'is_error', True),
                                         print(msg)))
         if not loaded or self.is_canceled:

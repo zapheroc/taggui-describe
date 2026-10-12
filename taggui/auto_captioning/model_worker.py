@@ -48,7 +48,8 @@ def run_worker(request_q, response_q, caption_settings,
             if request is None or request[0] == 'shutdown':
                 break
             elif request[0] == 'update-settings':
-                caption_settings = request[1]
+                caption_settings, tag_separator = request[1], request[2]
+                ctx.tag_separator = tag_separator
                 model.update_caption_settings(caption_settings)
             elif request[0] == 'caption':
                 data = request[1]

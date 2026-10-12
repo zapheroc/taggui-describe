@@ -1,8 +1,4 @@
 # auto_captioning/worker_context.py
-class _SignalStub:
-    def emit(self, *args, **kwargs):
-        pass
-
 class WorkerContext:
     """Replaces CaptioningThread + AutoCaptioner inside the subprocess."""
     def __init__(self, models_directory_path, tag_separator, cancel_event):
@@ -10,7 +6,6 @@ class WorkerContext:
         self.models_directory_path = models_directory_path
         self.tag_separator = tag_separator
         self._cancel_event = cancel_event
-        self.clear_console_text_edit_requested = _SignalStub()
         # formerly on AutoCaptioner (the per-process model cache)
         self.processor = None
         self.model = None

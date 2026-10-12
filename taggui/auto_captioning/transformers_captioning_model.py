@@ -138,9 +138,8 @@ class TransformersCaptioningModel(AutoCaptioningModel):
                 self.model_id = str(models_directory_path / self.model_id)
         # Only GPUs support 4-bit quantization.
         self.load_in_4_bit = self.load_in_4_bit and self.device.type == 'cuda'
-        # Load the new processor and model.
-        # TODO: Not sure if this request is working because it happens in a subprocess...
-        self.context.clear_console_text_edit_requested.emit()
+        # Load the new processor and model. The parent process clears the
+        # console when the worker reports the model is loaded.
         print(f'Loading {self.model_id}...')
         self.processor = self.get_processor()
         self.thread_parent.processor = self.processor
