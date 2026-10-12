@@ -1,4 +1,6 @@
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import (
+    TransformersCaptioningModel)
 from auto_captioning.models.florence_2 import Florence2, Florence2Promptgen
 from auto_captioning.models.joycaption import Joycaption
 from auto_captioning.models.kosmos_2 import Kosmos2
@@ -84,4 +86,6 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return WdTagger
     if 'gemma-4-31b' in lowercase_model_id:
         return Gemma4
-    return AutoCaptioningModel
+    # Unknown models default to the generic transformers backend, which can
+    # load any Hugging Face repo or local model directory.
+    return TransformersCaptioningModel
