@@ -17,6 +17,8 @@ onnxruntime==1.28.0
 # PyTorch
 torch==2.13.0
 
+# TODO: Confirm flash-attention is actually needed
+
 # FlashAttention (Florence-2, Phi-3-Vision)
 # The publisher's releases are split by platform: v0.9.47 ships the Linux
 # wheels and v0.9.52 the Windows wheels (same flash_attn 2.8.3, cu130,
