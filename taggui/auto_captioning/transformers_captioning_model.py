@@ -17,9 +17,10 @@ from auto_captioning.settings_group import SettingGroup
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
-    # MIGRATED (v5): Safetensors is now the only supported serialization format.
-    # `use_safetensors = None` (previously used for models without a safetensors
-    # version) is no longer valid — all models must provide safetensors weights.
+    # `use_safetensors` semantics (verified on transformers 5.x): `True`
+    # requires safetensors weights and errors if absent; `None` uses
+    # safetensors when available and falls back to `.bin`. Models without a
+    # safetensors version (e.g. Florence-2) override this with `None`.
     use_safetensors = True
     model_load_context_manager = nullcontext()
     transformers_model_class = AutoModelForImageTextToText
