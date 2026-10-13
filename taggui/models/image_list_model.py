@@ -145,17 +145,29 @@ class DirectoryLoadTask(QRunnable):
             tags = []
             description = ""
             if self.text_file_path is not None:
-                # `errors='replace'` inserts a replacement marker such as '?'
-                # when there is malformed data.
-                caption = self.text_file_path.read_text(
-                    encoding='utf-8', errors='replace')
-                # TODO move the seperator to the settings
-                tags_raw, _, description = caption.partition('\n\n')
-                if tags_raw:
-                    tags = tags_raw.split(self.tag_separator)
-                    tags = [tag.strip() for tag in tags]
-                    tags = [tag for tag in tags if tag]
-                description = description.strip()
+                try:
+                    # `errors='replace'` inserts a replacement marker such as
+                    # '?' when there is malformed data.
+                    caption = self.text_file_path.read_text(
+                        encoding='utf-8', errors='replace')
+                except OSError as exception:
+                    # The caption file could not be read (for example, it was
+                    # deleted after the directory was scanned or it is not
+                    # readable). Load the image without tags or a description
+                    # instead of silently hiding it from the list. The user
+                    # can still tag the image, which (re)writes the caption
+                    # file.
+                    print(f'Failed to read caption file '
+                          f'{self.text_file_path}: {exception}',
+                          file=sys.stderr)
+                else:
+                    # TODO move the seperator to the settings
+                    tags_raw, _, description = caption.partition('\n\n')
+                    if tags_raw:
+                        tags = tags_raw.split(self.tag_separator)
+                        tags = [tag.strip() for tag in tags]
+                        tags = [tag for tag in tags if tag]
+                    description = description.strip()
             image = Image(self.image_path, dimensions, tags, description)
         except Exception as exception:
             print(f'Failed to load {self.image_path}: {exception}',
