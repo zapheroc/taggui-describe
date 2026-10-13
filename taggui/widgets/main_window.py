@@ -213,18 +213,34 @@ class MainWindow(QMainWindow):
         if save_path_to_settings:
             self.settings.setValue('directory_path', str(self.directory_path))
         self.setWindowTitle(path.name)
-        self.image_list_model.load_directory(path)
+        # The index to select when the directory has finished loading.
+        self._pending_select_index = select_index
         self.image_list.filter_line_edit.clear()
         self.all_tags_editor.filter_line_edit.clear()
         # Clear the current index first to make sure that the `currentChanged`
         # signal is emitted even if the image at the index is already selected.
         self.image_list_selection_model.clearCurrentIndex()
-        self.image_list.list_view.setCurrentIndex(
-            self.proxy_image_list_model.index(select_index, 0))
         self.centralWidget().setCurrentWidget(self.image_viewer)
         self.reload_directory_action.setDisabled(False)
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
+        # The images are loaded on background threads. When the load is
+        # complete, `directory_loaded` is emitted and `on_directory_loaded`
+        # selects the requested image.
+        self.image_list_model.load_directory(path)
+
+    @Slot()
+    def on_directory_loaded(self):
+        """Select the requested image once the directory has loaded."""
+        row_count = self.proxy_image_list_model.rowCount()
+        select_index = self._pending_select_index
+        # If the selected image index is out of bounds due to images being
+        # deleted, select the last image.
+        if select_index >= row_count:
+            select_index = row_count - 1
+        if row_count > 0:
+            self.image_list.list_view.setCurrentIndex(
+                self.proxy_image_list_model.index(select_index, 0))
 
     @Slot()
     def select_and_load_directory(self):
@@ -247,14 +263,10 @@ class MainWindow(QMainWindow):
                             if self.proxy_image_list_model.filter is None
                             else 'filtered_image_index')
         select_index = self.settings.value(select_index_key, type=int) or 0
-        self.load_directory(self.directory_path)
+        # Selecting the image is deferred to `on_directory_loaded` because
+        # the images are loaded on background threads.
+        self.load_directory(self.directory_path, select_index=select_index)
         self.image_list.filter_line_edit.setText(filter_text)
-        # If the selected image index is out of bounds due to images being
-        # deleted, select the last image.
-        if select_index >= self.proxy_image_list_model.rowCount():
-            select_index = self.proxy_image_list_model.rowCount() - 1
-        self.image_list.list_view.setCurrentIndex(
-            self.proxy_image_list_model.index(select_index, 0))
 
     @Slot()
     def show_settings_dialog(self):
@@ -421,6 +433,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index of the currently selected image."""
+        # The index is invalid when the model is reset (for example, while a
+        # directory is loading).
+        if not proxy_image_index.isValid():
+            return
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
@@ -441,12 +457,11 @@ class MainWindow(QMainWindow):
             lambda: self.tag_counter_model.count_tags(
                 self.image_list_model.images))
         self.image_list_model.dataChanged.connect(
-            lambda: self.tag_counter_model.count_tags(
-                self.image_list_model.images))
-        self.image_list_model.dataChanged.connect(
-            self.image_tags_editor.reload_image_tags_if_changed)
+            self.on_image_data_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(
             self.update_undo_and_redo_actions)
+        self.image_list_model.directory_loaded.connect(
+            self.on_directory_loaded)
         # Rows are inserted or removed from the proxy image list model when the
         # filter is changed.
         self.proxy_image_list_model.rowsInserted.connect(
@@ -464,6 +479,25 @@ class MainWindow(QMainWindow):
         self.image_list.visibilityChanged.connect(
             lambda: self.toggle_image_list_action.setChecked(
                 self.image_list.isVisible()))
+
+    @Slot(QModelIndex, QModelIndex, list)
+    def on_image_data_changed(self, first_changed_index: QModelIndex,
+                              last_changed_index: QModelIndex,
+                              roles: list):
+        """
+        Handle changes to image data.
+
+        Thumbnail-only changes (only the decoration role changed) do not
+        affect the tags, so they do not need to update the tag counter or the
+        image tags editor. This matters because a thumbnail is generated for
+        every image, which would otherwise recount the tags of every image
+        thousands of times.
+        """
+        if roles == [Qt.ItemDataRole.DecorationRole]:
+            return
+        self.tag_counter_model.count_tags(self.image_list_model.images)
+        self.image_tags_editor.reload_image_tags_if_changed(
+            first_changed_index, last_changed_index)
 
     @Slot()
     def update_image_tags(self):

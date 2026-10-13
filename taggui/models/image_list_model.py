@@ -1,6 +1,8 @@
+import os
 import random
 import re
 import sys
+import threading
 from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -8,16 +10,26 @@ from pathlib import Path
 
 import exifread
 import imagesize
-from PySide6.QtCore import (QAbstractListModel, QModelIndex, QSize, Qt, Signal,
+from PySide6.QtCore import (QAbstractListModel, QModelIndex, QCoreApplication,
+                            QObject, QRunnable, QSize, Qt, QThreadPool, Signal,
                             Slot)
-from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QMessageBox
 
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
+from utils.thumbnail_generation import (ThumbnailGenerationTask,
+                                        ThumbnailGenerationWorker)
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
 UNDO_STACK_SIZE = 32
+# How long (in milliseconds) to wait for background tasks to finish when the
+# application is quitting. Destroying a thread pool while its worker threads
+# are still running tasks makes Qt report worker-thread exceptions (and can
+# even abort the process), so the in-flight work is given a brief, bounded
+# chance to finish. The wait is capped so that quitting is never blocked for
+# a long time: all of the work is read-only, so abandoning it is safe.
+SHUTDOWN_TIMEOUT_MS = 2000
 
 
 def get_file_paths(directory_path: Path) -> set[Path]:
@@ -53,8 +65,137 @@ class Location(str, Enum):
     DESCRIPTIONS = 'Descriptions'
 
 
+class DirectoryLoadWorker(QObject):
+    """
+    Collect the images of one directory load and notify the model when the
+    load is complete.
+
+    `directory_loaded` is emitted from a worker thread and delivered to the
+    connected slot on the GUI thread (queued connection).
+    """
+    # (generation, loaded images)
+    directory_loaded = Signal(int, list)
+
+    def __init__(self, generation: int, parent: QObject = None):
+        super().__init__(parent)
+        self.generation = generation
+        self._lock = threading.Lock()
+        self._pending_task_count = 0
+        self._collected_images: list[Image] = []
+
+    def task_started(self):
+        with self._lock:
+            self._pending_task_count += 1
+
+    def task_finished(self, image: Image | None):
+        with self._lock:
+            if image is not None:
+                self._collected_images.append(image)
+            self._pending_task_count -= 1
+            is_last_task = self._pending_task_count == 0
+        if is_last_task:
+            self.directory_loaded.emit(self.generation,
+                                       self._collected_images)
+
+
+class DirectoryLoadTask(QRunnable):
+    """
+    Load the metadata (dimensions, tags, description) of one image on a
+    worker thread.
+
+    The task is added to a `registry` set and removed from it when it is
+    done. The set keeps a strong reference to the task so that it is not
+    garbage collected while the thread pool still references it.
+    """
+
+    def __init__(self, image_path: Path, text_file_path: Path | None,
+                 tag_separator: str, worker: DirectoryLoadWorker,
+                 registry: set):
+        super().__init__()
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        self.image_path = image_path
+        self.text_file_path = text_file_path
+        self.tag_separator = tag_separator
+        self.worker = worker
+        self.registry = registry
+        registry.add(self)
+        worker.task_started()
+
+    def run(self):
+        image = None
+        try:
+            dimensions = None
+            try:
+                dimensions = imagesize.get(self.image_path)
+                # Check the Exif orientation tag and rotate the dimensions if
+                # necessary.
+                with open(self.image_path, 'rb') as image_file:
+                    try:
+                        exif_tags = exifread.process_file(
+                            image_file, details=False,
+                            stop_tag='Image Orientation')
+                        if 'Image Orientation' in exif_tags:
+                            orientations = (exif_tags['Image Orientation']
+                                            .values)
+                            if any(value in orientations
+                                   for value in (5, 6, 7, 8)):
+                                dimensions = (dimensions[1], dimensions[0])
+                    except Exception as exception:
+                        print(f'Failed to get Exif tags for {self.image_path}: '
+                              f'{exception}', file=sys.stderr)
+            except (ValueError, OSError) as exception:
+                print(f'Failed to get dimensions for {self.image_path}: '
+                      f'{exception}', file=sys.stderr)
+                dimensions = None
+            tags = []
+            description = ""
+            if self.text_file_path is not None:
+                try:
+                    # `errors='replace'` inserts a replacement marker such as
+                    # '?' when there is malformed data.
+                    caption = self.text_file_path.read_text(
+                        encoding='utf-8', errors='replace')
+                except OSError as exception:
+                    # The caption file could not be read (for example, it was
+                    # deleted after the directory was scanned or it is not
+                    # readable). Load the image without tags or a description
+                    # instead of silently hiding it from the list. The user
+                    # can still tag the image, which (re)writes the caption
+                    # file.
+                    print(f'Failed to read caption file '
+                          f'{self.text_file_path}: {exception}',
+                          file=sys.stderr)
+                else:
+                    # TODO move the seperator to the settings
+                    tags_raw, _, description = caption.partition('\n\n')
+                    if tags_raw:
+                        tags = tags_raw.split(self.tag_separator)
+                        tags = [tag.strip() for tag in tags]
+                        tags = [tag for tag in tags if tag]
+                    description = description.strip()
+            image = Image(self.image_path, dimensions, tags, description)
+        except Exception as exception:
+            print(f'Failed to load {self.image_path}: {exception}',
+                  file=sys.stderr)
+        self._notify_worker(image)
+        self.registry.discard(self)
+
+    def _notify_worker(self, image: Image | None):
+        try:
+            self.worker.task_finished(image)
+        except RuntimeError:
+            # The worker (and therefore the image list model) has been
+            # destroyed, so there is no one to notify.
+            pass
+
+
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
+    # Emitted on the GUI thread when a directory has finished loading and the
+    # images are available.
+    directory_loaded = Signal()
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -65,6 +206,35 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack = []
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
+        # Thumbnails are generated on background threads so that image
+        # decoding never blocks the GUI thread (which made scrolling the
+        # image list slow with many images).
+        self.thumbnail_worker = ThumbnailGenerationWorker(self)
+        self.thumbnail_worker.thumbnail_ready.connect(self.thumbnail_ready)
+        self.thumbnail_thread_pool = QThreadPool(self)
+        self.thumbnail_thread_pool.setMaxThreadCount(
+            min(8, os.cpu_count() or 4))
+        # Directory contents are loaded on background threads.
+        self.directory_load_thread_pool = QThreadPool(self)
+        self.directory_load_thread_pool.setMaxThreadCount(
+            min(8, os.cpu_count() or 4))
+        self.directory_load_worker = None
+        # Incremented for each directory load. Used to discard the results of
+        # loads that are superseded by a newer load.
+        self.directory_load_generation = 0
+        # Incremented for each thumbnail generation pass. Used to discard the
+        # results of passes that are superseded by a newer directory load.
+        self.thumbnail_generation = 0
+        # Strong references to running tasks so that they are not garbage
+        # collected while the thread pools still reference them.
+        self._running_tasks: set = set()
+        # When the application is about to quit, give the background tasks a
+        # bounded chance to finish so that the thread pools are not destroyed
+        # while worker threads are still running tasks (which makes Qt report
+        # worker-thread exceptions, and can even abort the process).
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.wait_for_pending_work)
 
     def rowCount(self, parent=None) -> int:
         return len(self.images)
@@ -81,19 +251,11 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
-            # The thumbnail. If the image already has a thumbnail stored, use
-            # it. Otherwise, generate a thumbnail and save it to the image.
-            if image.thumbnail:
-                return image.thumbnail
-            image_reader = QImageReader(str(image.path))
-            # Rotate the image based on the orientation tag.
-            image_reader.setAutoTransform(True)
-            pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
-                self.image_list_image_width,
-                Qt.TransformationMode.SmoothTransformation)
-            thumbnail = QIcon(pixmap)
-            image.thumbnail = thumbnail
-            return thumbnail
+            # The thumbnail, if it has been generated yet. Thumbnails are
+            # generated on background threads (see
+            # `start_thumbnail_generation`), so `data()` never blocks the GUI
+            # thread on image decoding.
+            return image.thumbnail
         if role == Qt.ItemDataRole.SizeHintRole:
             if image.thumbnail:
                 return image.thumbnail.availableSizes()[0]
@@ -107,10 +269,24 @@ class ImageListModel(QAbstractListModel):
                          int(self.image_list_image_width * height / width))
 
     def load_directory(self, directory_path: Path):
+        """
+        Load the images in a directory.
+
+        The load happens on background threads so that the GUI thread stays
+        responsive. When the load is complete, `directory_loaded` is emitted
+        on the GUI thread.
+        """
+        # The view now shows an empty list until the load is complete.
+        self.beginResetModel()
         self.images.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
+        self.endResetModel()
         self.update_undo_and_redo_actions_requested.emit()
+        # Discard the results of any in-flight thumbnail generation pass.
+        self.thumbnail_generation += 1
+        self.directory_load_generation += 1
+        generation = self.directory_load_generation
         file_paths = get_file_paths(directory_path)
         settings = get_settings()
         image_suffixes_string = settings.value(
@@ -128,48 +304,84 @@ class ImageListModel(QAbstractListModel):
         # strings.
         text_file_path_strings = {str(path) for path in file_paths
                                   if path.suffix == '.txt'}
+        if not image_paths:
+            # There are no images to load.
+            self.directory_loaded.emit()
+            return
+        worker = DirectoryLoadWorker(generation, self)
+        self.directory_load_worker = worker
+        worker.directory_loaded.connect(self.on_directory_loaded)
+        # Create all tasks (which increments the worker's pending-task count)
+        # before starting any of them. If tasks were started as they were
+        # created, a fast task could finish and trigger the "last task" check
+        # before the remaining tasks were even counted, causing
+        # `directory_loaded` to be emitted (partially) more than once.
+        tasks = []
         for image_path in image_paths:
-            try:
-                dimensions = imagesize.get(image_path)
-                # Check the Exif orientation tag and rotate the dimensions if
-                # necessary.
-                with open(image_path, 'rb') as image_file:
-                    try:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        print(f'Failed to get Exif tags for {image_path}: '
-                              f'{exception}', file=sys.stderr)
-            except (ValueError, OSError) as exception:
-                print(f'Failed to get dimensions for {image_path}: '
-                      f'{exception}', file=sys.stderr)
-                dimensions = None
-            tags = []
-            description = ""
             text_file_path = image_path.with_suffix('.txt')
-            if str(text_file_path) in text_file_path_strings:
-                # `errors='replace'` inserts a replacement marker such as '?'
-                # when there is malformed data.
-                caption = text_file_path.read_text(encoding='utf-8',
-                                                   errors='replace')
-                # TODO move the seperator to the settings
-                tags_raw, _, description = caption.partition('\n\n')
-                if tags_raw:
-                    tags = tags_raw.split(self.tag_separator)
-                    tags = [tag.strip() for tag in tags]
-                    tags = [tag for tag in tags if tag]
-                description = description.strip()
-            image = Image(image_path, dimensions, tags, description)
-            self.images.append(image)
-        self.images.sort(key=lambda image_: image_.path)
-        self.modelReset.emit()
+            if str(text_file_path) not in text_file_path_strings:
+                text_file_path = None
+            tasks.append(DirectoryLoadTask(image_path, text_file_path,
+                                           self.tag_separator, worker,
+                                           self._running_tasks))
+        for task in tasks:
+            self.directory_load_thread_pool.start(task)
+
+    @Slot(int, list)
+    def on_directory_loaded(self, generation: int,
+                            images: list[Image]):
+        """Complete a directory load. Runs on the GUI thread."""
+        # The load has been superseded by a newer load.
+        if generation != self.directory_load_generation:
+            return
+        images.sort(key=lambda image_: image_.path)
+        self.beginResetModel()
+        self.images = images
+        self.endResetModel()
+        self.directory_loaded.emit()
+        self.start_thumbnail_generation()
+
+    def start_thumbnail_generation(self):
+        """Start generating thumbnails on background threads."""
+        self.thumbnail_generation += 1
+        generation = self.thumbnail_generation
+        for row, image in enumerate(self.images):
+            task = ThumbnailGenerationTask(
+                row, image.path, self.image_list_image_width, generation,
+                self.thumbnail_worker, self._running_tasks)
+            self.thumbnail_thread_pool.start(task)
+
+    @Slot(int, QImage, int)
+    def thumbnail_ready(self, row: int, image: QImage, generation: int):
+        """Receive a generated thumbnail. Runs on the GUI thread."""
+        # The pass has been superseded by a newer directory load, or the
+        # image is no longer in the model.
+        if generation != self.thumbnail_generation or row >= len(self.images):
+            return
+        image_model_image = self.images[row]
+        if image_model_image.thumbnail is not None or image.isNull():
+            return
+        image_model_image.thumbnail = QIcon(QPixmap.fromImage(image))
+        index = self.index(row, 0)
+        self.dataChanged.emit(index, index,
+                              [Qt.ItemDataRole.DecorationRole])
+
+    @Slot()
+    def wait_for_pending_work(self):
+        """
+        Shut down the background task pools when the application is quitting.
+
+        The queued tasks are discarded and the few tasks already running are
+        given a bounded chance to finish, so that the pools are destroyed
+        without worker threads still inside a task (which makes Qt report
+        worker-thread exceptions, and can even abort the process). All of
+        the work is read-only and its results are no longer needed, so
+        discarding it is safe.
+        """
+        for pool in (self.directory_load_thread_pool,
+                     self.thumbnail_thread_pool):
+            pool.clear()
+            pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):

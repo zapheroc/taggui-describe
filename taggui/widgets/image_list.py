@@ -382,7 +382,13 @@ class ImageList(QDockWidget):
         image_count = self.proxy_image_list_model.rowCount()
         unfiltered_image_count = (self.proxy_image_list_model.sourceModel()
                                   .rowCount())
-        label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
+        if proxy_image_index.isValid():
+            label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
+        else:
+            # No image is selected (for example, while a directory is
+            # loading). Use a dash rather than '0' so it does not read as
+            # 'first image selected'.
+            label_text = f'– / {image_count}'
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
