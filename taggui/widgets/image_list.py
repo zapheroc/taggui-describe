@@ -382,7 +382,10 @@ class ImageList(QDockWidget):
         image_count = self.proxy_image_list_model.rowCount()
         unfiltered_image_count = (self.proxy_image_list_model.sourceModel()
                                   .rowCount())
-        label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
+        if proxy_image_index.isValid():
+            label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
+        else:
+            label_text = f'0 / {image_count}'
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
