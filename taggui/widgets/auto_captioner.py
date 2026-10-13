@@ -1,15 +1,17 @@
 import sys
+import importlib.util
 from pathlib import Path
+from enum import StrEnum
 
 from PySide6.QtCore import QModelIndex, Qt, Signal, Slot
 from PySide6.QtGui import QFontMetrics, QTextCursor
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPlainTextEdit, QProgressBar, QScrollArea,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QApplication, QPushButton)
 
 from auto_captioning.captioning_thread import CaptioningThread
-from auto_captioning.models.wd_tagger import WdTagger
+from auto_captioning.model_subprocess_manager import ModelSubprocessManager
 from auto_captioning.models_list import MODELS, get_model_class
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 from models.image_list_model import ImageListModel
@@ -23,6 +25,10 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     SettingsPlainTextEdit)
 from utils.utils import pluralize
 from widgets.image_list import ImageList
+from auto_captioning.settings_group import SettingGroup
+
+
+BITSANDBYTES_AVAILABLE = importlib.util.find_spec('bitsandbytes') is not None
 
 
 def set_text_edit_height(text_edit: QPlainTextEdit, line_count: int):
@@ -47,198 +53,314 @@ class HorizontalLine(QFrame):
         self.setFrameShadow(QFrame.Shadow.Raised)
 
 
+class LabelPosition(StrEnum):
+    # Basic
+    ABOVE = 'above'
+    BESIDE = 'beside'
+    DEFAULT = 'default'
+
+
 class CaptionSettingsForm(QVBoxLayout):
     def __init__(self):
         super().__init__()
         self.settings = get_settings()
-        try:
-            import bitsandbytes
-            self.is_bitsandbytes_available = True
-        except RuntimeError:
-            self.is_bitsandbytes_available = False
-        basic_settings_form = QFormLayout()
-        basic_settings_form.setRowWrapPolicy(
+
+        # Registry: (owning form, field widget, groups, is_advanced)
+        self.registered_rows: list[
+            tuple[QFormLayout, QWidget, SettingGroup, bool]] = []
+        self.advanced_expanded = False
+
+        # ------------------------------------------------------------------
+        # Basic settings
+        # ------------------------------------------------------------------
+        self.basic_settings_form = QFormLayout()
+        self.basic_settings_form.setRowWrapPolicy(
             QFormLayout.RowWrapPolicy.WrapAllRows)
-        basic_settings_form.setFieldGrowthPolicy(
+        self.basic_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.basic_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.basic_settings_form.setFormAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Model selection — always visible (empty group set).
         self.model_combo_box = FocusedScrollSettingsComboBox(key='model_id')
         # `setEditable()` must be called before `addItems()` to preserve any
         # custom model that was set.
+        # TODO: Make more clear you can use custom models by specifying a model path
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
-        self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
-        set_text_edit_height(self.prompt_text_edit, 4)
-        self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
-        self.caption_start_line_edit.setClearButtonEnabled(True)
+        self._register(self.basic_settings_form,
+                       self.model_combo_box, label='Model', group=None)
+
+        # Caption position — always visible (empty group set).
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
             key='caption_position')
         self.caption_position_combo_box.addItems(list(CaptionPosition))
-        self.device_combo_box = FocusedScrollSettingsComboBox(key='device')
-        self.device_combo_box.addItems(list(CaptionDevice))
-        self.load_in_4_bit_container = QWidget()
-        load_in_4_bit_layout = QHBoxLayout()
-        load_in_4_bit_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        load_in_4_bit_layout.setContentsMargins(0, 0, 0, 0)
-        self.load_in_4_bit_check_box = SettingsBigCheckBox(
-            key='load_in_4_bit', default=True)
-        load_in_4_bit_layout.addWidget(QLabel('Load in 4-bit'))
-        load_in_4_bit_layout.addWidget(self.load_in_4_bit_check_box)
-        self.load_in_4_bit_container.setLayout(load_in_4_bit_layout)
-        self.remove_tag_separators_container = QWidget()
-        remove_tag_separators_layout = QHBoxLayout(
-            self.remove_tag_separators_container)
-        remove_tag_separators_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        remove_tag_separators_layout.setContentsMargins(0, 0, 0, 0)
+        self._register(self.basic_settings_form,
+                       self.caption_position_combo_box, label='Caption position', group=None)
+
+        # Prompt.
+        self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
+        set_text_edit_height(self.prompt_text_edit, 4)
+        self._register(self.basic_settings_form,
+                       self.prompt_text_edit, SettingGroup.PROMPT)
+
+        # Caption start.
+        self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
+        self.caption_start_line_edit.setClearButtonEnabled(True)
+        self._register(self.basic_settings_form,
+                       self.caption_start_line_edit,
+                       SettingGroup.CAPTION_START)
+
+        # Remove tag separators.
         self.remove_tag_separators_check_box = SettingsBigCheckBox(
             key='remove_tag_separators', default=True)
-        remove_tag_separators_label = QLabel(
-            'Remove tag separators in caption')
-        remove_tag_separators_layout.addWidget(remove_tag_separators_label)
-        remove_tag_separators_layout.addWidget(
-            self.remove_tag_separators_check_box)
-        basic_settings_form.addRow('Model', self.model_combo_box)
-        self.prompt_label = QLabel('Prompt')
-        basic_settings_form.addRow(self.prompt_label, self.prompt_text_edit)
-        self.caption_start_label = QLabel('Start caption with')
-        basic_settings_form.addRow(self.caption_start_label,
-                                   self.caption_start_line_edit)
-        basic_settings_form.addRow('Caption position',
-                                   self.caption_position_combo_box)
-        self.device_label = QLabel('Device')
-        basic_settings_form.addRow(self.device_label, self.device_combo_box)
-        basic_settings_form.addRow(self.load_in_4_bit_container)
-        basic_settings_form.addRow(self.remove_tag_separators_container)
+        self._register(self.basic_settings_form,
+                       self.remove_tag_separators_check_box,
+                       SettingGroup.REMOVE_TAG_SEPARATORS, label_position=LabelPosition.BESIDE)
+        
+        # Add seperator line
+        self.basic_settings_form.addRow(HorizontalLine())
 
-        self.wd_tagger_settings_form_container = QWidget()
-        wd_tagger_settings_form = QFormLayout(
-            self.wd_tagger_settings_form_container)
-        wd_tagger_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        wd_tagger_settings_form.setFieldGrowthPolicy(
+        # Device.
+        self.device_combo_box = FocusedScrollSettingsComboBox(key='device')
+        self.device_combo_box.addItems(list(CaptionDevice))
+        self._register(self.basic_settings_form,
+                       self.device_combo_box, SettingGroup.DEVICE)
+
+        # Load in 4-bit — arrives as its own layout, so wrap it in a widget.
+        self.load_in_4_bit_check_box = SettingsBigCheckBox(
+            key='load_in_4_bit', default=True)
+        self.load_in_4_bit_container = self._register(self.basic_settings_form,
+                                                      self.load_in_4_bit_check_box, SettingGroup.LOAD_IN_4_BIT, label_position=LabelPosition.BESIDE)
+
+        # WD Tagger settings — built as a sub-form, registered as one composite.
+        self.wd_tagger_settings_form = QFormLayout()
+        self.wd_tagger_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.wd_tagger_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.wd_tagger_settings_form.setContentsMargins(0, 0, 0, 0)
+
         self.show_probabilities_check_box = SettingsBigCheckBox(
-            key='wd_tagger_show_probabilities', default=True)
+            key='show_probabilities', default=True)
+        self.wd_tagger_settings_form.addRow('Show probabilities',
+                                             self.show_probabilities_check_box)
+
         self.min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
-            key='wd_tagger_min_probability', default=0.4, minimum=0.01,
-            maximum=1)
+            key='min_probability', default=0.4, minimum=0.01, maximum=1)
         self.min_probability_spin_box.setSingleStep(0.01)
+        self.wd_tagger_settings_form.addRow('Minimum probability',
+                                            self.min_probability_spin_box)
+
         self.max_tags_spin_box = FocusedScrollSettingsSpinBox(
-            key='wd_tagger_max_tags', default=30, minimum=1, maximum=999)
-        tags_to_exclude_form = QFormLayout()
-        tags_to_exclude_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapAllRows)
-        tags_to_exclude_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            key='max_tags', default=100, minimum=1, maximum=999)
+        self.wd_tagger_settings_form.addRow('Maximum tags',
+                                            self.max_tags_spin_box)
+
         self.tags_to_exclude_text_edit = SettingsPlainTextEdit(
-            key='wd_tagger_tags_to_exclude')
-        tags_to_exclude_form.addRow('Tags to exclude',
-                                    self.tags_to_exclude_text_edit)
-        set_text_edit_height(self.tags_to_exclude_text_edit, 4)
-        wd_tagger_settings_form.addRow('Show probabilities',
-                                       self.show_probabilities_check_box)
-        wd_tagger_settings_form.addRow('Minimum probability',
-                                       self.min_probability_spin_box)
-        wd_tagger_settings_form.addRow('Maximum tags', self.max_tags_spin_box)
-        wd_tagger_settings_form.addRow(tags_to_exclude_form)
+            key='tags_to_exclude')
+        set_text_edit_height(self.tags_to_exclude_text_edit, 3)
+        self.tags_to_exclude_container = self._position_label('Tags to exclude', self.tags_to_exclude_text_edit, label_position=LabelPosition.ABOVE)
+        self.wd_tagger_settings_form.addRow(self.tags_to_exclude_container)
 
-        self.toggle_advanced_settings_form_button = TallPushButton(
+        self.wd_tagger_settings_container = QWidget()
+        self.wd_tagger_settings_container.setLayout(
+            self.wd_tagger_settings_form)
+        self._register(self.basic_settings_form,
+                       self.wd_tagger_settings_container,
+                       SettingGroup.WD_TAGGER, label=None)
+
+        self.addLayout(self.basic_settings_form)
+
+        # ------------------------------------------------------------------
+        # Advanced settings toggle
+        # ------------------------------------------------------------------
+        self.toggle_advanced_settings_button = QPushButton(
             'Show Advanced Settings')
+        self.toggle_advanced_settings_button.setCheckable(True)
+        self.toggle_advanced_settings_button.clicked.connect(
+            self.toggle_advanced_settings)
+        self.addWidget(self.toggle_advanced_settings_button)
 
-        self.advanced_settings_form_container = QWidget()
-        advanced_settings_form = QFormLayout(
-            self.advanced_settings_form_container)
-        advanced_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        advanced_settings_form.setFieldGrowthPolicy(
+        # ------------------------------------------------------------------
+        # Advanced settings
+        # ------------------------------------------------------------------
+        self.advanced_settings_form = QFormLayout()
+        self.advanced_settings_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft)
+        self.advanced_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        bad_forced_words_form = QFormLayout()
-        bad_forced_words_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapAllRows)
-        bad_forced_words_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # Banned words
         self.bad_words_line_edit = SettingsLineEdit(key='bad_words')
-        self.bad_words_line_edit.setClearButtonEnabled(True)
+        self._register(self.advanced_settings_form,
+                       self.bad_words_line_edit, SettingGroup.DISCOURAGED_WORDS, label_position=LabelPosition.ABOVE)
+
+        # Forced words
         self.forced_words_line_edit = SettingsLineEdit(key='forced_words')
-        self.forced_words_line_edit.setClearButtonEnabled(True)
-        bad_forced_words_form.addRow('Discourage from caption',
-                                     self.bad_words_line_edit)
-        bad_forced_words_form.addRow('Include in caption',
-                                     self.forced_words_line_edit)
-        self.min_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='min_new_tokens', default=1, minimum=1, maximum=999)
-        self.max_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_new_tokens', default=100, minimum=1, maximum=999)
-        self.beam_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='num_beams', default=1, minimum=1, maximum=99)
+        self._register(self.advanced_settings_form,
+                       self.forced_words_line_edit, SettingGroup.FORCED_WORDS, label_position=LabelPosition.ABOVE)
+
+        # Add seperator line
+        self._register(self.advanced_settings_form, HorizontalLine(), label=None, group=SettingGroup.FORCED_WORDS)
+
+        # Seed
+        self.seed_spin_box = FocusedScrollSettingsSpinBox(
+            key='seed', default=-1, minimum=-1, maximum=2147483647)
+        self._register(self.advanced_settings_form,
+                       self.seed_spin_box,
+                       SettingGroup.SEED)
+
+        # Min / max new tokens.
+        self.min_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
+            key='min_new_tokens', default=1, minimum=1, maximum=4096)
+        self._register(self.advanced_settings_form,
+                       self.min_new_tokens_spin_box,
+                       SettingGroup.MIN_TOKENS)
+
+        self.max_new_tokens_spin_box = FocusedScrollSettingsSpinBox(
+            key='max_new_tokens', default=512, minimum=1, maximum=4096)
+        self._register(self.advanced_settings_form,
+                       self.max_new_tokens_spin_box,
+                       SettingGroup.MAX_TOKENS)
+
+        # Number of beams.
+        self.num_beams_spin_box = FocusedScrollSettingsSpinBox(
+            key='num_beams', default=1, minimum=1, maximum=100)
+        self._register(self.advanced_settings_form,
+                       self.num_beams_spin_box,
+                       SettingGroup.NUM_BEAMS)
+
+        # Length penalty.
         self.length_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='length_penalty', default=1, minimum=-5, maximum=5)
         self.length_penalty_spin_box.setSingleStep(0.1)
-        self.use_sampling_check_box = SettingsBigCheckBox(key='do_sample',
-                                                          default=False)
-        # The temperature must be positive.
+        self._register(self.advanced_settings_form,
+                       self.length_penalty_spin_box,
+                       SettingGroup.LENGTH_PENALTY)
+
+        # Sampling — shared by transformers and llama.
+        self.use_sampling_check_box = SettingsBigCheckBox(
+            key='do_sample', default=False)
+        self._register(self.advanced_settings_form,
+                       self.use_sampling_check_box,
+                       SettingGroup.USE_SAMPLING)
+
         self.temperature_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='temperature', default=1, minimum=0.01, maximum=2)
         self.temperature_spin_box.setSingleStep(0.01)
+        self._register(self.advanced_settings_form,
+                       self.temperature_spin_box,
+                       SettingGroup.TEMPERATURE)
+
         self.top_k_spin_box = FocusedScrollSettingsSpinBox(
-            key='top_k', default=50, minimum=0, maximum=200)
+            key='top_k', default=64, minimum=0, maximum=200)
+        self._register(self.advanced_settings_form,
+                       self.top_k_spin_box,
+                       SettingGroup.TOP_K)
+
         self.top_p_spin_box = FocusedScrollSettingsDoubleSpinBox(
-            key='top_p', default=1, minimum=0, maximum=1)
+            key='top_p', default=0.95, minimum=0, maximum=1)
         self.top_p_spin_box.setSingleStep(0.01)
+        self._register(self.advanced_settings_form,
+                       self.top_p_spin_box,
+                       SettingGroup.TOP_P)
+
+        # Repetition penalty — shared by transformers and llama.
         self.repetition_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='repetition_penalty', default=1, minimum=1, maximum=2)
         self.repetition_penalty_spin_box.setSingleStep(0.01)
+        self._register(self.advanced_settings_form,
+                       self.repetition_penalty_spin_box,
+                       SettingGroup.REPETITION_PENALTY)
+
+        # No-repeat n-gram size.
         self.no_repeat_ngram_size_spin_box = FocusedScrollSettingsSpinBox(
-            key='no_repeat_ngram_size', default=3, minimum=0, maximum=5)
+            key='no_repeat_ngram_size', default=3, minimum=0, maximum=100)
+        self._register(self.advanced_settings_form,
+                       self.no_repeat_ngram_size_spin_box,
+                       SettingGroup.NO_REPEAT_NGRAM)
+
+        # Add seperator line
+        self._register(self.advanced_settings_form, HorizontalLine(),
+                       label=None, group=SettingGroup.GPU_INDEX)
+
+        # GPU index.
         self.gpu_index_spin_box = FocusedScrollSettingsSpinBox(
-            key='gpu_index', default=0, minimum=0, maximum=9)
-        advanced_settings_form.addRow(bad_forced_words_form)
-        advanced_settings_form.addRow(HorizontalLine())
-        advanced_settings_form.addRow('Minimum tokens',
-                                      self.min_new_token_count_spin_box)
-        advanced_settings_form.addRow('Maximum tokens',
-                                      self.max_new_token_count_spin_box)
-        advanced_settings_form.addRow('Number of beams',
-                                      self.beam_count_spin_box)
-        advanced_settings_form.addRow('Length penalty',
-                                      self.length_penalty_spin_box)
-        advanced_settings_form.addRow('Use sampling',
-                                      self.use_sampling_check_box)
-        advanced_settings_form.addRow('Temperature',
-                                      self.temperature_spin_box)
-        advanced_settings_form.addRow('Top-k', self.top_k_spin_box)
-        advanced_settings_form.addRow('Top-p', self.top_p_spin_box)
-        advanced_settings_form.addRow('Repetition penalty',
-                                      self.repetition_penalty_spin_box)
-        advanced_settings_form.addRow('No repeat n-gram size',
-                                      self.no_repeat_ngram_size_spin_box)
-        advanced_settings_form.addRow(HorizontalLine())
-        advanced_settings_form.addRow('GPU index', self.gpu_index_spin_box)
-        self.advanced_settings_form_container.hide()
+            key='gpu_index', default=0, minimum=0, maximum=100)
+        self._register(self.advanced_settings_form,
+                       self.gpu_index_spin_box, SettingGroup.GPU_INDEX)
+        # Add advanced settings
+        self.advanced_settings_container = QWidget()
+        self.advanced_settings_container.setLayout(self.advanced_settings_form)
+        self.addWidget(self.advanced_settings_container)
 
-        self.addLayout(basic_settings_form)
-        self.addWidget(self.wd_tagger_settings_form_container)
-        self.horizontal_line = HorizontalLine()
-        self.addWidget(self.horizontal_line)
-        self.addWidget(self.toggle_advanced_settings_form_button)
-        self.addWidget(self.advanced_settings_form_container)
-        self.addStretch()
-
-        self.model_combo_box.currentTextChanged.connect(
-            self.show_settings_for_model)
+        # ------------------------------------------------------------------
+        # Wiring
+        # ------------------------------------------------------------------
         self.device_combo_box.currentTextChanged.connect(
             self.set_load_in_4_bit_visibility)
-        self.toggle_advanced_settings_form_button.clicked.connect(
-            self.toggle_advanced_settings_form)
-        # Make sure the minimum new token count is less than or equal to the
-        # maximum new token count.
-        self.min_new_token_count_spin_box.valueChanged.connect(
-            self.max_new_token_count_spin_box.setMinimum)
-        self.max_new_token_count_spin_box.valueChanged.connect(
-            self.min_new_token_count_spin_box.setMaximum)
+        self.model_combo_box.currentTextChanged.connect(
+            self.show_settings_for_model)
 
+        # Initial state: advanced collapsed, correct groups for current model.
         self.show_settings_for_model(self.model_combo_box.currentText())
-        self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
-        if not self.is_bitsandbytes_available:
-            self.load_in_4_bit_check_box.setChecked(False)
+
+    @staticmethod
+    def _position_label(label_text: str, field: QWidget, label_position: LabelPosition = LabelPosition.BESIDE) -> QWidget:
+        """Stack a label besides its field inside a single widget so it can be
+        added to a QFormLayout as one spanning row (label-above layout), regardless
+        of the form's row-wrap policy."""
+        label = QLabel(label_text)
+        if label_position is LabelPosition.ABOVE:
+            layout = QVBoxLayout()
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(label)
+            layout.addWidget(field)
+        if label_position is LabelPosition.BESIDE:
+            layout = QHBoxLayout()
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(field)
+            layout.addWidget(label)
+        layout.addStretch()
+        container = QWidget()
+        container.setLayout(layout)
+        return container
+
+    def _register(self, form: QFormLayout, field: QWidget,
+                  group: SettingGroup,
+                  label: str = '',
+                  label_position: LabelPosition = LabelPosition.DEFAULT):
+        is_advanced = False
+        if group:
+            is_advanced = group.is_advanced
+            if label == '':
+                label = group.value
+        if label is not None and label_position is not LabelPosition.DEFAULT:
+            # Build our own stacked label+field and add it as a spanning row.
+            row_widget = self._position_label(label, field, label_position=label_position)
+            form.addRow(row_widget)
+            registered_field = row_widget
+        elif label is None:
+            form.addRow(field)
+            registered_field = field
+        else:
+            form.addRow(label, field)
+            registered_field = field
+        self.registered_rows.append(
+            (form, registered_field, group, is_advanced))
+        return registered_field
+
+    def _active_groups(self) -> set[SettingGroup] | None:
+        """Return the setting groups for the currently selected model, or
+        None if there is no valid model selected yet."""
+        model_id = self.model_combo_box.currentText()
+        if not model_id:
+            return None
+        model_class = get_model_class(model_id)
+        if model_class is None:
+            return None
+        return model_class.get_setting_groups()
 
     def get_local_model_paths(self) -> list[str]:
         models_directory_path = self.settings.value(
@@ -263,48 +385,68 @@ class CaptionSettingsForm(QVBoxLayout):
 
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
-        wd_tagger_widgets = [self.wd_tagger_settings_form_container]
-        non_wd_tagger_widgets = [
-            self.prompt_label,
-            self.prompt_text_edit,
-            self.caption_start_label,
-            self.caption_start_line_edit,
-            self.device_label,
-            self.device_combo_box,
-            self.load_in_4_bit_container,
-            self.remove_tag_separators_container,
-            self.horizontal_line,
-            self.toggle_advanced_settings_form_button,
-            self.advanced_settings_form_container
-        ]
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        for widget in wd_tagger_widgets:
-            widget.setVisible(is_wd_tagger_model)
-        for widget in non_wd_tagger_widgets:
-            widget.setVisible(not is_wd_tagger_model)
+        active_groups = self._active_groups()
+        if active_groups is None:
+            # No valid model yet: hide the advanced affordances and leave the
+            # always-visible rows (empty group set) showing.
+            self.advanced_expanded = False
+            self.toggle_advanced_settings_button.setChecked(False)
+            self.toggle_advanced_settings_button.setText(
+                'Show Advanced Settings')
+            self.toggle_advanced_settings_button.setVisible(False)
+            self.advanced_settings_container.setVisible(False)
+            for form, field, groups, _is_advanced in self.registered_rows:
+                form.setRowVisible(field, not groups)
+            return
+
+        # Does this model have any relevant advanced rows?
+        has_advanced = any(
+            group and group.is_advanced and group in active_groups
+            for _form, _field, group, is_advanced in self.registered_rows)
+
+        if not has_advanced:
+            self.advanced_expanded = False
+            self.toggle_advanced_settings_button.setChecked(False)
+            self.toggle_advanced_settings_button.setText(
+                'Show Advanced Settings')
+
+        # Toggle button + container only exist when there's something to show.
+        self.toggle_advanced_settings_button.setVisible(has_advanced)
+        self.advanced_settings_container.setVisible(
+            has_advanced and self.advanced_expanded)
+
+        for form, field, group, _is_advanced in self.registered_rows:
+            visible = (not group) or group in active_groups
+            form.setRowVisible(field, visible)
+
+        # bitsandbytes / device override for the load-in-4-bit row.
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
     @Slot(str)
     def set_load_in_4_bit_visibility(self, device: str):
-        model_id = self.model_combo_box.currentText()
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        if is_wd_tagger_model:
-            self.load_in_4_bit_container.setVisible(False)
+        active_groups = self._active_groups()
+        if active_groups is None:
+            self.basic_settings_form.setRowVisible(
+                self.load_in_4_bit_container, False)
             return
-        is_load_in_4_bit_available = (self.is_bitsandbytes_available
-                                      and device == CaptionDevice.GPU)
-        self.load_in_4_bit_container.setVisible(is_load_in_4_bit_available)
+        visible = (SettingGroup.LOAD_IN_4_BIT in active_groups
+                   and device == CaptionDevice.GPU
+                   and BITSANDBYTES_AVAILABLE)
+        self.basic_settings_form.setRowVisible(
+            self.load_in_4_bit_container, visible)
 
     @Slot()
-    def toggle_advanced_settings_form(self):
-        if self.advanced_settings_form_container.isHidden():
-            self.advanced_settings_form_container.show()
-            self.toggle_advanced_settings_form_button.setText(
-                'Hide Advanced Settings')
-        else:
-            self.advanced_settings_form_container.hide()
-            self.toggle_advanced_settings_form_button.setText(
-                'Show Advanced Settings')
+    def toggle_advanced_settings(self):
+        # Ignore toggles when there is nothing to show (button should be hidden
+        # in that case, but stay defensive).
+        if not self.toggle_advanced_settings_button.isVisible():
+            return
+        self.advanced_expanded = not self.advanced_expanded
+        self.toggle_advanced_settings_button.setText(
+            'Hide Advanced Settings' if self.advanced_expanded
+            else 'Show Advanced Settings')
+        self.toggle_advanced_settings_button.setChecked(self.advanced_expanded)
+        self.advanced_settings_container.setVisible(self.advanced_expanded)
 
     def get_caption_settings(self) -> dict:
         return {
@@ -319,10 +461,11 @@ class CaptionSettingsForm(QVBoxLayout):
                 self.remove_tag_separators_check_box.isChecked(),
             'bad_words': self.bad_words_line_edit.text(),
             'forced_words': self.forced_words_line_edit.text(),
+            'seed': self.seed_spin_box.value(),
             'generation_parameters': {
-                'min_new_tokens': self.min_new_token_count_spin_box.value(),
-                'max_new_tokens': self.max_new_token_count_spin_box.value(),
-                'num_beams': self.beam_count_spin_box.value(),
+                'min_new_tokens': self.min_new_tokens_spin_box.value(),
+                'max_new_tokens': self.max_new_tokens_spin_box.value(),
+                'num_beams': self.num_beams_spin_box.value(),
                 'length_penalty': self.length_penalty_spin_box.value(),
                 'do_sample': self.use_sampling_check_box.isChecked(),
                 'temperature': self.temperature_spin_box.value(),
@@ -360,11 +503,9 @@ class AutoCaptioner(QDockWidget):
         self.settings = get_settings()
         self.is_captioning = False
         self.captioning_thread = None
-        self.processor = None
-        self.model = None
-        self.model_id: str | None = None
-        self.model_device_type: str | None = None
-        self.is_model_loaded_in_4_bit = None
+        self.model_manager = ModelSubprocessManager()
+        # Ensure there are no orphaned processes on shutdown
+        QApplication.instance().aboutToQuit.connect(self.model_manager.shutdown)
         # Whether the last block of text in the console text edit should be
         # replaced with the next block of text that is outputted.
         self.replace_last_console_text_edit_block = False
@@ -374,7 +515,7 @@ class AutoCaptioner(QDockWidget):
         self.setWindowTitle('Auto-Captioner')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
-
+        # TODO Pin the start button so it's always visible, and make it smaller
         self.start_cancel_button = TallPushButton('Start Auto-Captioning')
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat('%v / %m images captioned (%p%)')
@@ -406,6 +547,7 @@ class AutoCaptioner(QDockWidget):
         if self.is_captioning:
             # Cancel captioning.
             self.captioning_thread.is_canceled = True
+            self.model_manager.cancel()
             self.start_cancel_button.setEnabled(False)
             self.start_cancel_button.setText('Canceling Auto-Captioning...')
         else:
@@ -511,3 +653,8 @@ class AutoCaptioner(QDockWidget):
         sys.stdout = self.captioning_thread
         sys.stderr = self.captioning_thread
         self.captioning_thread.start()
+
+
+    def closeEvent(self, event):
+        self.model_manager.shutdown()
+        super().closeEvent(event)

@@ -1,4 +1,6 @@
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import (
+    TransformersCaptioningModel)
 from auto_captioning.models.florence_2 import Florence2, Florence2Promptgen
 from auto_captioning.models.joycaption import Joycaption
 from auto_captioning.models.kosmos_2 import Kosmos2
@@ -9,6 +11,7 @@ from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
 from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.phi_3_vision import Phi3Vision
 from auto_captioning.models.wd_tagger import WdTagger
+from auto_captioning.models.gemma_4 import Gemma4
 
 MODELS = [
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
@@ -48,7 +51,8 @@ MODELS = [
     'Salesforce/blip2-opt-6.7b-coco',
     'Salesforce/blip2-flan-t5-xl',
     'Salesforce/blip2-flan-t5-xxl',
-    'microsoft/kosmos-2-patch14-224'
+    'microsoft/kosmos-2-patch14-224',
+    'llmfan46/gemma-4-31B-it-uncensored-heretic'
 ]
 
 
@@ -80,4 +84,8 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return Phi3Vision
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
         return WdTagger
-    return AutoCaptioningModel
+    if 'gemma-4-31b' in lowercase_model_id:
+        return Gemma4
+    # Unknown models default to the generic transformers backend, which can
+    # load any Hugging Face repo or local model directory.
+    return TransformersCaptioningModel

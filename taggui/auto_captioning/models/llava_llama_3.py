@@ -1,9 +1,8 @@
 from transformers import AutoConfig, AutoProcessor
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
 
-
-class LlavaLlama3(AutoCaptioningModel):
+class LlavaLlama3(TransformersCaptioningModel):
     def get_processor(self):
         config = AutoConfig.from_pretrained(self.model_id)
         patch_size = config.vision_config.patch_size

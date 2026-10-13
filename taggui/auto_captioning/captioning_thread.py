@@ -2,20 +2,33 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from PIL import UnidentifiedImageError
 from PySide6.QtCore import QModelIndex, QThread, Qt, Signal
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
-from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
-from utils.image import Image
 from utils.settings import get_tag_separator
+
+
+def add_caption_to_description(description: str, caption: str,
+                               caption_position: CaptionPosition) -> str:
+    if not caption:
+        return None
+    separator = ' '
+    # Prevent white space from being added if there is no description
+    if not description:
+        separator = ''
+    if caption_position == CaptionPosition.BEFORE_DESCRIPTION:
+        return f"{caption}{separator}{description}"
+    if caption_position == CaptionPosition.AFTER_DESCRIPTION:
+        return f"{description}{separator}{caption}"
+    if caption_position == CaptionPosition.OVERWRITE_DESCRIPTION:
+        return caption
+    return None
 
 
 def add_caption_to_tags(tags: list[str], caption: str,
                         caption_position: CaptionPosition) -> list[str]:
-    if caption_position == CaptionPosition.DO_NOT_ADD or not caption:
+    if not caption:
         return tags
     tag_separator = get_tag_separator()
     new_tags = caption.split(tag_separator)
@@ -75,47 +88,52 @@ class CaptioningThread(QThread):
         self.is_canceled = False
 
     def run_captioning(self):
-        model_id = self.caption_settings['model_id']
-        model_class = get_model_class(model_id)
-        model: AutoCaptioningModel = model_class(
-            captioning_thread_=self, caption_settings=self.caption_settings)
-        error_message = model.get_error_message()
-        if error_message:
-            self.is_error = True
-            self.clear_console_text_edit_requested.emit()
-            print(error_message)
+        manager = self.parent().model_manager
+
+        def log(text):
+            self.write(text)   # emits text_outputted -> console
+        loaded = manager.ensure_model(
+            self.caption_settings, self.models_directory_path, self.tag_separator,
+            log=log,
+            on_loaded=self.clear_console_text_edit_requested.emit,
+            on_load_error=lambda msg: (setattr(self, 'is_error', True),
+                                        print(msg)))
+        if not loaded or self.is_canceled:
             return
-        model.load_processor_and_model()
-        model.monkey_patch_after_loading()
-        if self.is_canceled:
-            print('Canceled captioning.')
-            return
-        self.clear_console_text_edit_requested.emit()
         selected_image_count = len(self.selected_image_indices)
         are_multiple_images_selected = selected_image_count > 1
         captioning_start_datetime = datetime.now()
-        captioning_message = model.get_captioning_message(
-            are_multiple_images_selected, captioning_start_datetime)
-        print(captioning_message)
+        # TODO: Consider removing these logs
+        # captioning_message = model.get_captioning_message(
+        #     are_multiple_images_selected, captioning_start_datetime)
+        # print(captioning_message)
         caption_position = self.caption_settings['caption_position']
         for i, image_index in enumerate(self.selected_image_indices):
             start_time = perf_counter()
             if self.is_canceled:
-                print('Canceled captioning.')
                 return
-            image: Image = self.image_list_model.data(image_index,
-                                                      Qt.ItemDataRole.UserRole)
-            image_prompt = model.get_image_prompt(image)
+            image = self.image_list_model.data(image_index, Qt.ItemDataRole.UserRole)
+            # Maybe prompt/caption settings to the payload to update whatever settings are needed?
+            payload = {
+                'path': str(image.path),
+                'tags': list(image.tags),
+                'description': getattr(image, 'description', ''),
+            }
             try:
-                model_inputs = model.get_model_inputs(image_prompt, image)
-            except UnidentifiedImageError:
-                print(f'Skipping {image.path.name} because its file format is '
-                      'not supported or it is a corrupted image.')
+                caption, console_output_caption = manager.caption(payload, log=log)
+            except RuntimeError as exception:
+                if not manager.is_alive():
+                    # The worker process is gone, so no further images can be
+                    # captioned. Stop the whole run and mark it as an error.
+                    print(f'Aborting captioning: {str(exception)}')
+                    self.is_error = True
+                    return
+                print(f'Skipping {image.path.name} due to error: {str(exception)}')
                 continue
-            caption, console_output_caption = model.generate_caption(
-                model_inputs, image_prompt)
-            tags = add_caption_to_tags(image.tags, caption, caption_position)
-            self.caption_generated.emit(image_index, caption, tags)
+            if caption_position != CaptionPosition.DO_NOT_ADD:
+                tags = add_caption_to_tags(image.tags, caption, caption_position)
+                description = add_caption_to_description(image.description, caption, caption_position)
+                self.caption_generated.emit(image_index, description, tags)
             if are_multiple_images_selected:
                 self.progress_bar_update_requested.emit(i + 1)
             if i == 0 and not are_multiple_images_selected:
@@ -146,3 +164,9 @@ class CaptioningThread(QThread):
 
     def write(self, text: str):
         self.text_outputted.emit(text)
+
+    def flush(self):
+        pass  # No buffering — each write() emits immediately via Qt signal
+
+    def isatty(self) -> bool:
+        return False  # Not a real TTY; prevents colour-code injection attempts

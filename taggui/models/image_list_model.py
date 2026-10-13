@@ -38,6 +38,7 @@ def get_file_paths(directory_path: Path) -> set[Path]:
 class HistoryItem:
     action_name: str
     tags: list[list[str]]
+    descriptions: list[str]
     should_ask_for_confirmation: bool
 
 
@@ -146,34 +147,44 @@ class ImageListModel(QAbstractListModel):
                       f'{exception}', file=sys.stderr)
                 dimensions = None
             tags = []
+            description = ""
             text_file_path = image_path.with_suffix('.txt')
             if str(text_file_path) in text_file_path_strings:
                 # `errors='replace'` inserts a replacement marker such as '?'
                 # when there is malformed data.
                 caption = text_file_path.read_text(encoding='utf-8',
                                                    errors='replace')
-                if caption:
-                    tags = caption.split(self.tag_separator)
+                # TODO move the seperator to the settings
+                tags_raw, _, description = caption.partition('\n\n')
+                if tags_raw:
+                    tags = tags_raw.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
                     tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags)
+                description = description.strip()
+            image = Image(image_path, dimensions, tags, description)
             self.images.append(image)
         self.images.sort(key=lambda image_: image_.path)
         self.modelReset.emit()
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
-        """Add the current state of the image tags to the undo stack."""
+        """Add the current state of the image tags and descriptions to the
+        undo stack."""
         tags = [image.tags.copy() for image in self.images]
-        self.undo_stack.append(HistoryItem(action_name, tags,
+        descriptions = [image.description for image in self.images]
+        self.undo_stack.append(HistoryItem(action_name, tags, descriptions,
                                            should_ask_for_confirmation))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    @Slot(Image)
     def write_image_tags_to_disk(self, image: Image):
         try:
+            # TODO move the seperator to the settings
+            # If there are tags, always append \n\n to the file
+            image_text = self.tag_separator.join(image.tags) + '\n\n' + image.description
             image.path.with_suffix('.txt').write_text(
-                self.tag_separator.join(image.tags), encoding='utf-8',
+                image_text, encoding='utf-8',
                 errors='replace')
         except OSError:
             error_message_box = QMessageBox()
@@ -182,7 +193,7 @@ class ImageListModel(QAbstractListModel):
             error_message_box.setText(f'Failed to save tags for {image.path}.')
             error_message_box.exec()
 
-    def restore_history_tags(self, is_undo: bool):
+    def restore_history_tags_and_description(self, is_undo: bool):
         if is_undo:
             source_stack = self.undo_stack
             destination_stack = self.redo_stack
@@ -203,16 +214,21 @@ class ImageListModel(QAbstractListModel):
                 return
         source_stack.pop()
         tags = [image.tags for image in self.images]
+        descriptions = [image.description for image in self.images]
         destination_stack.append(HistoryItem(
-            history_item.action_name, tags,
+            history_item.action_name, tags, descriptions,
             history_item.should_ask_for_confirmation))
         changed_image_indices = []
-        for image_index, (image, history_image_tags) in enumerate(
-                zip(self.images, history_item.tags)):
-            if image.tags == history_image_tags:
+        for (image_index, (image, history_image_tags,
+                           history_image_description)) in enumerate(
+                zip(self.images, history_item.tags,
+                    history_item.descriptions)):
+            if (image.tags == history_image_tags
+                    and image.description == history_image_description):
                 continue
             changed_image_indices.append(image_index)
             image.tags = history_image_tags
+            image.description = history_image_description
             self.write_image_tags_to_disk(image)
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
@@ -222,12 +238,12 @@ class ImageListModel(QAbstractListModel):
     @Slot()
     def undo(self):
         """Undo the last action."""
-        self.restore_history_tags(is_undo=True)
+        self.restore_history_tags_and_description(is_undo=True)
 
     @Slot()
     def redo(self):
         """Redo the last undone action."""
-        self.restore_history_tags(is_undo=False)
+        self.restore_history_tags_and_description(is_undo=False)
 
     def is_image_in_scope(self, scope: Scope | str, image_index: int,
                           image: Image) -> bool:
@@ -461,6 +477,14 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
+        self.dataChanged.emit(image_index, image_index)
+        self.write_image_tags_to_disk(image)
+
+    def update_image_description(self, image_index: QModelIndex, description: str):
+        image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+        if image.description == description:
+            return
+        image.description = description
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
 

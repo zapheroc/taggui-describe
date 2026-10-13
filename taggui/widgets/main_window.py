@@ -181,7 +181,8 @@ class MainWindow(QMainWindow):
         self.image_tags_editor.tag_input_box.setFocus()
 
     def closeEvent(self, event: QCloseEvent):
-        """Save the window geometry and state before closing."""
+        """Close any captioning subprocess and save the window geometry and state before closing."""
+        self.auto_captioner.model_manager.shutdown()
         self.settings.setValue('geometry', self.saveGeometry())
         self.settings.setValue('window_state', self.saveState())
         super().closeEvent(event)
@@ -506,6 +507,8 @@ class MainWindow(QMainWindow):
                 self.image_tags_editor.isVisible()))
         self.image_tags_editor.tag_input_box.tags_addition_requested.connect(
             self.image_list_model.add_tags)
+        self.image_tags_editor.image_data_save_requested.connect(
+            self.image_list_model.write_image_tags_to_disk)
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):
@@ -545,8 +548,11 @@ class MainWindow(QMainWindow):
 
     def connect_auto_captioner_signals(self):
         self.auto_captioner.caption_generated.connect(
-            lambda image_index, _, tags:
-            self.image_list_model.update_image_tags(image_index, tags))
+            lambda image_index, description, tags:
+                self.image_list_model.update_image_description(image_index, description)
+                if description else
+                self.image_list_model.update_image_tags(image_index, tags)
+            )
         self.auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             self.image_tags_editor.reload_image_tags_if_changed(image_index,

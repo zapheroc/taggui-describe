@@ -14,6 +14,8 @@ models.
 - Tag autocomplete based on your own most-used tags
 - Integrated token counter (for Stable Diffusion)
 - Automatic caption and tag generation
+- Description box for free-form, natural language image descriptions
+- Caption models that run on llama.cpp, including Gemma 4 31B
 - Batch tag operations for renaming, deleting, and sorting tags
 - Advanced image list filtering
 
@@ -46,6 +48,18 @@ images.
 Any changes you make to the tags are also automatically saved to these `.txt`
 files.
 
+### Image Description
+
+Each image also has an `Image Description` box in the `Image Tags` pane,
+below the tag list.
+It is intended for free-form, natural language descriptions that do not need
+to be divided into tags.
+Descriptions are saved automatically in the same `.txt` file as the tags:
+the tags first, then a blank line, then the description.
+You can also direct generated captions into the description by choosing one
+of the description options in the `Caption position` setting in the
+Auto-Captioner pane (for example, `Overwrite the description`).
+
 ## Automatic Captioning
 
 <img src='images/auto-captioner-v1.18.0.png' alt='Auto-captioner screenshot' width='100%'>
@@ -63,6 +77,13 @@ Click the `Start Auto-Captioning` button to start captioning.
 You can select multiple images to batch generate captions for all of them.
 It can take up to several minutes to download and load a model when you first
 use it, but subsequent generations will be much faster.
+
+In addition to the Hugging Face models, TagGUI supports caption models that
+run on [llama.cpp](https://github.com/ggml-org/llama.cpp) (via
+llama-cpp-python).
+These models are downloaded automatically from Hugging Face as GGUF files on first use,
+or loaded from a local model directory (set in `File` -> `Settings`) that
+contains the model file and its vision projector file.
 
 ### Captioning parameters
 
@@ -104,6 +125,10 @@ It is not guaranteed that all of your specifications will be met.
 
 `Tags to exclude` (WD Tagger models): Tags that should not be generated,
 separated by commas.
+
+llama.cpp models (such as Gemma 4 31B) have their own set of generation
+parameters in the advanced settings: `Seed` (use `-1` for a random seed),
+`Maximum tokens`, `Temperature`, `Top-k`, `Top-p`, and `Repetition penalty`.
 
 Many of the other generation parameters are described in the
 [Hugging Face documentation](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationConfig).

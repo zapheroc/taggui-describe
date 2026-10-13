@@ -1,7 +1,7 @@
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 
 
-class Llava1Point5(AutoCaptioningModel):
+class Llava1Point5(TransformersCaptioningModel):
     @staticmethod
     def get_default_prompt() -> str:
         return 'Describe the image in twenty words or less.'
