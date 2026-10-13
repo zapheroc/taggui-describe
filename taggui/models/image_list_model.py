@@ -23,6 +23,13 @@ from utils.thumbnail_generation import (ThumbnailGenerationTask,
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
 UNDO_STACK_SIZE = 32
+# How long (in milliseconds) to wait for background tasks to finish when the
+# application is quitting. Destroying a thread pool while its worker threads
+# are still running tasks makes Qt report worker-thread exceptions (and can
+# even abort the process), so the in-flight work is given a brief, bounded
+# chance to finish. The wait is capped so that quitting is never blocked for
+# a long time: all of the work is read-only, so abandoning it is safe.
+SHUTDOWN_TIMEOUT_MS = 2000
 
 
 def get_file_paths(directory_path: Path) -> set[Path]:
@@ -221,10 +228,10 @@ class ImageListModel(QAbstractListModel):
         # Strong references to running tasks so that they are not garbage
         # collected while the thread pools still reference them.
         self._running_tasks: set = set()
-        # When the application is about to quit, wait for the background
-        # tasks to finish so that the thread pools are not destroyed while
-        # worker threads are still running tasks (which prints exceptions and
-        # could corrupt data).
+        # When the application is about to quit, give the background tasks a
+        # bounded chance to finish so that the thread pools are not destroyed
+        # while worker threads are still running tasks (which makes Qt report
+        # worker-thread exceptions, and can even abort the process).
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.wait_for_pending_work)
@@ -364,10 +371,12 @@ class ImageListModel(QAbstractListModel):
 
         Called when the application is about to quit, so that the thread
         pools are not destroyed while tasks are still running on worker
-        threads.
+        threads (which makes Qt report worker-thread exceptions, and can even
+        abort the process). The wait is bounded by `SHUTDOWN_TIMEOUT_MS` so
+        that quitting is never blocked for a long time.
         """
-        self.directory_load_thread_pool.waitForDone()
-        self.thumbnail_thread_pool.waitForDone()
+        self.directory_load_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
+        self.thumbnail_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):

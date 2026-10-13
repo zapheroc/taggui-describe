@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (QLabel, QSizePolicy, QVBoxLayout, QWidget)
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 
+# How long (in milliseconds) to wait for the background image load to finish
+# when the application is quitting. Destroying the thread pool while its
+# worker thread is still running a task makes Qt report worker-thread
+# exceptions (and can even abort the process), so the in-flight load is given
+# a brief, bounded chance to finish. The wait is capped so that quitting is
+# never blocked for a long time: the work is read-only, so abandoning it is
+# safe. (Same bound as `SHUTDOWN_TIMEOUT_MS` in `models/image_list_model.py`.)
+SHUTDOWN_TIMEOUT_MS = 2000
+
 
 class FullImageLoadWorker(QObject):
     """
@@ -85,9 +94,11 @@ class ImageLabel(QLabel):
         # Strong references to running tasks so that they are not garbage
         # collected while the thread pool still references them.
         self._running_tasks: set = set()
-        # When the application is about to quit, wait for the background
-        # image load to finish so that the thread pool is not destroyed
-        # while the worker thread is still running.
+        # When the application is about to quit, give the background image
+        # load a bounded chance to finish so that the thread pool is not
+        # destroyed while its worker thread is still running a task (which
+        # makes Qt report worker-thread exceptions, and can even abort the
+        # process).
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._wait_for_pending_work)
@@ -149,7 +160,7 @@ class ImageLabel(QLabel):
     @Slot()
     def _wait_for_pending_work(self):
         """Wait for the background image load to finish (app is quitting)."""
-        self._full_image_thread_pool.waitForDone()
+        self._full_image_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
 
 
 class ImageViewer(QWidget):
