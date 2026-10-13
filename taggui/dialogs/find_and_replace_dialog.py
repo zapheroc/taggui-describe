@@ -49,7 +49,8 @@ class FindAndReplaceDialog(QDialog):
         self.replace_text_line_edit = SettingsLineEdit(key='replace_text')
         self.replace_text_line_edit.setClearButtonEnabled(True)
         grid_layout.addWidget(self.replace_text_line_edit, 1, 1)
-        self.location_combo_box = SettingsComboBox(key='replace_location')
+        self.location_combo_box = SettingsComboBox(key='replace_location',
+                                                   default='Captions')
         self.location_combo_box.addItems(list(Location))
         self.location_combo_box.currentTextChanged.connect(
             self.display_match_count)
@@ -79,6 +80,16 @@ class FindAndReplaceDialog(QDialog):
         self.replace_button.setText('Replace')
         self.replace_button.setEnabled(False)
 
+    def get_location(self) -> Location:
+        """
+        Get the selected location. The saved value may be missing or no
+        longer valid, so fall back to captions in that case.
+        """
+        try:
+            return Location(self.location_combo_box.currentText())
+        except ValueError:
+            return Location.CAPTIONS
+
     def set_whole_tags_only_row_visible(self, visible: bool):
         """
         Show or hide the 'Whole tags only' row. It only applies to captions,
@@ -99,7 +110,7 @@ class FindAndReplaceDialog(QDialog):
     @Slot()
     def display_match_count(self):
         text = self.find_text_line_edit.text()
-        location = self.location_combo_box.currentText()
+        location = self.get_location()
         # 'Whole tags only' only applies to captions.
         self.set_whole_tags_only_row_visible(location == Location.CAPTIONS)
         if not text:
@@ -121,7 +132,7 @@ class FindAndReplaceDialog(QDialog):
 
     @Slot()
     def replace(self):
-        location = self.location_combo_box.currentText()
+        location = self.get_location()
         scope = self.scope_combo_box.currentText()
         use_regex = self.use_regex_check_box.isChecked()
         if (location == Location.CAPTIONS
