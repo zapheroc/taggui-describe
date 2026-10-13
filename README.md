@@ -158,6 +158,11 @@ apply:
     - `caption:cat` will match images that have `cat` anywhere in the
       caption. For example, images with the tag `orange cat` or the
       tag `catastrophe`.
+- `desc`: Images that contain the filter term in the description
+    - The description is the free-form, natural language image description in
+      the `Image Description` box.
+    - `desc:cat` will match images whose description contains `cat` anywhere.
+      For example, an image with the description "A cat sitting on a table".
 - `name`: Images that contain the filter term in the file name
     - `name:cat` will match images such as `cat-1.jpg` or `large_cat.png`.
 - `path`: Images that contain the filter term in the full file path
