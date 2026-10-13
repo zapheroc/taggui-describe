@@ -12,7 +12,11 @@ timm==1.0.30
 
 # WD Tagger
 huggingface-hub==2.2.0
-onnxruntime==1.31.0
+# `onnxruntime-gpu` contains the CUDA execution provider (Linux and
+# Windows). There is no GPU build for macOS, so use the CPU-only
+# `onnxruntime` package there.
+onnxruntime-gpu==1.31.0; platform_system != "Darwin"
+onnxruntime==1.31.0; platform_system == "Darwin"
 
 # PyTorch
 torch==2.14.1
