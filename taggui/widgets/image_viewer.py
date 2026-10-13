@@ -159,7 +159,14 @@ class ImageLabel(QLabel):
 
     @Slot()
     def _wait_for_pending_work(self):
-        """Wait for the background image load to finish (app is quitting)."""
+        """
+        Shut down the background image-load pool when the application is
+        quitting: discard the queued loads and give the few already running
+        a bounded chance to finish, so that the pool is destroyed without a
+        worker thread still inside a task (which makes Qt report
+        worker-thread exceptions, and can even abort the process).
+        """
+        self._full_image_thread_pool.clear()
         self._full_image_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
 
 

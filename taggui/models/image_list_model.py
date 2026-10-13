@@ -367,16 +367,19 @@ class ImageListModel(QAbstractListModel):
     @Slot()
     def wait_for_pending_work(self):
         """
-        Wait for the background directory-load and thumbnail tasks to finish.
+        Shut down the background task pools when the application is quitting.
 
-        Called when the application is about to quit, so that the thread
-        pools are not destroyed while tasks are still running on worker
-        threads (which makes Qt report worker-thread exceptions, and can even
-        abort the process). The wait is bounded by `SHUTDOWN_TIMEOUT_MS` so
-        that quitting is never blocked for a long time.
+        The queued tasks are discarded and the few tasks already running are
+        given a bounded chance to finish, so that the pools are destroyed
+        without worker threads still inside a task (which makes Qt report
+        worker-thread exceptions, and can even abort the process). All of
+        the work is read-only and its results are no longer needed, so
+        discarding it is safe.
         """
-        self.directory_load_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
-        self.thumbnail_thread_pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
+        for pool in (self.directory_load_thread_pool,
+                     self.thumbnail_thread_pool):
+            pool.clear()
+            pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
