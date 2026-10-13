@@ -291,13 +291,20 @@ class ImageListModel(QAbstractListModel):
         worker = DirectoryLoadWorker(generation, self)
         self.directory_load_worker = worker
         worker.directory_loaded.connect(self.on_directory_loaded)
+        # Create all tasks (which increments the worker's pending-task count)
+        # before starting any of them. If tasks were started as they were
+        # created, a fast task could finish and trigger the "last task" check
+        # before the remaining tasks were even counted, causing
+        # `directory_loaded` to be emitted (partially) more than once.
+        tasks = []
         for image_path in image_paths:
             text_file_path = image_path.with_suffix('.txt')
             if str(text_file_path) not in text_file_path_strings:
                 text_file_path = None
-            task = DirectoryLoadTask(image_path, text_file_path,
-                                     self.tag_separator, worker,
-                                     self._running_tasks)
+            tasks.append(DirectoryLoadTask(image_path, text_file_path,
+                                           self.tag_separator, worker,
+                                           self._running_tasks))
+        for task in tasks:
             self.directory_load_thread_pool.start(task)
 
     @Slot(int, list)
