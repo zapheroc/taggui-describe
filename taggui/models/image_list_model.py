@@ -48,6 +48,11 @@ class Scope(str, Enum):
     SELECTED_IMAGES = 'Selected images'
 
 
+class Location(str, Enum):
+    CAPTIONS = 'Captions'
+    DESCRIPTIONS = 'Descriptions'
+
+
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
 
@@ -258,13 +263,22 @@ class ImageListModel(QAbstractListModel):
             return self.image_list_selection_model.isSelected(proxy_index)
 
     def get_text_match_count(self, text: str, scope: Scope | str,
-                             whole_tags_only: bool, use_regex: bool) -> int:
-        """Get the number of instances of a text in all captions."""
+                             whole_tags_only: bool, use_regex: bool,
+                             location: Location | str =
+                             Location.CAPTIONS) -> int:
+        """Get the number of instances of a text in all captions or
+        descriptions."""
         match_count = 0
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
-            if whole_tags_only:
+            if location == Location.DESCRIPTIONS:
+                if use_regex:
+                    match_count += len(re.findall(pattern=text,
+                                                  string=image.description))
+                else:
+                    match_count += image.description.count(text)
+            elif whole_tags_only:
                 if use_regex:
                     match_count += len([
                         tag for tag in image.tags
@@ -282,10 +296,11 @@ class ImageListModel(QAbstractListModel):
         return match_count
 
     def find_and_replace(self, find_text: str, replace_text: str,
-                         scope: Scope | str, use_regex: bool):
+                         scope: Scope | str, use_regex: bool,
+                         location: Location | str = Location.CAPTIONS):
         """
         Find and replace arbitrary text in captions, within and across tag
-        boundaries.
+        boundaries, or in descriptions.
         """
         if not find_text:
             return
@@ -295,18 +310,24 @@ class ImageListModel(QAbstractListModel):
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
-            caption = self.tag_separator.join(image.tags)
-            if use_regex:
-                if not re.search(pattern=find_text, string=caption):
-                    continue
-                caption = re.sub(pattern=find_text, repl=replace_text,
-                                 string=caption)
+            if location == Location.DESCRIPTIONS:
+                text = image.description
             else:
-                if find_text not in caption:
+                text = self.tag_separator.join(image.tags)
+            if use_regex:
+                if not re.search(pattern=find_text, string=text):
                     continue
-                caption = caption.replace(find_text, replace_text)
+                text = re.sub(pattern=find_text, repl=replace_text,
+                              string=text)
+            else:
+                if find_text not in text:
+                    continue
+                text = text.replace(find_text, replace_text)
             changed_image_indices.append(image_index)
-            image.tags = caption.split(self.tag_separator)
+            if location == Location.DESCRIPTIONS:
+                image.description = text
+            else:
+                image.tags = text.split(self.tag_separator)
             self.write_image_tags_to_disk(image)
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
