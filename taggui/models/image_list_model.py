@@ -276,12 +276,13 @@ class ImageListModel(QAbstractListModel):
         responsive. When the load is complete, `directory_loaded` is emitted
         on the GUI thread.
         """
+        # The view now shows an empty list until the load is complete.
+        self.beginResetModel()
         self.images.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
+        self.endResetModel()
         self.update_undo_and_redo_actions_requested.emit()
-        # The view now shows an empty list until the load is complete.
-        self.modelReset.emit()
         # Discard the results of any in-flight thumbnail generation pass.
         self.thumbnail_generation += 1
         self.directory_load_generation += 1
@@ -334,8 +335,9 @@ class ImageListModel(QAbstractListModel):
         if generation != self.directory_load_generation:
             return
         images.sort(key=lambda image_: image_.path)
+        self.beginResetModel()
         self.images = images
-        self.modelReset.emit()
+        self.endResetModel()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
 
