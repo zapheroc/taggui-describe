@@ -8,6 +8,7 @@ from pathlib import Path
 import huggingface_hub
 import numpy as np
 from PIL import Image as PilImage
+import onnxruntime
 from onnxruntime import InferenceSession
 from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
@@ -28,7 +29,8 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 
 class WdTaggerModel:
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str,
+                 providers: list[str | tuple] | None = None):
         model_path = Path(model_id) / 'model.onnx'
         if not model_path.is_file():
             model_path = huggingface_hub.hf_hub_download(model_id,
@@ -37,7 +39,11 @@ class WdTaggerModel:
         if not tags_path.is_file():
             tags_path = huggingface_hub.hf_hub_download(
                 model_id, filename='selected_tags.csv')
-        self.inference_session = InferenceSession(model_path)
+        # `providers` orders the execution providers by preference (for
+        # example `CUDAExecutionProvider` for the GPU). When omitted,
+        # ONNX Runtime uses its default order.
+        self.inference_session = InferenceSession(
+            model_path, providers=providers)
         self.tags = []
         self.rating_tags_indices = []
         self.general_tags_indices = []
@@ -106,7 +112,7 @@ class WdTagger(TransformersCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        return {SettingGroup.WD_TAGGER}
+        return {SettingGroup.WD_TAGGER, SettingGroup.DEVICE}
 
     def get_error_message(self) -> str | None:
         return None
@@ -114,8 +120,34 @@ class WdTagger(TransformersCaptioningModel):
     def get_processor(self):
         return None
 
+    def _get_onnxruntime_providers(self) -> list:
+        """Use the GPU (the CUDA execution provider) when the user requested
+        the GPU and it is available in this ONNX Runtime build. Otherwise
+        fall back to the CPU."""
+        if (self.device.type == 'cuda'
+                and 'CUDAExecutionProvider'
+                in onnxruntime.get_available_providers()):
+            print('Using the GPU for the WD Tagger model.')
+            gpu_index = self.caption_settings['gpu_index']
+            if gpu_index == 0:
+                # Use the default GPU. Omit the `device_id` provider option:
+                # ONNX Runtime 1.31 logs a spurious "No registered plugin EP
+                # device found" warning when `device_id` is present.
+                return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            return [('CUDAExecutionProvider',
+                     {'device_id': gpu_index}),
+                    'CPUExecutionProvider']
+        if self.device.type == 'cuda':
+            print('The `onnxruntime-gpu` package is not installed, so the '
+                  'WD Tagger model will run on the CPU. Install '
+                  '`onnxruntime-gpu` to use the GPU.')
+        else:
+            print('Using the CPU for the WD Tagger model.')
+        return ['CPUExecutionProvider']
+
     def get_model(self):
-        return WdTaggerModel(self.model_id)
+        return WdTaggerModel(self.model_id,
+                             providers=self._get_onnxruntime_providers())
 
     def get_captioning_message(self, are_multiple_images_selected: bool,
                                captioning_start_datetime: datetime) -> str:
