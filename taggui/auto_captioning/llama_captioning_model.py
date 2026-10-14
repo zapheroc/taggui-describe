@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image as PILImage
 from llama_cpp import Llama
+from llama_cpp.llama_chat_format import MTMDChatHandler
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
@@ -45,6 +46,22 @@ def image_to_data_uri(image_path: Path) -> str:
 
     data = base64.b64encode(buffer.getvalue()).decode('utf-8')
     return f'data:image/png;base64,{data}'
+
+
+class LlamaVisionChatHandler(MTMDChatHandler):
+    """`MTMDChatHandler` that renders the GGUF chat template with extra
+    variables, e.g. `enable_thinking=False` to suppress the reasoning block
+    of thinking models."""
+
+    def __init__(self, clip_model_path: str,
+                 template_variables: dict | None = None, **kwargs):
+        super().__init__(clip_model_path, **kwargs)
+        self.template_variables = dict(template_variables or {})
+
+    def __call__(self, **kwargs):
+        for key, value in self.template_variables.items():
+            kwargs.setdefault(key, value)
+        return super().__call__(**kwargs)
 
 
 class LlamaCaptioningModel(AutoCaptioningModel):
@@ -96,8 +113,43 @@ class LlamaCaptioningModel(AutoCaptioningModel):
     def get_vision_file_name() -> str:
         raise NotImplementedError("The vision file must be overidden in a child class")
 
-    def get_chat_handler(self, models_directory_path: str):
-        raise NotImplementedError("The chat handler must be overridden in a child class")
+    @staticmethod
+    def get_template_variables() -> dict:
+        # Extra variables rendered into the GGUF chat template.
+        return {}
+
+    def get_chat_handler(self, models_directory_path: Path | None):
+        """Return a chat handler for this model.
+
+        Uses `LlamaVisionChatHandler`, the generic multimodal handler that
+        `Gemma4ChatHandler` is built on top of. It renders the chat template
+        embedded in the GGUF file, so most subclasses do not need to override
+        this."""
+        vision_file_name = self.get_vision_file_name()
+        template_variables = self.get_template_variables()
+        if models_directory_path:
+            vision_path = models_directory_path / vision_file_name
+            return LlamaVisionChatHandler(
+                clip_model_path=str(vision_path),
+                template_variables=template_variables)
+        return LlamaVisionChatHandler.from_pretrained(
+            repo_id=self.get_model_repo_id(),
+            filename=vision_file_name,
+            template_variables=template_variables)
+
+    @staticmethod
+    def get_llama_kwargs() -> dict:
+        """Keyword arguments shared by `Llama` and `Llama.from_pretrained`.
+        Subclasses can override this to tune how the model is loaded, e.g.
+        with a smaller `n_ctx` if the KV cache does not fit in memory."""
+        return {
+            'n_ctx': 8192,
+            'n_gpu_layers': -1,
+            'flash_attn': True,
+            'verbose': False,
+            'type_k': 8,
+            'type_v': 8,
+        }
 
     def get_error_message(self):
         pass
@@ -124,30 +176,18 @@ class LlamaCaptioningModel(AutoCaptioningModel):
         print(f'Loading {self.model_id}...')
         models_directory_path = self.context.models_directory_path
         self.processor = self.get_chat_handler(models_directory_path)
+        # Shared by both loading paths.
+        llama_kwargs = {'chat_handler': self.processor,
+                        **self.get_llama_kwargs()}
         if models_directory_path:
             model_path = models_directory_path / self.get_model_file_name()
-            self.model = Llama(
-                model_path=str(model_path),
-                chat_handler=self.processor,
-                n_ctx=2048,
-                n_gpu_layers=-1,
-                flash_attn=True,
-                verbose=False,
-                type_k=8,
-                type_v=8,
-            )
+            self.model = Llama(model_path=str(model_path),
+                               **llama_kwargs)
         else:
             self.model = Llama.from_pretrained(
                 repo_id=self.get_model_repo_id(),
                 filename=self.get_model_file_name(),
-                chat_handler=self.processor,
-                n_ctx=2048,
-                n_gpu_layers=-1,
-                flash_attn=True,
-                verbose=False,
-                type_k=8,
-                type_v=8,
-            )
+                **llama_kwargs)
         # TODO: Are these relevant with thread parent deprecated?
         self.thread_parent.processor = self.processor
         self.thread_parent.model = self.model
