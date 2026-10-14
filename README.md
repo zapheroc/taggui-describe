@@ -15,7 +15,7 @@ models.
 - Integrated token counter (for Stable Diffusion)
 - Automatic caption and tag generation
 - Description box for free-form, natural language image descriptions
-- Caption models that run on llama.cpp, including Gemma 4 31B
+- Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
 - Batch tag operations for renaming, deleting, and sorting tags
 - Advanced image list filtering
 
