@@ -188,10 +188,6 @@ class LlamaCaptioningModel(AutoCaptioningModel):
                 repo_id=self.get_model_repo_id(),
                 filename=self.get_model_file_name(),
                 **llama_kwargs)
-        # TODO: Are these relevant with thread parent deprecated?
-        self.thread_parent.processor = self.processor
-        self.thread_parent.model = self.model
-        self.thread_parent.model_id = self.model_id
 
     def generate_caption(self, model_inputs: dict | np.ndarray,
                          image_prompt: str) -> tuple[str, str]:

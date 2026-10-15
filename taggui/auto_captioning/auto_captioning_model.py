@@ -25,7 +25,6 @@ class AutoCaptioningModel(ABC):
                  worker_context: WorkerContext,
                  caption_settings: dict):
         self.context = worker_context
-        self.thread_parent = worker_context.parent()
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
