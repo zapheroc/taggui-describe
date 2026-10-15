@@ -1,6 +1,5 @@
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 import numpy as np
 from auto_captioning.worker_context import WorkerContext
@@ -25,7 +24,6 @@ class AutoCaptioningModel(ABC):
                  worker_context: WorkerContext,
                  caption_settings: dict):
         self.context = worker_context
-        self.thread_parent = worker_context.parent()
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
@@ -59,21 +57,6 @@ class AutoCaptioningModel(ABC):
 
     def get_additional_error_message(self) -> str | None:
         return None
-
-    @staticmethod
-    def get_captioning_start_datetime_string(
-            captioning_start_datetime: datetime) -> str:
-        return captioning_start_datetime.strftime('%Y-%m-%d %H:%M:%S')
-
-    def get_captioning_message(self, are_multiple_images_selected: bool,
-                               captioning_start_datetime: datetime) -> str:
-        if are_multiple_images_selected:
-            captioning_start_datetime_string = (
-                self.get_captioning_start_datetime_string(
-                    captioning_start_datetime))
-            return (f'Captioning... (device: {self.device}, start time: '
-                    f'{captioning_start_datetime_string})')
-        return f'Captioning... (device: {self.device})'
 
     @staticmethod
     def get_default_prompt() -> str:

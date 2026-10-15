@@ -142,12 +142,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         # console when the worker reports the model is loaded.
         print(f'Loading {self.model_id}...')
         self.processor = self.get_processor()
-        self.thread_parent.processor = self.processor
         self.model = self.get_model()
-        self.thread_parent.model = self.model
-        self.thread_parent.model_id = self.model_id
-        self.thread_parent.model_device_type = self.device.type
-        self.thread_parent.is_model_loaded_in_4_bit = self.load_in_4_bit
 
     def load_image(self, image: Image) -> PilImage:
         pil_image = PilImage.open(image.path)

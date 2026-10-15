@@ -89,24 +89,32 @@ class CaptioningThread(QThread):
 
     def run_captioning(self):
         manager = self.parent().model_manager
+        # Clear any stale output from a previous run before the (possibly
+        # long) model load starts.
+        self.clear_console_text_edit_requested.emit()
 
         def log(text):
             self.write(text)   # emits text_outputted -> console
+
+        def on_load_error(message):
+            if self.is_canceled:
+                # The user canceled while the model was loading. That is the
+                # expected outcome of `ModelSubprocessManager.cancel()`
+                # terminating the worker, not an error.
+                print('Canceled captioning (the model was still loading).')
+                return
+            self.is_error = True
+            print(message)
+
         loaded = manager.ensure_model(
             self.caption_settings, self.models_directory_path, self.tag_separator,
             log=log,
-            on_loaded=self.clear_console_text_edit_requested.emit,
-            on_load_error=lambda msg: (setattr(self, 'is_error', True),
-                                        print(msg)))
+            on_load_error=on_load_error)
         if not loaded or self.is_canceled:
             return
         selected_image_count = len(self.selected_image_indices)
         are_multiple_images_selected = selected_image_count > 1
         captioning_start_datetime = datetime.now()
-        # TODO: Consider removing these logs
-        # captioning_message = model.get_captioning_message(
-        #     are_multiple_images_selected, captioning_start_datetime)
-        # print(captioning_message)
         caption_position = self.caption_settings['caption_position']
         for i, image_index in enumerate(self.selected_image_indices):
             start_time = perf_counter()
@@ -124,7 +132,13 @@ class CaptioningThread(QThread):
             except RuntimeError as exception:
                 if not manager.is_alive():
                     # The worker process is gone, so no further images can be
-                    # captioned. Stop the whole run and mark it as an error.
+                    # captioned. Stop the whole run.
+                    if self.is_canceled:
+                        # `ModelSubprocessManager.cancel()` terminated the
+                        # worker to stop an in-flight generation. That is the
+                        # expected outcome of a cancel, not an error.
+                        print(f'Canceled captioning of {image.path.name}.')
+                        return
                     print(f'Aborting captioning: {str(exception)}')
                     self.is_error = True
                     return
@@ -136,8 +150,6 @@ class CaptioningThread(QThread):
                 self.caption_generated.emit(image_index, description, tags)
             if are_multiple_images_selected:
                 self.progress_bar_update_requested.emit(i + 1)
-            if i == 0 and not are_multiple_images_selected:
-                self.clear_console_text_edit_requested.emit()
             if console_output_caption is None:
                 console_output_caption = caption
             print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'

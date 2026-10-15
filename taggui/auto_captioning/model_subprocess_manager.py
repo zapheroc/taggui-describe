@@ -44,7 +44,7 @@ class ModelSubprocessManager:
                     return None
 
     def ensure_model(self, caption_settings, models_directory_path,
-                     tag_separator, log, on_loaded, on_load_error):
+                     tag_separator, log, on_load_error):
         signature = _config_signature(caption_settings)
         if self.is_alive() and signature == self.current_signature:
             self.cancel_event.clear()
@@ -74,7 +74,6 @@ class ModelSubprocessManager:
             if kind == 'log':
                 log(rest[0])
             elif kind == 'loaded':
-                on_loaded()
                 return True
             elif kind in ('load_error', 'fatal'):
                 on_load_error(rest[0])
@@ -98,8 +97,23 @@ class ModelSubprocessManager:
                 raise RuntimeError(rest[0] if rest else 'Worker exited')
 
     def cancel(self):
+        """Cancel the current captioning run as soon as possible.
+
+        A worker that is generating a caption is blocked inside the model
+        and will not read the request queue, so the polite `('shutdown',)`
+        request cannot reach it. The worker is therefore terminated right
+        away; `shutdown()` finishes the teardown (force-killing the process
+        if the terminate did not take) and clears the references so that the
+        next run starts a fresh worker.
+        """
         if self.cancel_event is not None:
             self.cancel_event.set()
+        if self.process is None:
+            return
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=5)
+        self.shutdown()
 
     def shutdown(self):
         if self.process is None:
