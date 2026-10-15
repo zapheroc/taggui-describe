@@ -205,4 +205,10 @@ class LlamaCaptioningModel(AutoCaptioningModel):
             seed=self.seed
         )
         caption = response['choices'][0]['message']['content'].strip()
+        # Mirror `TransformersCaptioningModel.get_caption_from_generated_tokens`
+        # so that `Remove tag separators in caption` is honored: replace the
+        # tag separator with a space so the caption is kept as a single
+        # free-form tag.
+        if self.remove_tag_separators:
+            caption = caption.replace(self.context.tag_separator, ' ').strip()
         return caption, caption

@@ -312,9 +312,11 @@ UI row with a `SettingGroup` if it should be user-visible.
   `get_default_prompt()`, then passes through `format_prompt()` — the standard
   extension point where each model family applies its chat template (see
   `format_prompt` implementations in `models/*.py`).
-- Post-processing: `get_caption_from_generated_tokens` strips the echoed
-  prompt, prepends `caption_start`, and (transformers backend only) applies
-  `remove_tag_separators`.
+- Post-processing: `get_caption_from_generated_tokens` (transformers backend)
+  strips the echoed prompt and prepends `caption_start`; both backends then
+  apply `remove_tag_separators` (replacing `self.context.tag_separator` with a
+  space). The llama backend does this at the end of
+  `LlamaCaptioningModel.generate_caption` (it has no `caption_start`).
 - `bad_words` / `forced_words` (transformers only): comma-separated (escape
   commas with `\,`); forced words use `|` for alternatives and require
   `num_beams > 1` (enforced by `get_error_message`).
@@ -343,11 +345,6 @@ UI row with a `SettingGroup` if it should be user-visible.
 - **No tests.** Verify changes by running the GUI. The ML import chain is
   loaded eagerly (`transformers`, `torch`, etc. are imported at module import
   time in several files), so the GUI cannot run without the heavy deps.
-- **`LlamaCaptioningModel.generate_caption` does not apply
-  `remove_tag_separators`** (the transformers backend does, in
-  `get_caption_from_generated_tokens`). The checkbox is shown for llama models
-  (it's in the base `get_setting_groups()`), so it is currently a no-op for
-  them. Decide whether to implement or hide it.
 - `AutoCaptioningModel.get_captioning_message` references `self.device`, which
   only exists on transformers models. It is currently only called in
   commented-out code, but calling it on a llama model would raise.
