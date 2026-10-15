@@ -11,13 +11,14 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics,
                            QIcon, QPainter, QPalette, QPen)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QListView, QMenu, QMessageBox, QStyle,
-                               QStyleOptionViewItem, QStyledItemDelegate,
-                               QVBoxLayout, QWidget)
+                               QListView, QMenu, QMessageBox, QPushButton,
+                               QStyle, QStyleOptionViewItem,
+                               QStyledItemDelegate, QVBoxLayout, QWidget)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
 
+from dialogs.filter_help_dialog import FilterHelpDialog
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import get_settings
@@ -44,6 +45,19 @@ class FilterLineEdit(QLineEdit):
     def __init__(self):
         super().__init__()
         self.setPlaceholderText('Filter Images')
+        self.setToolTip(
+            'Filter images by tags, captions, descriptions, names, or paths.\n'
+            '  tree          partial match on the tags or file path\n'
+            '  tag:tree      match a tag\n'
+            '  caption:...   match the joined tags\n'
+            '  desc:...      match the description\n'
+            '  name:...      match the file name\n'
+            '  path:...      match the file path\n'
+            '  tags:=n       tag count\n'
+            '  chars:>=n     caption length in characters\n'
+            '  tokens:<=n    token count\n'
+            '  AND / OR / NOT combine filters\n'
+            '* and ? are wildcards. Click the ? button for full syntax help.')
         self.setStyleSheet('padding: 8px;')
         self.setClearButtonEnabled(True)
         optionally_quoted_string = (QuotedString(quote_char='"', esc_char='\\')
@@ -521,6 +535,13 @@ class ImageList(QDockWidget):
                              | Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.filter_line_edit = FilterLineEdit()
+        self.filter_help_button = QPushButton('?')
+        self.filter_help_button.setFixedWidth(34)
+        self.filter_help_button.setToolTip('Filter syntax help')
+        self.filter_help_button.clicked.connect(self.show_filter_help_dialog)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(self.filter_line_edit, stretch=1)
+        filter_layout.addWidget(self.filter_help_button)
         selection_mode_layout = QHBoxLayout()
         selection_mode_label = QLabel('Selection mode')
         self.selection_mode_combo_box = SettingsComboBox(
@@ -535,7 +556,7 @@ class ImageList(QDockWidget):
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(self.filter_line_edit)
+        layout.addLayout(filter_layout)
         layout.addLayout(selection_mode_layout)
         layout.addWidget(self.list_view)
         layout.addWidget(self.image_index_label)
@@ -552,6 +573,11 @@ class ImageList(QDockWidget):
         elif selection_mode == SelectionMode.TOGGLE:
             self.list_view.setSelectionMode(
                 QAbstractItemView.SelectionMode.MultiSelection)
+
+    @Slot()
+    def show_filter_help_dialog(self):
+        dialog = FilterHelpDialog(self)
+        dialog.exec()
 
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):
