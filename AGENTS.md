@@ -206,7 +206,10 @@ describes the *older* in-thread design.
    (`taggui/auto_captioning/model_subprocess_manager.py`).
 2. On "Start Auto-Captioning", `AutoCaptioner.generate_captions()` builds the
    `caption_settings` dict (see below) and starts a `CaptioningThread` (QThread).
-3. `CaptioningThread.run_captioning()` calls
+3. `CaptioningThread.run_captioning()` first emits
+   `clear_console_text_edit_requested` (the console is cleared *before* the
+   possibly long model load, so no stale output from a prior run is visible),
+   then calls
    `manager.ensure_model(caption_settings, models_directory_path, tag_separator, ...)`:
    - The manager uses a **`spawn`** multiprocessing context (mandatory for CUDA;
      `fork` after CUDA init is unsafe).
@@ -388,9 +391,10 @@ UI row with a `SettingGroup` if it should be user-visible.
 - **No tests.** Verify changes by running the GUI. The ML import chain is
   loaded eagerly (`transformers`, `torch`, etc. are imported at module import
   time in several files), so the GUI cannot run without the heavy deps.
-- `AutoCaptioningModel.get_captioning_message` references `self.device`, which
-  only exists on transformers models. It is currently only called in
-  commented-out code, but calling it on a llama model would raise.
+- **`self.device` only exists on the transformers backend.**
+  `TransformersCaptioningModel.__init__` sets `self.device` (a `torch.device`);
+  the llama-cpp backend has no such attribute. Never reference `self.device`
+  from `AutoCaptioningModel` or code shared by both backends.
 - **Cancel semantics:** canceling sets the QThread's `is_canceled` flag and
   `ModelSubprocessManager.cancel()` terminates the worker process — that is
   what stops an in-flight generation, because a worker blocked inside a model

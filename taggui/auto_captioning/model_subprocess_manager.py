@@ -44,7 +44,7 @@ class ModelSubprocessManager:
                     return None
 
     def ensure_model(self, caption_settings, models_directory_path,
-                     tag_separator, log, on_loaded, on_load_error):
+                     tag_separator, log, on_load_error):
         signature = _config_signature(caption_settings)
         if self.is_alive() and signature == self.current_signature:
             self.cancel_event.clear()
@@ -74,7 +74,6 @@ class ModelSubprocessManager:
             if kind == 'log':
                 log(rest[0])
             elif kind == 'loaded':
-                on_loaded()
                 return True
             elif kind in ('load_error', 'fatal'):
                 on_load_error(rest[0])
