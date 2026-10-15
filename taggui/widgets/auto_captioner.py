@@ -102,7 +102,8 @@ class CaptionSettingsForm(QVBoxLayout):
         # Prompt.
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         self.prompt_text_edit.setPlaceholderText(
-            'Default prompt in use. Write a custom prompt here.\nYou can use {tags}, {name}, {directory}, or {folder} to inject data into the prompt. See the README.md for details.')
+            'Default prompt in use. Write a custom prompt here.')
+        self.prompt_text_edit.setToolTip("You can use {tags}, {name}, or {directory}/{folder} to inject data into the prompt.")
         set_text_edit_height(self.prompt_text_edit, 4)
         self._register(self.basic_settings_form,
                        self.prompt_text_edit, SettingGroup.PROMPT)
