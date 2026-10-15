@@ -240,6 +240,49 @@ describes the *older* in-thread design.
   up) as "replace the last console block" — this is how progress-style output
   is de-duplicated.
 
+### Designed but unimplemented: cancel that keeps the model warm
+
+Canceling currently terminates the worker, so the next run pays a full model
+reload (see "Cancel semantics" in Gotchas). The designed alternative
+interrupts an in-flight generation *in-process* and keeps the worker/model
+warm. Deferred to a separate branch: it touches the core captioning path, and
+the llama streaming path cannot be exercised on a machine without CUDA + a
+GGUF model. Findings below were verified against the installed
+`transformers` 5.19.0 and `llama-cpp-python` 0.3.36 **sources**:
+
+- **transformers:** `generate()` accepts `stopping_criteria` (polled at every
+  decoding step) — a criterion returning `WorkerContext.is_canceled` stops
+  generation within one token. Low risk.
+- **llama.cpp:** call `create_chat_completion(stream=True)` — it is a lazy
+  generator (generation only advances while iterated). Accumulate
+  `chunk['choices'][0]['delta']['content']` (first chunk is
+  `delta={'role': 'assistant'}`, last chunk has `finish_reason` set and an
+  empty `delta`), check the cancel flag per chunk, and `.close()` the
+  iterator to deterministically stop the `Llama.generate()` loop. **Avoid
+  `llama_set_abort_callback`**: `Llama.eval()` ignores `llama_decode`'s
+  abort return value (2), and `Llama.generate` then `sample()`s on a
+  half-computed context — undefined behavior.
+- **Worker protocol:** add a `('canceled',)` response. `model_worker.py`
+  checks `ctx.is_canceled` after `generate_caption` and sends it instead of
+  `('caption', ...)` (both backends' `generate_caption` return a partial
+  caption on cancel — discard it). `ModelSubprocessManager.caption()` raises
+  a dedicated exception; `CaptioningThread` treats it as a clean stop (no
+  `is_error`).
+- **Event lifecycle:** `cancel()` would then only set the `mp.Event` (drop
+  the terminate for the loaded-model case), and the event **must be cleared
+  on spawn and on the reuse path** — otherwise the first image of the next
+  run is instantly "canceled".
+- **Cancel during model load** cannot be interrupted in-process (the worker
+  is blocked inside the library load): either accept the wait (the run ends
+  right after `('loaded',)` via the existing `is_canceled` check) or keep
+  process termination for that phase only.
+
+Files to touch: `llama_captioning_model.py` (streaming + accumulation +
+cancel check; keep the `remove_tag_separators` post-processing),
+`transformers_captioning_model.py` (`stopping_criteria` on `generate()`),
+`model_worker.py`, `model_subprocess_manager.py`, `captioning_thread.py`.
+`WorkerContext.is_canceled` already exists and is the worker-side hook.
+
 ### Class hierarchy for models
 
 ```
@@ -348,10 +391,15 @@ UI row with a `SettingGroup` if it should be user-visible.
 - `AutoCaptioningModel.get_captioning_message` references `self.device`, which
   only exists on transformers models. It is currently only called in
   commented-out code, but calling it on a llama model would raise.
-- **Cancel semantics:** cancel sets the QThread's `is_canceled` flag and the
-  worker's `mp.Event`, but the worker loop in `model_worker.py` never checks
-  `WorkerContext.is_canceled`. Cancel only takes effect between images in the
-  main thread; an in-flight generation runs to completion.
+- **Cancel semantics:** canceling sets the QThread's `is_canceled` flag and
+  `ModelSubprocessManager.cancel()` terminates the worker process — that is
+  what stops an in-flight generation, because a worker blocked inside a model
+  will not read the request queue. `CaptioningThread` treats the resulting
+  process death as a clean stop (no error alert) when `is_canceled` is set,
+  and as an error otherwise; the next run spawns a fresh worker. Trade-off:
+  canceling unloads the model from memory. A designed in-process alternative
+  that keeps it warm is documented in "Designed but unimplemented: cancel
+  that keeps the model warm" in the auto-captioning section.
 - `ModelSubprocessManager._config_signature` is transformers-oriented (see the
   TODO in that file); e.g. switching llama model files with the same `model_id`
   would incorrectly reuse the process.

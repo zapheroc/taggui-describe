@@ -98,8 +98,23 @@ class ModelSubprocessManager:
                 raise RuntimeError(rest[0] if rest else 'Worker exited')
 
     def cancel(self):
+        """Cancel the current captioning run as soon as possible.
+
+        A worker that is generating a caption is blocked inside the model
+        and will not read the request queue, so the polite `('shutdown',)`
+        request cannot reach it. The worker is therefore terminated right
+        away; `shutdown()` finishes the teardown (force-killing the process
+        if the terminate did not take) and clears the references so that the
+        next run starts a fresh worker.
+        """
         if self.cancel_event is not None:
             self.cancel_event.set()
+        if self.process is None:
+            return
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=5)
+        self.shutdown()
 
     def shutdown(self):
         if self.process is None:
