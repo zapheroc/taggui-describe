@@ -20,7 +20,8 @@ from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
 from utils.settings import DEFAULT_SETTINGS, get_settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
-from utils.utils import get_resource_path, pluralize
+from utils.utils import (get_resource_path, pluralize,
+                         restart_application)
 from widgets.all_tags_editor import AllTagsEditor
 from widgets.auto_captioner import AutoCaptioner
 from widgets.image_list import ImageList
@@ -274,6 +275,30 @@ class MainWindow(QMainWindow):
         settings_dialog.exec()
 
     @Slot()
+    def reset_to_defaults(self):
+        message_box = QMessageBox()
+        message_box.setWindowTitle('Reset to Defaults')
+        message_box.setIcon(QMessageBox.Icon.Warning)
+        message_box.setText(
+            'Reset all settings to their defaults, including the window '
+            'layout, prompts, and all configuration options?')
+        message_box.setInformativeText(
+            'This cannot be undone. Your images and their tags and '
+            'descriptions are not affected. The application will restart.')
+        message_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        # A destructive action, so the safe button is the default.
+        message_box.setDefaultButton(QMessageBox.StandardButton.No)
+        if message_box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        # Shut down the captioning subprocess so that it is not left running
+        # (and holding on to the model in memory) after the restart.
+        self.auto_captioner.model_manager.shutdown()
+        self.settings.clear()
+        self.settings.sync()
+        restart_application()
+
+    @Slot()
     def show_find_and_replace_dialog(self):
         find_and_replace_dialog = FindAndReplaceDialog(
             parent=self, image_list_model=self.image_list_model)
@@ -384,6 +409,11 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
         view_menu.addAction(self.toggle_auto_captioner_action)
+        view_menu.addSeparator()
+        reset_to_defaults_action = QAction('Reset to Defaults...',
+                                           parent=self)
+        reset_to_defaults_action.triggered.connect(self.reset_to_defaults)
+        view_menu.addAction(reset_to_defaults_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
