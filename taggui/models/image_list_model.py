@@ -250,6 +250,13 @@ class ImageListModel(QAbstractListModel):
                 caption = self.tag_separator.join(image.tags)
                 text += f'\n{caption}'
             return text
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # The full file name and tag list, for when the image list
+            # delegate only shows a truncated preview.
+            text = image.path.name
+            if image.tags:
+                text += f'\n{self.tag_separator.join(image.tags)}'
+            return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail, if it has been generated yet. Thumbnails are
             # generated on background threads (see

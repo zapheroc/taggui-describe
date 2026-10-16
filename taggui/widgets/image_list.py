@@ -5,17 +5,20 @@ from operator import or_
 from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
-                            QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot)
-from PySide6.QtGui import QDesktopServices
+                            QItemSelectionRange, QModelIndex, QRect, QSize, QUrl,
+                            Qt, Signal, Slot)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics,
+                           QIcon, QPainter, QPalette, QPen)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QListView, QMenu, QMessageBox, QVBoxLayout,
-                               QWidget)
+                               QListView, QMenu, QMessageBox, QPushButton,
+                               QStyle, QStyleOptionViewItem,
+                               QStyledItemDelegate, QVBoxLayout, QWidget)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
 
+from dialogs.filter_help_dialog import FilterHelpDialog
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import get_settings
@@ -42,6 +45,19 @@ class FilterLineEdit(QLineEdit):
     def __init__(self):
         super().__init__()
         self.setPlaceholderText('Filter Images')
+        self.setToolTip(
+            'Filter images by tags, captions, descriptions, names, or paths.\n'
+            '  tree          partial match on the tags or file path\n'
+            '  tag:tree      match a tag\n'
+            '  caption:...   match the joined tags\n'
+            '  desc:...      match the description\n'
+            '  name:...      match the file name\n'
+            '  path:...      match the file path\n'
+            '  tags:=n       tag count\n'
+            '  chars:>=n     caption length in characters\n'
+            '  tokens:<=n    token count\n'
+            '  AND / OR / NOT combine filters\n'
+            '* and ? are wildcards. Click the ? button for full syntax help.')
         self.setStyleSheet('padding: 8px;')
         self.setClearButtonEnabled(True)
         optionally_quoted_string = (QuotedString(quote_char='"', esc_char='\\')
@@ -96,6 +112,179 @@ class SelectionMode(str, Enum):
     TOGGLE = 'Toggle'
 
 
+class ImageListItemDelegate(QStyledItemDelegate):
+    """
+    Draw the rows of the image list: the file name on the first line in a
+    smaller, dimmer font and the tag preview on the following one or two
+    lines. Tags that do not fit are truncated with an ellipsis; the full
+    text is shown as a tooltip (see the `ToolTipRole` data in
+    `ImageListModel`). Untagged images are marked with a blue dot on the
+    right side of the row.
+    """
+
+    # Number of lines the tag preview may occupy (the file name has its own
+    # line above it).
+    MAX_TAG_LINES = 2
+    # Width (in pixels) reserved on the right of the text for the untagged
+    # dot, so that the text never runs into it.
+    STATUS_COLUMN_WIDTH = 16
+    UNTAGGED_DOT_DIAMETER = 7
+    UNTAGGED_DOT_COLOR = QColor('#4da3ff')
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+
+    def _name_font(self, font: QFont) -> QFont:
+        """The file name font: slightly smaller than the tag font."""
+        name_font = QFont(font)
+        if font.pointSize() > 0:
+            name_font.setPointSizeF(font.pointSizeF() * 0.85)
+        else:
+            name_font.setPixelSize(max(1, int(font.pixelSize() * 0.85)))
+        return name_font
+
+    def _icon_size(self, widget: QWidget | None, icon: QIcon) -> QSize:
+        if isinstance(widget, QListView):
+            return icon.actualSize(widget.iconSize())
+        sizes = icon.availableSizes()
+        return sizes[0] if sizes else QSize(0, 0)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex) -> None:
+        widget: QWidget | None = self.parent()
+        style = widget.style() if widget is not None else QApplication.style()
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        text_color = (option.palette.color(QPalette.ColorRole.HighlightedText)
+                      if selected
+                      else option.palette.color(QPalette.ColorRole.Text))
+
+        # Let the style draw the item background (including the selection
+        # highlight and focus frame); the file name and tags are drawn below.
+        background_option = QStyleOptionViewItem(option)
+        background_option.text = ''
+        background_option.icon = QIcon()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem,
+                          background_option, painter, widget)
+
+        # Draw the thumbnail, then the text to its right.
+        text_rect = option.rect
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if icon is not None and not icon.isNull():
+            icon_size = self._icon_size(widget, icon)
+            icon_rect = QRect(option.rect.left(),
+                              option.rect.top() +
+                              (option.rect.height() - icon_size.height()) // 2,
+                              icon_size.width(), icon_size.height())
+            icon.paint(painter, icon_rect, mode=QIcon.Mode.Normal)
+            text_rect = option.rect.adjusted(icon_size.width() + 8, 0, 0, 0)
+
+        display_text = index.data(Qt.ItemDataRole.DisplayRole) or ''
+        file_name, _, tags_text = display_text.partition('\n')
+        # Reserve the status column so the text never overlaps the dot.
+        text_rect = text_rect.adjusted(0, 0, -self.STATUS_COLUMN_WIDTH, 0)
+
+        name_font = self._name_font(option.font)
+        name_metrics = QFontMetrics(name_font)
+        tag_metrics = QFontMetrics(option.font)
+        name_height = name_metrics.height()
+        tag_height = tag_metrics.height()
+        tag_lines = (self._wrap_and_elide(tag_metrics, tags_text,
+                                          text_rect.width(), self.MAX_TAG_LINES)
+                     if tags_text else [])
+        block_height = name_height + len(tag_lines) * tag_height
+        y = text_rect.top() + max(0, (text_rect.height() - block_height) // 2)
+
+        draw_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        name_color = QColor(text_color)
+        name_color.setAlphaF(0.6)
+        painter.setFont(name_font)
+        painter.setPen(name_color)
+        painter.drawText(QRect(text_rect.left(), y, text_rect.width(),
+                               name_height), draw_flags,
+                         name_metrics.elidedText(file_name,
+                                                  Qt.TextElideMode.ElideRight,
+                                                  text_rect.width()))
+        painter.setFont(option.font)
+        painter.setPen(text_color)
+        line_y = y + name_height
+        for line in tag_lines:
+            painter.drawText(QRect(text_rect.left(), line_y,
+                                   text_rect.width(), tag_height), draw_flags,
+                             line)
+            line_y += tag_height
+
+        # Mark untagged images with a blue dot.
+        image = index.data(Qt.ItemDataRole.UserRole)
+        if image is not None and not image.tags:
+            dot_diameter = self.UNTAGGED_DOT_DIAMETER
+            dot_rect = QRect(option.rect.right() - dot_diameter - 4,
+                             option.rect.top() +
+                             (option.rect.height() - dot_diameter) // 2,
+                             dot_diameter, dot_diameter)
+            painter.setPen(QPen(QColor('#ffffff'), 1))
+            painter.setBrush(self.UNTAGGED_DOT_COLOR)
+            painter.drawEllipse(dot_rect)
+
+    def sizeHint(self, option: QStyleOptionViewItem,
+                 index: QModelIndex) -> QSize:
+        widget: QWidget | None = self.parent()
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        icon_height = 0
+        if icon is not None and not icon.isNull():
+            icon_height = self._icon_size(widget, icon).height()
+        display_text = index.data(Qt.ItemDataRole.DisplayRole) or ''
+        name_height = QFontMetrics(self._name_font(option.font)).height()
+        tag_height = (QFontMetrics(option.font).height() * self.MAX_TAG_LINES
+                      if '\n' in display_text else 0)
+        text_height = name_height + tag_height + 8
+        width = option.rect.width() if option.rect.width() > 0 else 250
+        return QSize(width, max(icon_height, text_height))
+
+    def _wrap_and_elide(self, metrics: QFontMetrics, text: str, width: int,
+                        max_lines: int) -> list[str]:
+        """
+        Wrap `text` into at most `max_lines` lines, each at most `width`
+        pixels wide. When the text does not fit, the last line is
+        ellipsized.
+        """
+        words = text.split(' ')
+        lines: list[str] = []
+        current = ''
+        for word in words:
+            if not current:
+                if metrics.horizontalAdvance(word) <= width:
+                    current = word
+                else:
+                    # A single word longer than the line: elide it.
+                    lines.append(metrics.elidedText(
+                        word, Qt.TextElideMode.ElideRight, width))
+                    return lines[:max_lines]
+            elif metrics.horizontalAdvance(f'{current} {word}') <= width:
+                current = f'{current} {word}'
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        if len(lines) <= max_lines:
+            return lines
+        # Keep the first `max_lines - 1` lines and ellipsize the last one
+        # from the words that did not fit.
+        used_word_count = sum(len(line.split(' '))
+                              for line in lines[:max_lines - 1])
+        last_line = ''
+        for word in words[used_word_count:]:
+            candidate = word if not last_line else f'{last_line} {word}'
+            if metrics.horizontalAdvance(candidate) <= width:
+                last_line = candidate
+            else:
+                last_line = metrics.elidedText(
+                    candidate, Qt.TextElideMode.ElideRight, width)
+                break
+        lines[max_lines - 1] = last_line
+        return lines[:max_lines]
+
+
 class ImageListView(QListView):
     tags_paste_requested = Signal(list, list)
     directory_reload_requested = Signal()
@@ -107,6 +296,7 @@ class ImageListView(QListView):
         self.tag_separator = tag_separator
         self.setModel(proxy_image_list_model)
         self.setWordWrap(True)
+        self.setItemDelegate(ImageListItemDelegate(self))
         # If the actual height of the image is greater than 3 times the width,
         # the image will be scaled down to fit.
         self.setIconSize(QSize(image_width, image_width * 3))
@@ -345,6 +535,13 @@ class ImageList(QDockWidget):
                              | Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.filter_line_edit = FilterLineEdit()
+        self.filter_help_button = QPushButton('?')
+        self.filter_help_button.setFixedWidth(34)
+        self.filter_help_button.setToolTip('Filter syntax help')
+        self.filter_help_button.clicked.connect(self.show_filter_help_dialog)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(self.filter_line_edit, stretch=1)
+        filter_layout.addWidget(self.filter_help_button)
         selection_mode_layout = QHBoxLayout()
         selection_mode_label = QLabel('Selection mode')
         self.selection_mode_combo_box = SettingsComboBox(
@@ -359,7 +556,7 @@ class ImageList(QDockWidget):
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(self.filter_line_edit)
+        layout.addLayout(filter_layout)
         layout.addLayout(selection_mode_layout)
         layout.addWidget(self.list_view)
         layout.addWidget(self.image_index_label)
@@ -376,6 +573,11 @@ class ImageList(QDockWidget):
         elif selection_mode == SelectionMode.TOGGLE:
             self.list_view.setSelectionMode(
                 QAbstractItemView.SelectionMode.MultiSelection)
+
+    @Slot()
+    def show_filter_help_dialog(self):
+        dialog = FilterHelpDialog(self)
+        dialog.exec()
 
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):

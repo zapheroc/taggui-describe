@@ -101,6 +101,9 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Prompt.
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
+        self.prompt_text_edit.setPlaceholderText(
+            'Default prompt in use. Write a custom prompt here.')
+        self.prompt_text_edit.setToolTip("You can use {tags}, {name}, or {directory}/{folder} to inject data into the prompt.")
         set_text_edit_height(self.prompt_text_edit, 4)
         self._register(self.basic_settings_form,
                        self.prompt_text_edit, SettingGroup.PROMPT)
@@ -515,8 +518,11 @@ class AutoCaptioner(QDockWidget):
         self.setWindowTitle('Auto-Captioner')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
-        # TODO Pin the start button so it's always visible, and make it smaller
-        self.start_cancel_button = TallPushButton('Start Auto-Captioning')
+        # The start button is pinned above the scroll area so it stays
+        # visible no matter how far the settings below are scrolled. A
+        # reduced height factor keeps it prominent without being oversized.
+        self.start_cancel_button = TallPushButton('Start Auto-Captioning',
+                                                  height_factor=1.25)
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat('%v / %m images captioned (%p%)')
         self.progress_bar.hide()
@@ -524,20 +530,27 @@ class AutoCaptioner(QDockWidget):
         set_text_edit_height(self.console_text_edit, 4)
         self.console_text_edit.setReadOnly(True)
         self.console_text_edit.hide()
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.addWidget(self.start_cancel_button)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.console_text_edit)
         self.caption_settings_form = CaptionSettingsForm()
-        layout.addLayout(self.caption_settings_form)
+        # Everything below the pinned start button is scrollable. The
+        # progress bar is pinned next to the start button so it stays
+        # visible while captioning runs.
+        scroll_container = QWidget()
+        scroll_layout = QVBoxLayout(scroll_container)
+        scroll_layout.addWidget(self.console_text_edit)
+        scroll_layout.addLayout(self.caption_settings_form)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setWidget(container)
-        self.setWidget(scroll_area)
+        scroll_area.setWidget(scroll_container)
+        # A container widget is required to use a layout with a `QDockWidget`.
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.addWidget(self.start_cancel_button)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(scroll_area)
+        self.setWidget(container)
 
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_captioning)
