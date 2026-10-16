@@ -1,7 +1,16 @@
+import os
 import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import QMessageBox
+
+
+def restart_application():
+    """
+    Restart the application by replacing the current process with a fresh
+    instance of itself (for example, to apply a full reset of all settings).
+    """
+    os.execv(sys.executable, [sys.executable, sys.argv[0]])
 
 
 def get_resource_path(unbundled_resource_path: Path) -> Path:
