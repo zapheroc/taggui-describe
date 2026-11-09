@@ -137,41 +137,36 @@ class CaptionSettingsForm(QVBoxLayout):
         self.load_in_4_bit_container = self._register(self.basic_settings_form,
                                                       self.load_in_4_bit_check_box, SettingGroup.LOAD_IN_4_BIT, label_position=LabelPosition.BESIDE)
 
-        # WD Tagger settings — built as a sub-form, registered as one composite.
-        self.wd_tagger_settings_form = QFormLayout()
-        self.wd_tagger_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.wd_tagger_settings_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.wd_tagger_settings_form.setContentsMargins(0, 0, 0, 0)
-
+        # Tagger settings, shared by the WD Tagger and the PixAI Tagger.
+        # They are split into three composites so that the `Minimum
+        # probability` row (WD Tagger only) can be hidden for the PixAI
+        # Tagger, which uses per-category thresholds instead (in the
+        # advanced settings). The row order is unchanged for the WD Tagger.
         self.show_probabilities_check_box = SettingsBigCheckBox(
             key='show_probabilities', default=True)
-        self.wd_tagger_settings_form.addRow('Show probabilities',
-                                             self.show_probabilities_check_box)
+        self.show_probabilities_container = self._tagger_composite(
+            [('Show probabilities', self.show_probabilities_check_box)],
+            SettingGroup.TAGGER)
 
         self.min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='min_probability', default=0.4, minimum=0.01, maximum=1)
         self.min_probability_spin_box.setSingleStep(0.01)
-        self.wd_tagger_settings_form.addRow('Minimum probability',
-                                            self.min_probability_spin_box)
+        self.min_probability_container = self._tagger_composite(
+            [('Minimum probability', self.min_probability_spin_box)],
+            SettingGroup.WD_TAGGER)
 
         self.max_tags_spin_box = FocusedScrollSettingsSpinBox(
             key='max_tags', default=100, minimum=1, maximum=999)
-        self.wd_tagger_settings_form.addRow('Maximum tags',
-                                            self.max_tags_spin_box)
-
         self.tags_to_exclude_text_edit = SettingsPlainTextEdit(
             key='tags_to_exclude')
         set_text_edit_height(self.tags_to_exclude_text_edit, 3)
-        self.tags_to_exclude_container = self._position_label('Tags to exclude', self.tags_to_exclude_text_edit, label_position=LabelPosition.ABOVE)
-        self.wd_tagger_settings_form.addRow(self.tags_to_exclude_container)
-
-        self.wd_tagger_settings_container = QWidget()
-        self.wd_tagger_settings_container.setLayout(
-            self.wd_tagger_settings_form)
-        self._register(self.basic_settings_form,
-                       self.wd_tagger_settings_container,
-                       SettingGroup.WD_TAGGER, label=None)
+        self.tags_to_exclude_container = self._position_label(
+            'Tags to exclude', self.tags_to_exclude_text_edit,
+            label_position=LabelPosition.ABOVE)
+        self.max_tags_container = self._tagger_composite(
+            [('Maximum tags', self.max_tags_spin_box),
+             (None, self.tags_to_exclude_container)],
+            SettingGroup.TAGGER)
 
         self.addLayout(self.basic_settings_form)
 
@@ -293,6 +288,28 @@ class CaptionSettingsForm(QVBoxLayout):
             key='gpu_index', default=0, minimum=0, maximum=100)
         self._register(self.advanced_settings_form,
                        self.gpu_index_spin_box, SettingGroup.GPU_INDEX)
+
+        # Add separator line
+        self._register(self.advanced_settings_form, HorizontalLine(),
+                       label=None, group=SettingGroup.PIXAI_TAGGER)
+
+        # PixAI Tagger per-category thresholds. The recommended defaults are
+        # from the model card (https://huggingface.co/pixai-labs/pixai-tagger-v1.0).
+        self.pixai_threshold_spin_boxes = {}
+        for category, default in [('general', 0.17),
+                                  ('character', 0.27),
+                                  ('style', 0.15),
+                                  ('copyright', 0.24),
+                                  ('meta', 0.17),
+                                  ('rating', 0.41)]:
+            spin_box = FocusedScrollSettingsDoubleSpinBox(
+                key=f'pixai_threshold_{category}', default=default,
+                minimum=0.0, maximum=1)
+            spin_box.setSingleStep(0.01)
+            self._register(self.advanced_settings_form, spin_box,
+                           SettingGroup.PIXAI_TAGGER,
+                           label=f'PixAI {category} threshold')
+            self.pixai_threshold_spin_boxes[category] = spin_box
         # Add advanced settings
         self.advanced_settings_container = QWidget()
         self.advanced_settings_container.setLayout(self.advanced_settings_form)
@@ -328,6 +345,28 @@ class CaptionSettingsForm(QVBoxLayout):
         layout.addStretch()
         container = QWidget()
         container.setLayout(layout)
+        return container
+
+    def _tagger_composite(self,
+                          rows: list[tuple[str | None, QWidget]],
+                          group: SettingGroup) -> QWidget:
+        """Build a sub-form of tagger rows and register it in the basic
+        settings form as one composite row belonging to `group`. A `None`
+        label means the field already carries its own label."""
+        sub_form = QFormLayout()
+        sub_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        sub_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        sub_form.setContentsMargins(0, 0, 0, 0)
+        for label, field in rows:
+            if label is None:
+                sub_form.addRow(field)
+            else:
+                sub_form.addRow(label, field)
+        container = QWidget()
+        container.setLayout(sub_form)
+        self._register(self.basic_settings_form, container, group,
+                       label=None)
         return container
 
     def _register(self, form: QFormLayout, field: QWidget,
@@ -485,6 +524,18 @@ class CaptionSettingsForm(QVBoxLayout):
                 'max_tags': self.max_tags_spin_box.value(),
                 'tags_to_exclude':
                     self.tags_to_exclude_text_edit.toPlainText()
+            },
+            'pixai_tagger_settings': {
+                'general':
+                    self.pixai_threshold_spin_boxes['general'].value(),
+                'character':
+                    self.pixai_threshold_spin_boxes['character'].value(),
+                'style':
+                    self.pixai_threshold_spin_boxes['style'].value(),
+                'copyright':
+                    self.pixai_threshold_spin_boxes['copyright'].value(),
+                'meta': self.pixai_threshold_spin_boxes['meta'].value(),
+                'rating': self.pixai_threshold_spin_boxes['rating'].value()
             }
         }
 

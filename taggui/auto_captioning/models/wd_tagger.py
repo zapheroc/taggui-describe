@@ -111,8 +111,8 @@ class WdTagger(TransformersCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        return {SettingGroup.WD_TAGGER, SettingGroup.DEVICE,
-                SettingGroup.GPU_INDEX}
+        return {SettingGroup.TAGGER, SettingGroup.WD_TAGGER,
+                SettingGroup.DEVICE, SettingGroup.GPU_INDEX}
 
     def get_error_message(self) -> str | None:
         return None
