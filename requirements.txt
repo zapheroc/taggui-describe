@@ -20,6 +20,8 @@ onnxruntime==1.31.0; platform_system == "Darwin"
 
 # PyTorch
 torch==2.14.1
+# Needed by the PixAI Tagger's custom code (`tagger_pipeline.py`).
+torchvision==0.29.2
 
 # TODO: Confirm flash-attention is actually needed
 # FlashAttention (Florence-2, Phi-3-Vision)

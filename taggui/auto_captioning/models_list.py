@@ -10,6 +10,7 @@ from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
                                                LlavaNextVicuna)
 from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.phi_3_vision import Phi3Vision
+from auto_captioning.models.pixai_tagger import PixAiTagger
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models.gemma_4 import Gemma4
 from auto_captioning.models.qwen_3_8 import Qwen38
@@ -40,6 +41,7 @@ MODELS = [
     'SmilingWolf/wd-v1-4-convnext-tagger-v2',
     'SmilingWolf/wd-v1-4-convnextv2-tagger-v2',
     'SmilingWolf/wd-v1-4-vit-tagger-v2',
+    'pixai-labs/pixai-tagger-v1.0',
     'llava-hf/llava-1.5-7b-hf',
     'llava-hf/llava-1.5-13b-hf',
     'llava-hf/bakLlava-v1-hf',
@@ -84,6 +86,8 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return Moondream2
     if 'phi-3' in lowercase_model_id:
         return Phi3Vision
+    if 'pixai' in lowercase_model_id:
+        return PixAiTagger
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
         return WdTagger
     if 'gemma-4-31b' in lowercase_model_id:

@@ -85,6 +85,11 @@ These models are downloaded automatically from Hugging Face as GGUF files on fir
 or loaded from a local model directory (set in `File` -> `Settings`) that
 contains the model file and its vision projector file.
 
+TagGUI also supports tagger models, which generate a list of tags (rather than
+a free-form caption) for each image: the [WD Tagger family](https://huggingface.co/SmilingWolf) and the
+[PixAI Tagger](https://huggingface.co/pixai-labs/pixai-tagger-v1.0).
+Tagger output is stored as tags using the same tag separator as manual tags.
+
 ### Captioning parameters
 
 `Prompt`: Instructions given to the captioning model.
@@ -123,8 +128,26 @@ generate captions that contain the word `cat` and either `orange`, `white`,
 or `black`.
 It is not guaranteed that all of your specifications will be met.
 
-`Tags to exclude` (WD Tagger models): Tags that should not be generated,
-separated by commas.
+Tagger models (the WD Tagger family and the PixAI Tagger) have their own set
+of options:
+
+`Show probabilities`: If checked, the console output shows each tag's
+probability.
+
+`Maximum tags`: The maximum number of tags to generate for an image.
+
+`Tags to exclude`: Tags that should not be generated, separated by commas.
+
+WD Tagger models use a single `Minimum probability` threshold: a tag is only
+included if its probability is at least that value.
+
+The PixAI Tagger uses per-category thresholds instead, available in the
+advanced settings: `PixAI general threshold`, `PixAI character threshold`,
+`PixAI style threshold`, `PixAI copyright threshold`, `PixAI meta threshold`,
+and `PixAI rating threshold`.
+A tag is only included if its probability is greater than the threshold for
+its category.
+The defaults are the recommended settings from the model card.
 
 llama.cpp models (such as Gemma 4 31B) have their own set of generation
 parameters in the advanced settings: `Seed` (use `-1` for a random seed),

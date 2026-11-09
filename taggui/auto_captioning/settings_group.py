@@ -27,6 +27,13 @@ class SettingGroup(Enum):
     REPETITION_PENALTY = ("Repetition penalty", True)
     NO_REPEAT_NGRAM = ("No-repeat n-gram size", True)
     GPU_INDEX = ("GPU index", True)
-    # One group to hold WD-tagger since it has all unique values
+    # Shared tagger options (show probabilities, maximum tags, tags to
+    # exclude), used by both the WD Tagger and the PixAI Tagger.
+    TAGGER = ("TAGGER", False)
+    # One group to hold the WD Tagger's minimum probability row, since it is
+    # unique to the WD Tagger (the PixAI Tagger uses per-category
+    # thresholds instead).
     WD_TAGGER = ("WD_TAGGER", False)
+    # The PixAI Tagger's per-category thresholds.
+    PIXAI_TAGGER = ("PIXAI_TAGGER", True)
 
