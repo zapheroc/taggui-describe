@@ -846,10 +846,10 @@ class AutoCaptioner(QDockWidget):
             self.progress_bar.setRange(0, selected_image_count)
             self.progress_bar.setValue(0)
             self.progress_bar.show()
-        # If a model unload is still finishing (the user clicked eject and
-        # then quickly started a run), wait for it so that the new run does
-        # not race the worker-process teardown.
-        self._model_unload_thread_pool.waitForDone(10000)
+        # If a model unload is still finishing, `ensure_model` (on the
+        # captioning thread) waits for it before spawning a fresh worker, so
+        # the new run cannot race the teardown and the GUI thread is never
+        # blocked by it.
         tag_separator = get_tag_separator()
         models_directory_path = self.settings.value(
             'models_directory_path',
