@@ -3,8 +3,10 @@ import importlib.util
 from pathlib import Path
 from enum import StrEnum
 
-from PySide6.QtCore import QModelIndex, Qt, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QTextCursor
+from PySide6.QtCore import (QModelIndex, QObject, QRunnable, QSize, Qt,
+                            QThreadPool, Signal, Slot)
+from PySide6.QtGui import (QFontMetrics, QIcon, QPainter, QPainterPath,
+                           QPalette, QPixmap, QTextCursor)
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPlainTextEdit, QProgressBar, QScrollArea,
@@ -546,6 +548,87 @@ def restore_stdout_and_stderr():
     sys.stderr = sys.__stderr__
 
 
+def make_up_arrow_icon(size: int = 24) -> QIcon:
+    """
+    Create the up-arrow icon for the model eject button.
+
+    The arrow is drawn rather than taken from a font or a platform theme so
+    that it renders consistently on every platform and style. It is tinted
+    with the button text color so that it stays visible in light and dark
+    styles alike.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    app = QApplication.instance()
+    palette = app.palette() if app is not None else QPalette()
+    color = palette.color(QPalette.ColorRole.ButtonText)
+    # Draw in a 24x24 coordinate space regardless of the target size.
+    painter.scale(size / 24, size / 24)
+    path = QPainterPath()
+    path.moveTo(12, 2)     # tip
+    path.lineTo(21, 11)    # right corner of the arrowhead
+    path.lineTo(15, 11)    # right edge of the shaft
+    path.lineTo(15, 22)    # bottom of the shaft, right
+    path.lineTo(9, 22)     # bottom of the shaft, left
+    path.lineTo(9, 11)     # left edge of the shaft
+    path.lineTo(3, 11)     # left corner of the arrowhead
+    path.closeSubpath()
+    painter.fillPath(path, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+class ModelUnloadWorker(QObject):
+    """
+    Receive the outcome of a background model unload and forward it to the
+    GUI thread.
+
+    `finished` is emitted from a worker thread and delivered to the
+    connected slot on the GUI thread (queued connection).
+    """
+    # Whether the worker process was unloaded successfully.
+    finished = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+
+class ModelUnloadTask(QRunnable):
+    """
+    Unload the captioning model (tear down its worker process) on a worker
+    thread.
+
+    `ModelSubprocessManager.shutdown()` can block for several seconds if
+    the worker process is unresponsive, so it must not run on the GUI
+    thread. The task is added to a `registry` set and removed from it when
+    it is done. The set keeps a strong reference to the task so that it is
+    not garbage collected while the thread pool still references it.
+    """
+
+    def __init__(self, manager: ModelSubprocessManager,
+                 worker: ModelUnloadWorker, registry: set):
+        super().__init__()
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        self.manager = manager
+        self.worker = worker
+        self.registry = registry
+        registry.add(self)
+
+    def run(self):
+        try:
+            self.manager.shutdown()
+        except Exception:
+            self.worker.finished.emit(False)
+        else:
+            self.worker.finished.emit(True)
+        finally:
+            self.registry.discard(self)
+
+
 class AutoCaptioner(QDockWidget):
     caption_generated = Signal(QModelIndex, str, list)
 
@@ -574,6 +657,20 @@ class AutoCaptioner(QDockWidget):
         # reduced height factor keeps it prominent without being oversized.
         self.start_cancel_button = TallPushButton('Start Auto-Captioning',
                                                   height_factor=1.25)
+        # The small eject button sits beside the start button. Clicking it
+        # unloads the captioning model from memory, freeing its RAM/VRAM,
+        # without closing the dock.
+        self.eject_model_button = QPushButton()
+        self.eject_model_button.setIcon(make_up_arrow_icon())
+        self.eject_model_button.setIconSize(QSize(24, 24))
+        self.eject_model_button.setToolTip(
+            'Unload the captioning model from memory (frees RAM/VRAM)')
+        # Match the start button's (fixed) height so the buttons line up.
+        # `sizeHint()` does not reflect a fixed size, so use the fixed
+        # height itself (after `setFixedHeight`, min == max == the height).
+        eject_button_size = self.start_cancel_button.minimumHeight()
+        self.eject_model_button.setFixedSize(eject_button_size,
+                                             eject_button_size)
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat('%v / %m images captioned (%p%)')
         self.progress_bar.hide()
@@ -598,13 +695,40 @@ class AutoCaptioner(QDockWidget):
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(self.start_cancel_button)
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.start_cancel_button, 1)
+        button_row.addWidget(self.eject_model_button)
+        layout.addLayout(button_row)
         layout.addWidget(self.progress_bar)
         layout.addWidget(scroll_area)
         self.setWidget(container)
 
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_captioning)
+        self.eject_model_button.clicked.connect(self.eject_model)
+        # Initially no model is loaded into memory.
+        self._update_eject_button_state()
+
+        # The model unload runs on a worker thread so that the (potentially
+        # slow) worker-process teardown never blocks the GUI thread.
+        self._model_unload_worker = ModelUnloadWorker(self)
+        self._model_unload_worker.finished.connect(
+            self.on_model_unload_finished)
+        self._model_unload_thread_pool = QThreadPool(self)
+        self._model_unload_thread_pool.setMaxThreadCount(1)
+        # Strong references to running tasks so that they are not garbage
+        # collected while the thread pool still references them.
+        self._running_model_unload_tasks: set = set()
+        # When the application is about to quit, give an in-flight model
+        # unload a bounded chance to finish so that the thread pool is not
+        # destroyed while its worker thread is still running a task (which
+        # makes Qt report worker-thread exceptions, and can even abort the
+        # process). The bound covers `ModelSubprocessManager.shutdown()`'s
+        # worst case (a 5 s join, a terminate, then another 5 s join) plus
+        # margin, because abandoning the unload could leave the worker
+        # process (and its RAM/VRAM) behind.
+        QApplication.instance().aboutToQuit.connect(
+            self._wait_for_model_unload)
 
     @Slot()
     def start_or_cancel_captioning(self):
@@ -618,11 +742,46 @@ class AutoCaptioner(QDockWidget):
             # Start captioning.
             self.generate_captions()
 
+    @Slot()
+    def _wait_for_model_unload(self):
+        """Give an in-flight model unload a bounded chance to finish before
+        the application's thread pool is destroyed."""
+        self._model_unload_thread_pool.clear()
+        self._model_unload_thread_pool.waitForDone(15000)
+
+    def _update_eject_button_state(self):
+        # The eject button is only useful while a model is loaded into
+        # memory, and it must not be used while a captioning run is in
+        # flight (tearing the worker down mid-run would race the run).
+        self.eject_model_button.setEnabled(
+            not self.is_captioning and self.model_manager.is_alive())
+
+    @Slot()
+    def eject_model(self):
+        if self.is_captioning:
+            return
+        if not self.model_manager.is_alive():
+            self.update_console_text_edit('No model is loaded.')
+            return
+        self.eject_model_button.setEnabled(False)
+        self._model_unload_thread_pool.start(
+            ModelUnloadTask(self.model_manager, self._model_unload_worker,
+                            self._running_model_unload_tasks))
+
+    @Slot(bool)
+    def on_model_unload_finished(self, success: bool):
+        if success:
+            self.update_console_text_edit('Model unloaded from memory.')
+        else:
+            self.update_console_text_edit('Failed to unload the model.')
+        self._update_eject_button_state()
+
     def set_is_captioning(self, is_captioning: bool):
         self.is_captioning = is_captioning
         button_text = ('Cancel Auto-Captioning' if is_captioning
                        else 'Start Auto-Captioning')
         self.start_cancel_button.setText(button_text)
+        self._update_eject_button_state()
 
     @Slot(str)
     def update_console_text_edit(self, text: str):
@@ -687,6 +846,10 @@ class AutoCaptioner(QDockWidget):
             self.progress_bar.setRange(0, selected_image_count)
             self.progress_bar.setValue(0)
             self.progress_bar.show()
+        # If a model unload is still finishing, `ensure_model` (on the
+        # captioning thread) waits for it before spawning a fresh worker, so
+        # the new run cannot race the teardown and the GUI thread is never
+        # blocked by it.
         tag_separator = get_tag_separator()
         models_directory_path = self.settings.value(
             'models_directory_path',
@@ -721,4 +884,5 @@ class AutoCaptioner(QDockWidget):
 
     def closeEvent(self, event):
         self.model_manager.shutdown()
+        self._update_eject_button_state()
         super().closeEvent(event)
