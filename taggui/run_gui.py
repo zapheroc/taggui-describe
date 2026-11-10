@@ -40,7 +40,6 @@ def run_gui():
     # Disable the allocation limit to allow loading large images.
     QImageReader.setAllocationLimit(0)
     main_window = MainWindow(app)
-    main_window.show()
     sys.exit(app.exec())
 
 

@@ -52,6 +52,11 @@ class HistoryItem:
     tags: list[list[str]]
     descriptions: list[str]
     should_ask_for_confirmation: bool
+    # The grouped tag panel's tag order from just before this change was
+    # applied, so undoing/redoing it puts every tag back exactly where it was.
+    # Set by the Image Tags pane; None when the change was not made in the
+    # grouped view.
+    group_order_state: object = None
 
 
 class Scope(str, Enum):
@@ -204,6 +209,26 @@ class ImageListModel(QAbstractListModel):
         self.images: list[Image] = []
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
+        # What the most recent `add_to_undo_stack` call displaced (the oldest
+        # undo entry dropped by the size limit, and the cleared redo stack), so
+        # a bulk operation that ends up changing nothing can be fully undone
+        # from the history. None when there is nothing to restore.
+        self._last_undo_push = None
+        # True only while restoring tags from the undo/redo history. Consumers
+        # (e.g. the Common/Differences panel) use this to distinguish a genuine
+        # new edit from a history restore, so an undone/redone tag returns to
+        # its original position while a freshly added tag lands at the end.
+        self.is_restoring_history = False
+        # While restoring: (item being restored, its reverse item). See
+        # `restore_history_tags_and_description`.
+        self.restoring_history_items = None
+        # The entry most recently added by `add_to_undo_stack`, until the
+        # grouped tag panel has saved its tag order with it (see HistoryItem).
+        self.newest_history_item = None
+        # Set only while a rename-like operation reports its change: maps each
+        # renamed tag to the tag(s) that replaced it, so the grouped tag panel
+        # can keep the new name in the old tag's position.
+        self.tag_renames: dict[str, list[str]] | None = None
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
         # Thumbnails are generated on background threads so that image
@@ -288,6 +313,7 @@ class ImageListModel(QAbstractListModel):
         self.images.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
+        self._last_undo_push = None
         self.endResetModel()
         self.update_undo_and_redo_actions_requested.emit()
         # Discard the results of any in-flight thumbnail generation pass.
@@ -396,9 +422,33 @@ class ImageListModel(QAbstractListModel):
         undo stack."""
         tags = [image.tags.copy() for image in self.images]
         descriptions = [image.description for image in self.images]
-        self.undo_stack.append(HistoryItem(action_name, tags, descriptions,
-                                           should_ask_for_confirmation))
+        self._push_history_item(HistoryItem(
+            action_name, tags, descriptions, should_ask_for_confirmation))
+
+    def _push_history_item(self, history_item: HistoryItem):
+        dropped_item = (self.undo_stack[0]
+                        if len(self.undo_stack) == self.undo_stack.maxlen
+                        else None)
+        self._last_undo_push = (dropped_item, self.redo_stack.copy())
+        self.newest_history_item = history_item
+        self.undo_stack.append(self.newest_history_item)
         self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
+    def discard_last_undo_entry(self):
+        """Remove the entry just added by `add_to_undo_stack`, for an operation
+        that turned out to change nothing, restoring the history exactly as it
+        was before (including the redo stack)."""
+        if self._last_undo_push is None or not self.undo_stack:
+            return
+        dropped_item, previous_redo_stack = self._last_undo_push
+        self._last_undo_push = None
+        if self.undo_stack[-1] is self.newest_history_item:
+            self.newest_history_item = None
+        self.undo_stack.pop()
+        if dropped_item is not None:
+            self.undo_stack.appendleft(dropped_item)
+        self.redo_stack[:] = previous_redo_stack
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot(Image)
@@ -437,11 +487,13 @@ class ImageListModel(QAbstractListModel):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         source_stack.pop()
-        tags = [image.tags for image in self.images]
+        self._last_undo_push = None
+        tags = [image.tags.copy() for image in self.images]
         descriptions = [image.description for image in self.images]
-        destination_stack.append(HistoryItem(
+        reverse_item = HistoryItem(
             history_item.action_name, tags, descriptions,
-            history_item.should_ask_for_confirmation))
+            history_item.should_ask_for_confirmation)
+        destination_stack.append(reverse_item)
         changed_image_indices = []
         for (image_index, (image, history_image_tags,
                            history_image_description)) in enumerate(
@@ -451,12 +503,21 @@ class ImageListModel(QAbstractListModel):
                     and image.description == history_image_description):
                 continue
             changed_image_indices.append(image_index)
-            image.tags = history_image_tags
+            image.tags = history_image_tags.copy()
             image.description = history_image_description
             self.write_image_tags_to_disk(image)
         if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            self.is_restoring_history = True
+            # Lets the grouped tag panel restore the tag order saved with the
+            # item being restored, and save the current order with its reverse.
+            self.restoring_history_items = (history_item, reverse_item)
+            try:
+                self.dataChanged.emit(
+                    self.index(changed_image_indices[0]),
+                    self.index(changed_image_indices[-1]))
+            finally:
+                self.is_restoring_history = False
+                self.restoring_history_items = None
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot()
@@ -728,40 +789,166 @@ class ImageListModel(QAbstractListModel):
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
 
+    def _valid_indices(self, image_indices: list) -> list[QModelIndex]:
+        """Drop indices that no longer point at an image (e.g. after the
+        image was removed), so a stale target can't write elsewhere."""
+        return [index for index in image_indices
+                if index is not None and index.isValid()
+                and 0 <= index.row() < len(self.images)]
+
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
         """Add one or more tags to one or more images."""
-        if not image_indices:
+        self.add_tags_per_image([(index, tags) for index in image_indices],
+                                f'Add {pluralize("Tag", len(tags))}')
+
+    def add_tags_per_image(self, tags_by_index: list[tuple[QModelIndex,
+                                                           list[str]]],
+                           action_name: str):
+        """Add each image's own list of tags to it, as one undo step. Tags
+        an image already has are skipped."""
+        valid_rows = range(len(self.images))
+        tags_by_index = [(index, tags) for index, tags in tags_by_index
+                         if tags and index is not None and index.isValid()
+                         and index.row() in valid_rows]
+        if not tags_by_index:
             return
-        action_name = f'Add {pluralize("Tag", len(tags))}'
+        should_ask_for_confirmation = len(tags_by_index) > 1
+        self.add_to_undo_stack(action_name, should_ask_for_confirmation)
+        changed_indices = []
+        for image_index, tags in tags_by_index:
+            image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+            # A tag that only differs in letter case from one the image
+            # already has counts as a duplicate, like in the Image Tags pane.
+            existing = {tag.casefold() for tag in image.tags}
+            new_tags = []
+            for tag in tags:
+                if tag.casefold() not in existing:
+                    existing.add(tag.casefold())
+                    new_tags.append(tag)
+            if not new_tags:
+                continue
+            image.tags.extend(new_tags)
+            self.write_image_tags_to_disk(image)
+            changed_indices.append(image_index)
+        if not changed_indices:
+            self.discard_last_undo_entry()
+            return
+        min_image_index = min(changed_indices, key=lambda index: index.row())
+        max_image_index = max(changed_indices, key=lambda index: index.row())
+        self.dataChanged.emit(min_image_index, max_image_index)
+
+    @Slot(list, list)
+    def remove_tags_from_images(self, tags: list[str],
+                                image_indices: list[QModelIndex]):
+        """Remove one or more tags from an explicit set of images.
+
+        Unlike `delete_tags` (which works by scope across the whole model),
+        this targets exactly the given image indices, as needed by the grouped
+        multi-image tags view ("remove from all selected" / "remove from the
+        current image"). Only images that actually contain one of the tags are
+        modified and written to disk.
+        """
+        image_indices = self._valid_indices(image_indices)
+        if not image_indices or not tags:
+            return
+        tags_to_remove = set(tags)
+        action_name = f'Remove {pluralize("Tag", len(tags))}'
         should_ask_for_confirmation = len(image_indices) > 1
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
+        changed_indices = []
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
-            image.tags.extend(tags)
+            if not any(tag in tags_to_remove for tag in image.tags):
+                continue
+            image.tags = [tag for tag in image.tags
+                          if tag not in tags_to_remove]
             self.write_image_tags_to_disk(image)
-        min_image_index = min(image_indices, key=lambda index: index.row())
-        max_image_index = max(image_indices, key=lambda index: index.row())
+            changed_indices.append(image_index)
+        if not changed_indices:
+            self.discard_last_undo_entry()
+            return
+        min_image_index = min(changed_indices, key=lambda index: index.row())
+        max_image_index = max(changed_indices, key=lambda index: index.row())
         self.dataChanged.emit(min_image_index, max_image_index)
+
+    @Slot(str, str, list)
+    def rename_tag_in_images(self, old_tag: str, new_tag: str,
+                             image_indices: list[QModelIndex]):
+        """Rename a tag on an explicit set of images (grouped view in-place
+        edit).
+
+        Mirrors `remove_tags_from_images` but for an in-place rename: only
+        the given images that actually contain `old_tag` are modified, the new
+        tag takes the old tag's position, and duplicates are collapsed. No-op
+        when the new tag is empty or unchanged. A new name containing the tag
+        separator (e.g. "a, b") is split into several tags, like the Add Tag
+        box does, so the list matches what the caption file reloads as.
+        """
+        new_tags = [tag.strip() for tag in new_tag.split(self.tag_separator)
+                    if tag.strip()]
+        image_indices = self._valid_indices(image_indices)
+        if (not image_indices or not old_tag or not new_tags
+                or new_tags == [old_tag]):
+            return
+        targets = [index for index in image_indices
+                   if old_tag in self.data(index,
+                                           Qt.ItemDataRole.UserRole).tags]
+        if not targets:
+            return
+        self.add_to_undo_stack(
+            action_name='Rename Tag',
+            should_ask_for_confirmation=len(targets) > 1)
+        for image_index in targets:
+            image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+            renamed = []
+            for tag in image.tags:
+                renamed.extend(new_tags if tag == old_tag else [tag])
+            image.tags = list(dict.fromkeys(renamed))
+            self.write_image_tags_to_disk(image)
+        min_image_index = min(targets, key=lambda index: index.row())
+        max_image_index = max(targets, key=lambda index: index.row())
+        self._emit_renamed(min_image_index, max_image_index,
+                           {old_tag: new_tags})
+
+    def _emit_renamed(self, first_index: QModelIndex, last_index: QModelIndex,
+                      renames: dict[str, list[str]]):
+        """Emit dataChanged while publishing which tags were renamed to what
+        (see `tag_renames`)."""
+        self.tag_renames = renames
+        try:
+            self.dataChanged.emit(first_index, last_index)
+        finally:
+            self.tag_renames = None
+
+    @staticmethod
+    def _note_rename(renames: dict[str, list[str]], old_tag: str,
+                     new_tags: list[str]):
+        """Record the first replacement seen for `old_tag` (ignoring no-ops)."""
+        if new_tags != [old_tag] and old_tag not in renames:
+            renames[old_tag] = list(new_tags)
 
     @Slot(list, str)
     def rename_tags(self, old_tags: list[str], new_tag: str,
                     scope: Scope | str = Scope.ALL_IMAGES,
                     use_regex: bool = False):
+        pattern = re.compile(old_tags[0]) if use_regex else None
         self.add_to_undo_stack(
             action_name=f'Rename {pluralize("Tag", len(old_tags))}',
             should_ask_for_confirmation=True)
         changed_image_indices = []
+        renames: dict[str, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
             if use_regex:
-                pattern = old_tags[0]
-                if not any(re.fullmatch(pattern=pattern, string=image_tag)
+                if not any(pattern.fullmatch(image_tag)
                            for image_tag in image.tags):
                     continue
-                image.tags = [new_tag if re.fullmatch(pattern=pattern,
-                                                      string=image_tag)
+                for image_tag in image.tags:
+                    if pattern.fullmatch(image_tag):
+                        self._note_rename(renames, image_tag, [new_tag])
+                image.tags = [new_tag if pattern.fullmatch(image_tag)
                               else image_tag for image_tag in image.tags]
             else:
                 if not any(old_tag in image.tags for old_tag in old_tags):
@@ -770,9 +957,15 @@ class ImageListModel(QAbstractListModel):
                               for image_tag in image.tags]
             changed_image_indices.append(image_index)
             self.write_image_tags_to_disk(image)
+        if not use_regex:
+            for old_tag in old_tags:
+                self._note_rename(renames, old_tag, [new_tag])
         if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            self._emit_renamed(self.index(changed_image_indices[0]),
+                               self.index(changed_image_indices[-1]),
+                               renames)
+        else:
+            self.discard_last_undo_entry()
 
     @Slot(list)
     def delete_tags(self, tags: list[str],
@@ -803,3 +996,5 @@ class ImageListModel(QAbstractListModel):
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
+        else:
+            self.discard_last_undo_entry()

@@ -8,7 +8,7 @@ from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QRect, QSize, QUrl,
                             Qt, Signal, Slot)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics,
-                           QIcon, QPainter, QPalette, QPen)
+                           QIcon, QPainter, QKeyEvent, QPalette, QPen)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QPushButton,
@@ -21,7 +21,7 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
 from dialogs.filter_help_dialog import FilterHelpDialog
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
-from utils.settings import get_settings
+from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
@@ -379,6 +379,18 @@ class ImageListView(QListView):
 
     @Slot()
     def copy_selected_image_tags(self):
+        # "Copy Tags" (Ctrl+C) is a window-wide shortcut, so it fires no
+        # matter which pane is focused. If the focused widget is a tag list
+        # (the Image Tags or All Tags pane) that knows how to copy just its
+        # selected tags, let it handle the copy instead of copying every tag
+        # of the selected images.
+        focus_widget = QApplication.focusWidget()
+        while focus_widget is not None:
+            copy_selected_tags = getattr(
+                focus_widget, 'copy_selected_tags_to_clipboard', None)
+            if callable(copy_selected_tags) and copy_selected_tags():
+                return
+            focus_widget = focus_widget.parentWidget()
         selected_images = self.get_selected_images()
         selected_image_captions = [self.tag_separator.join(image.tags)
                                    for image in selected_images]
@@ -390,6 +402,151 @@ class ImageListView(QListView):
             self.proxy_image_list_model.mapToSource(proxy_index)
             for proxy_index in selected_image_proxy_indices]
         return selected_image_indices
+
+    def switch_between_selected_images(self, direction: int) -> bool:
+        """Move the current image to the previous (-1) / next (1) selected
+        image, keeping the multi-image selection intact.
+
+        Used by the Image Tags pane when the user arrows past the end of the
+        tag list (or presses Left/Right in the grouped view). Returns False
+        when there is nothing to cycle (fewer than two selected images, the
+        current image is not one of them, or the edge is reached).
+        """
+        selected_proxy_indices = sorted(self.selectedIndexes(),
+                                        key=lambda index: index.row())
+        if len(selected_proxy_indices) < 2:
+            return False
+        selected_rows = [index.row() for index in selected_proxy_indices]
+        current_row = self.selectionModel().currentIndex().row()
+        if current_row not in selected_rows:
+            return False
+        current_selected_row = selected_rows.index(current_row)
+        next_selected_row = current_selected_row + direction
+        if next_selected_row < 0 or next_selected_row >= len(selected_rows):
+            return False
+        next_proxy_index = selected_proxy_indices[next_selected_row]
+        self.selectionModel().setCurrentIndex(
+            next_proxy_index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.scrollTo(next_proxy_index,
+                      QAbstractItemView.ScrollHint.EnsureVisible)
+        return True
+
+    def move_selection_beyond(self, direction: int) -> bool:
+        """Select a single image just outside the current multi-selection.
+
+        Used by Ctrl+Up/Down so the arrow keys can deliberately leave a
+        multi-image selection, while plain arrows stay within it. Ctrl+Down
+        moves to the image after the last selected one, Ctrl+Up to the image
+        before the first selected one. Returns False at the end of the list.
+        """
+        selected_rows = sorted(index.row() for index in self.selectedIndexes())
+        if not selected_rows:
+            return False
+        target_row = (selected_rows[0] - 1 if direction < 0
+                      else selected_rows[-1] + 1)
+        if target_row < 0 or target_row >= self.model().rowCount():
+            return False
+        target_index = self.model().index(target_row, 0)
+        self.selectionModel().setCurrentIndex(
+            target_index, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self.scrollTo(target_index,
+                      QAbstractItemView.ScrollHint.EnsureVisible)
+        return True
+
+    def set_current_image_index(self, index: QModelIndex):
+        """Make `index` the current image for a programmatic move (filter
+        change, go to next image, etc.). In extended selection mode only that
+        image is selected, regardless of any held modifier keys (e.g. Ctrl
+        still held from the Ctrl+Up/Ctrl+Down shortcut would otherwise add it
+        to the selection instead of replacing it)."""
+        self._programmatic_current_change = True
+        try:
+            self.setCurrentIndex(index)
+        finally:
+            self._programmatic_current_change = False
+
+    def selectionCommand(self, index, event=None):
+        if (event is None
+                and getattr(self, '_programmatic_current_change', False)
+                and self.selectionMode()
+                == QAbstractItemView.SelectionMode.ExtendedSelection):
+            return QItemSelectionModel.SelectionFlag.ClearAndSelect
+        return super().selectionCommand(index, event)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        modifiers = event.modifiers()
+        # Hold-to-peek: while the thumbnails have focus in the grouped (grid)
+        # view, holding Ctrl brightens the current grid cell (keyboard
+        # equivalent of hovering it). Ctrl is observed but NOT consumed, so
+        # Ctrl+key shortcuts keep working. Kept in sync with GRID_PEEK_KEY in
+        # image_tags_editor.
+        editor = getattr(self, 'image_tags_editor', None)
+        if (editor is not None and editor.is_group_mode()
+                and key == Qt.Key.Key_Control and not event.isAutoRepeat()):
+            editor.set_grid_peek(True)
+        arrow_keys = (Qt.Key.Key_Left, Qt.Key.Key_Right,
+                      Qt.Key.Key_Up, Qt.Key.Key_Down)
+        # With a multi-image selection, keep the arrow keys "inside" the
+        # selection so it can't be lost by accident. Plain Left/Right/Up/Down
+        # cycle the current image among the selected ones (stopping at the
+        # ends); Ctrl+Up/Down is the deliberate way to select a new image
+        # outside the selection. Other combinations (Shift+arrow to extend,
+        # etc.) keep their default behavior.
+        if len(self.selectedIndexes()) >= 2 and key in arrow_keys:
+            control_pressed = bool(
+                modifiers & Qt.KeyboardModifier.ControlModifier)
+            shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            if (control_pressed and not shift_pressed
+                    and key in (Qt.Key.Key_Up, Qt.Key.Key_Down)):
+                self.move_selection_beyond(
+                    -1 if key == Qt.Key.Key_Up else 1)
+                return
+            if modifiers == Qt.KeyboardModifier.NoModifier:
+                self.switch_between_selected_images(
+                    -1 if key in (Qt.Key.Key_Left, Qt.Key.Key_Up) else 1)
+                return
+        if self._should_redirect_typing_to_tag_input(event):
+            editor = self.image_tags_editor
+            editor.raise_()
+            editor.tag_input_box.setFocus()
+            editor.tag_input_box.insert(event.text())
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        # Release the hold-to-peek started in keyPressEvent (see there).
+        editor = getattr(self, 'image_tags_editor', None)
+        if (editor is not None and editor.is_group_mode()
+                and event.key() == Qt.Key.Key_Control
+                and not event.isAutoRepeat()):
+            editor.set_grid_peek(False)
+        super().keyReleaseEvent(event)
+
+    def _should_redirect_typing_to_tag_input(self, event: QKeyEvent) -> bool:
+        """Whether a keystroke in the thumbnails should start a new tag.
+
+        When the "auto-focus Add Tag box when typing" setting is enabled,
+        typing a printable character while the thumbnails have focus should
+        jump to the Add Tag input in the Image Tags pane instead of doing
+        nothing. The Filter Images box is a separate widget, so its typing is
+        never affected by this.
+        """
+        editor = getattr(self, 'image_tags_editor', None)
+        # Nowhere to redirect to (e.g. before the editor is wired up, or the
+        # box is hidden).
+        if editor is None or editor.tag_input_box.isHidden():
+            return False
+        if not get_settings().value(
+                'image_list_auto_focus_add_tag_box',
+                defaultValue=DEFAULT_SETTINGS['image_list_auto_focus_add_tag_box'],
+                type=bool):
+            return False
+        # Shared with the Image Tags pane. Imported here to avoid a circular
+        # import at module load time (image_tags_editor imports ImageList).
+        from widgets.image_tags_editor import (
+            _should_redirect_typing_to_tag_input as typing_redirects)
+        return typing_redirects(event)
 
     @Slot()
     def paste_tags(self):
@@ -602,7 +759,7 @@ class ImageList(QDockWidget):
         self.list_view.clearSelection()
         previous_image_index = self.proxy_image_list_model.index(
             self.list_view.selectionModel().currentIndex().row() - 1, 0)
-        self.list_view.setCurrentIndex(previous_image_index)
+        self.list_view.set_current_image_index(previous_image_index)
 
     @Slot()
     def go_to_next_image(self):
@@ -612,7 +769,7 @@ class ImageList(QDockWidget):
         self.list_view.clearSelection()
         next_image_index = self.proxy_image_list_model.index(
             self.list_view.selectionModel().currentIndex().row() + 1, 0)
-        self.list_view.setCurrentIndex(next_image_index)
+        self.list_view.set_current_image_index(next_image_index)
 
     @Slot()
     def jump_to_first_untagged_image(self):
@@ -630,7 +787,7 @@ class ImageList(QDockWidget):
         if proxy_image_index is None:
             return
         self.list_view.clearSelection()
-        self.list_view.setCurrentIndex(
+        self.list_view.set_current_image_index(
             self.proxy_image_list_model.index(proxy_image_index, 0))
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
