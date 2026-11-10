@@ -33,9 +33,9 @@ def suppress_warnings():
 def run_gui():
     app = QApplication([])
     # The application name is shown in the taskbar.
-    app.setApplicationName('TagGUI')
+    app.setApplicationName('TagGUI Describe')
     # The application display name is shown in the title bar.
-    app.setApplicationDisplayName('TagGUI')
+    app.setApplicationDisplayName('TagGUI Describe')
     app.setStyle('Fusion')
     # Disable the allocation limit to allow loading large images.
     QImageReader.setAllocationLimit(0)
