@@ -1,9 +1,10 @@
 from pathlib import Path
 
-from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, Slot
+from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
+                            QModelIndex, QPoint, QUrl, Qt, Slot, QTimer)
 from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon,
                            QKeySequence, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu,
                                QMessageBox, QStackedWidget, QVBoxLayout,
                                QWidget)
 from transformers import AutoTokenizer
@@ -150,13 +151,11 @@ class MainWindow(QMainWindow):
             self.image_tags_editor.raise_)
         focus_add_tag_box_shortcut.activated.connect(
             self.image_tags_editor.tag_input_box.setFocus)
+        # In the grouped (grid) view the single-image tag list is hidden, so
+        # use focus_tags_list to reach the right list in either mode.
         focus_image_tags_list_shortcut = QShortcut(QKeySequence('Alt+I'), self)
         focus_image_tags_list_shortcut.activated.connect(
-            self.image_tags_editor.raise_)
-        focus_image_tags_list_shortcut.activated.connect(
-            self.image_tags_editor.image_tags_list.setFocus)
-        focus_image_tags_list_shortcut.activated.connect(
-            self.image_tags_editor.select_first_tag)
+            self.image_tags_editor.focus_tags_list)
         focus_search_tags_box_shortcut = QShortcut(QKeySequence('Alt+S'), self)
         focus_search_tags_box_shortcut.activated.connect(
             self.all_tags_editor.raise_)
@@ -178,7 +177,45 @@ class MainWindow(QMainWindow):
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
             self.image_list.jump_to_first_untagged_image)
+        # Zoom and pan shortcuts for the preview (single image or grid).
+        self.reset_image_zoom_shortcut = QShortcut(
+            QKeySequence('Ctrl+0'), self)
+        self.reset_image_zoom_shortcut.activated.connect(
+            self.image_viewer.reset_view)
+        # `+` is the shifted `=` key, so register both `Ctrl++` and `Ctrl+=`
+        # for zoom in; otherwise the user must hold Shift to zoom in.
+        self.zoom_in_shortcut = QShortcut(QKeySequence('Ctrl++'), self)
+        self.zoom_in_shortcut.setKeys([QKeySequence('Ctrl++'),
+                                       QKeySequence('Ctrl+=')])
+        self.zoom_in_shortcut.activated.connect(self.image_viewer.zoom_in)
+        self.zoom_out_shortcut = QShortcut(QKeySequence('Ctrl+-'), self)
+        self.zoom_out_shortcut.activated.connect(self.image_viewer.zoom_out)
+        self.pan_image_left_shortcut = QShortcut(
+            QKeySequence('Alt+Left'), self)
+        self.pan_image_left_shortcut.activated.connect(
+            self.image_viewer.pan_left)
+        self.pan_image_right_shortcut = QShortcut(
+            QKeySequence('Alt+Right'), self)
+        self.pan_image_right_shortcut.activated.connect(
+            self.image_viewer.pan_right)
+        self.pan_image_up_shortcut = QShortcut(QKeySequence('Alt+Up'), self)
+        self.pan_image_up_shortcut.activated.connect(
+            self.image_viewer.pan_up)
+        self.pan_image_down_shortcut = QShortcut(
+            QKeySequence('Alt+Down'), self)
+        self.pan_image_down_shortcut.activated.connect(
+            self.image_viewer.pan_down)
         self.restore()
+        # Show the window once the first image has been rendered.  Fires via
+        # image_viewer.first_image_rendered after the initial pixmap.scaled()
+        # completes.  _show_window() is idempotent, so it is safe for both the
+        # signal and the timer below to call it.
+        self.image_viewer.first_image_rendered.connect(self._show_window)
+        # Safety net: guarantees the window becomes visible even if no image is
+        # ever rendered (e.g. an empty directory, a load error, or a path that
+        # never emits first_image_rendered).  5s is a generous upper bound that
+        # a normal first render finishes well within.
+        QTimer.singleShot(5000, self._show_window)
         self.image_tags_editor.tag_input_box.setFocus()
 
     def closeEvent(self, event: QCloseEvent):
@@ -240,8 +277,12 @@ class MainWindow(QMainWindow):
         if select_index >= row_count:
             select_index = row_count - 1
         if row_count > 0:
-            self.image_list.list_view.setCurrentIndex(
+            self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(select_index, 0))
+        # If no images are present there will be no currentChanged signal and
+        # therefore no first_image_rendered signal, so show the window now.
+        if not self.image_list_model.images:
+            self._show_window()
 
     @Slot()
     def select_and_load_directory(self):
@@ -272,6 +313,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def show_settings_dialog(self):
         settings_dialog = SettingsDialog(parent=self)
+        settings_dialog.variant_grid_overlay_settings_changed.connect(
+            self.image_viewer.refresh_grid_overlay_style)
         settings_dialog.exec()
 
     @Slot()
@@ -453,11 +496,11 @@ class MainWindow(QMainWindow):
             # Select the previously selected image in the unfiltered image
             # list.
             select_index = self.settings.value('image_index', type=int) or 0
-            self.image_list.list_view.setCurrentIndex(
+            self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(select_index, 0))
         else:
             # Select the first image.
-            self.image_list.list_view.setCurrentIndex(
+            self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(0, 0))
 
     @Slot()
@@ -483,6 +526,27 @@ class MainWindow(QMainWindow):
             self.image_viewer.load_image)
         self.image_list_selection_model.currentChanged.connect(
             self.image_tags_editor.load_image_tags)
+        # Keep the grouped tag view and synchronized grid preview in sync with
+        # the selection. Reconciled on both a changed selection and a moved
+        # current image (arrow keys), after the single-image handlers above.
+        self.image_list_selection_model.selectionChanged.connect(
+            self._sync_variant_group_view)
+        self.image_list_selection_model.currentChanged.connect(
+            self._sync_variant_group_view)
+        # The grid holds row positions, and rows can be removed, added or
+        # reordered without the selection signals firing (e.g. a refresh that
+        # removes a selected file), so rebuild it whenever the rows change.
+        for signal in (self.proxy_image_list_model.rowsRemoved,
+                       self.proxy_image_list_model.rowsInserted,
+                       self.proxy_image_list_model.layoutChanged,
+                       self.proxy_image_list_model.modelReset):
+            signal.connect(self._schedule_variant_group_resync)
+        self.image_viewer.clicked.connect(self.image_list.raise_)
+        self.image_viewer.clicked.connect(
+            self._focus_image_list_on_preview_click)
+        self.image_viewer.grid_cell_clicked.connect(self._select_grid_cell)
+        self.image_viewer.grid_cell_context_menu_requested.connect(
+            self._show_grid_cell_tag_menu)
         self.image_list_model.modelReset.connect(
             lambda: self.tag_counter_model.count_tags(
                 self.image_list_model.images))
@@ -510,6 +574,192 @@ class MainWindow(QMainWindow):
             lambda: self.toggle_image_list_action.setChecked(
                 self.image_list.isVisible()))
 
+    @Slot()
+    def _show_window(self):
+        """Show the main window if it is not already visible."""
+        if not self.isVisible():
+            # Show the window while fully transparent so its first paint
+            # happens invisibly, then force that paint to complete before
+            # revealing it.  Without this the OS briefly shows a blank white
+            # window before Qt paints the UI for the first time.
+            self.setWindowOpacity(0.0)
+            self.show()
+            # Flush pending layout and paint events so the window is fully
+            # rendered, then reveal it in one step.
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            self.setWindowOpacity(1.0)
+
+    @Slot(QModelIndex)
+    def _select_grid_cell(self, proxy_index: QModelIndex):
+        """Make a clicked grid cell the current image without changing selection.
+
+        Mirrors the arrow-key path (switch_between_selected_images): only the
+        current index moves, using NoUpdate so the selection set is untouched.
+        Clicks that don't map to a currently-selected image are ignored.
+        """
+        if not proxy_index.isValid():
+            return
+        selected_proxy_indices = self.image_list.list_view.selectedIndexes()
+        if proxy_index not in selected_proxy_indices:
+            return
+        if proxy_index == self.image_list_selection_model.currentIndex():
+            return
+        self.image_list_selection_model.setCurrentIndex(
+            proxy_index, QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    @staticmethod
+    def _shorten_tag(tag: str, limit: int = 40) -> str:
+        """Truncate a tag for display in a menu label."""
+        tag = tag.replace('\n', ' ')
+        if len(tag) <= limit:
+            return tag
+        return tag[:limit - 1] + '\u2026'
+
+    @Slot(QModelIndex, QPoint)
+    def _show_grid_cell_tag_menu(self, proxy_index: QModelIndex,
+                                 global_point: QPoint):
+        """Context menu to add/remove the selected tag on a right-clicked cell.
+
+        Shown when a grid cell is right-clicked in the multi-image (grid) view.
+        Adds or removes the tag(s) currently selected in the Image Tags pane
+        to/from just the image under the cursor.
+        """
+        if not proxy_index.isValid():
+            return
+        source_index = self.proxy_image_list_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return
+        image: Image = self.image_list_model.data(source_index,
+                                                  Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
+        selected_tags = self.image_tags_editor.selected_group_tags()
+        menu = QMenu(self)
+        if not selected_tags:
+            hint = menu.addAction('Select a tag in the Image Tags pane')
+            hint.setEnabled(False)
+            menu.exec(global_point)
+            return
+        existing = set(image.tags)
+        missing_tags = [tag for tag in selected_tags if tag not in existing]
+        present_tags = [tag for tag in selected_tags if tag in existing]
+        if len(selected_tags) == 1:
+            tag = selected_tags[0]
+            label = f"'{self._shorten_tag(tag)}'"
+            add_action = menu.addAction(f'Add {label} to this image')
+            remove_action = menu.addAction(f'Remove {label} from this image')
+        else:
+            count = len(selected_tags)
+            add_action = menu.addAction(f'Add {count} tags to this image')
+            remove_action = menu.addAction(
+                f'Remove {count} tags from this image')
+        add_action.setEnabled(bool(missing_tags))
+        remove_action.setEnabled(bool(present_tags))
+        chosen = menu.exec(global_point)
+        if chosen is None:
+            return
+        if chosen == add_action and missing_tags:
+            self.image_tags_editor.remember_group_tag_anchor()
+            self.image_list_model.add_tags(missing_tags, [source_index])
+        elif chosen == remove_action and present_tags:
+            self.image_tags_editor.remember_group_tag_anchor()
+            self.image_list_model.remove_tags_from_images(present_tags,
+                                                          [source_index])
+
+    @Slot()
+    def _schedule_variant_group_resync(self, *args):
+        if (not self.image_viewer.is_grid_mode()
+                or getattr(self, '_is_variant_group_resync_pending', False)):
+            return
+        self._is_variant_group_resync_pending = True
+
+        def resync():
+            self._is_variant_group_resync_pending = False
+            if self.image_viewer.is_grid_mode():
+                self._sync_variant_group_view()
+
+        QTimer.singleShot(0, resync)
+
+    @Slot()
+    def _sync_variant_group_view(self, *args):
+        """Reconcile the grouped tag view and grid preview with the selection.
+
+        When the variant grid setting is on and two or more images are
+        selected, the Image Tags pane shows the grouped Common/Differences view
+        and the center preview shows a synchronized grid of the selection.
+        Otherwise the panes fall back to the normal single-image view. This is
+        safe to call repeatedly; it fully derives the desired state from the
+        current selection each time.
+        """
+        grid_enabled = get_settings().value(
+            'variant_grid_view_enabled',
+            defaultValue=DEFAULT_SETTINGS['variant_grid_view_enabled'],
+            type=bool)
+        list_view = self.image_list.list_view
+        selected_proxy_indices = sorted(list_view.selectedIndexes(),
+                                        key=lambda index: index.row())
+        if grid_enabled and len(selected_proxy_indices) >= 2:
+            current_proxy_index = self.image_list_selection_model.currentIndex()
+            selected_rows = [index.row() for index in selected_proxy_indices]
+            current_row = current_proxy_index.row()
+            current_position = (selected_rows.index(current_row)
+                                if current_row in selected_rows else 0)
+            source_indices = [
+                self.proxy_image_list_model.mapToSource(index)
+                for index in selected_proxy_indices]
+            current_source_index = source_indices[current_position]
+            cell_cap = get_settings().value(
+                'variant_grid_cell_cap',
+                defaultValue=DEFAULT_SETTINGS['variant_grid_cell_cap'],
+                type=int)
+            if self.image_tags_editor.is_group_mode():
+                self.image_tags_editor.update_group_selection(
+                    source_indices, current_source_index)
+                self.image_viewer.update_grid_current(
+                    selected_proxy_indices, current_position, cell_cap)
+            else:
+                self.image_tags_editor.enter_group_mode(
+                    source_indices, current_source_index)
+                self.image_viewer.show_grid(
+                    selected_proxy_indices, current_position, cell_cap)
+            return
+        # Single-image (or disabled) view.
+        was_grid = self.image_viewer.is_grid_mode()
+        was_group = self.image_tags_editor.is_group_mode()
+        self.image_tags_editor.exit_group_mode()
+        if was_group:
+            # currentChanged fires before selectionChanged, so load_image_tags
+            # already ran once while group mode was still active and early
+            # returned without refreshing the single-image tag list or the
+            # green "Complete" indicator. Now that group mode is off, reload the
+            # current image so both reflect its real state (or empty the pane
+            # if no image is current, e.g. the filter hides everything).
+            current_proxy_index = self.image_list_selection_model.currentIndex()
+            self.image_tags_editor.load_image_tags(current_proxy_index)
+        if was_grid:
+            self.image_viewer.exit_grid()
+            # Also called with an invalid index (nothing current), which
+            # clears the grid instead of leaving it on screen.
+            current_proxy_index = self.image_list_selection_model.currentIndex()
+            self.image_viewer.load_image(current_proxy_index)
+
+    @Slot()
+    def _focus_image_list_on_preview_click(self):
+        """Move focus to the thumbnails after a preview click, unless the user
+        was working in the Image Tags pane.
+
+        Clicking or dragging in the preview normally focuses the Images pane so
+        the arrow keys navigate images. But if focus is already in the Image
+        Tags pane (e.g. the Add Tag input or the tag list), keep it there so
+        zooming/dragging the preview doesn't interrupt tag entry or up/down
+        cycling through tags."""
+        focus_widget = QApplication.focusWidget()
+        if (focus_widget is not None
+                and self.image_tags_editor.isAncestorOf(focus_widget)):
+            return
+        self.image_list.list_view.setFocus()
+
     @Slot(QModelIndex, QModelIndex, list)
     def on_image_data_changed(self, first_changed_index: QModelIndex,
                               last_changed_index: QModelIndex,
@@ -532,8 +782,16 @@ class MainWindow(QMainWindow):
     @Slot()
     def update_image_tags(self):
         image_index = self.image_tags_editor.image_index
+        # `image_index` is None (or invalid) before the first image is loaded
+        # or when the current image is cleared; the tag list model can still
+        # emit in those states (e.g. during a directory load), so bail out
+        # rather than dereference a null index.
+        if image_index is None or not image_index.isValid():
+            return
         image: Image = self.image_list_model.data(image_index,
                                                   Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
         old_tags = image.tags
         new_tags = self.image_tag_list_model.stringList()
         if old_tags == new_tags:
@@ -573,6 +831,10 @@ class MainWindow(QMainWindow):
             self.image_list_model.add_tags)
         self.image_tags_editor.image_data_save_requested.connect(
             self.image_list_model.write_image_tags_to_disk)
+        self.image_tags_editor.grid_mark_paths_changed.connect(
+            self.image_viewer.set_marked_paths)
+        self.image_tags_editor.grid_peek_changed.connect(
+            self.image_viewer.set_grid_peek)
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):
@@ -630,7 +892,7 @@ class MainWindow(QMainWindow):
         if self.settings.contains('geometry'):
             self.restoreGeometry(self.settings.value('geometry', type=bytes))
         else:
-            self.showMaximized()
+            self.setWindowState(Qt.WindowState.WindowMaximized)
         self.restoreState(self.settings.value('window_state', type=bytes))
         # Get the last index of the last selected image.
         if self.settings.contains('image_index'):

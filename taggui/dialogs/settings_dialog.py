@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout)
 
@@ -8,6 +8,10 @@ from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
 
 
 class SettingsDialog(QDialog):
+    # Emitted when the grid page/count overlay appearance settings change so
+    # an open grid preview can re-render immediately.
+    variant_grid_overlay_settings_changed = Signal()
+
     def __init__(self, parent):
         super().__init__(parent)
         self.settings = get_settings()
@@ -80,6 +84,54 @@ class SettingsDialog(QDialog):
             default=DEFAULT_SETTINGS['image_list_file_formats'])
         file_types_line_edit.setMinimumWidth(400)
         file_types_line_edit.textChanged.connect(self.show_restart_warning)
+        max_image_preview_zoom_spin_box = SettingsSpinBox(
+            key='max_image_preview_zoom',
+            default=DEFAULT_SETTINGS['max_image_preview_zoom'],
+            minimum=1, maximum=100)
+        type_to_add_tag_check_box = SettingsBigCheckBox(
+            key='image_list_auto_focus_add_tag_box',
+            default=DEFAULT_SETTINGS['image_list_auto_focus_add_tag_box'])
+        variant_grid_view_check_box = SettingsBigCheckBox(
+            key='variant_grid_view_enabled',
+            default=DEFAULT_SETTINGS['variant_grid_view_enabled'])
+        variant_grid_cell_cap_spin_box = SettingsSpinBox(
+            key='variant_grid_cell_cap',
+            default=DEFAULT_SETTINGS['variant_grid_cell_cap'],
+            minimum=4, maximum=64)
+        grid_overlay_font_size_spin_box = SettingsSpinBox(
+            key='variant_grid_overlay_font_size',
+            default=DEFAULT_SETTINGS['variant_grid_overlay_font_size'],
+            minimum=1, maximum=99)
+        grid_overlay_font_size_spin_box.valueChanged.connect(
+            lambda _: self.variant_grid_overlay_settings_changed.emit())
+        grid_overlay_transparency_spin_box = SettingsSpinBox(
+            key='variant_grid_overlay_transparency',
+            default=DEFAULT_SETTINGS['variant_grid_overlay_transparency'],
+            minimum=0, maximum=100)
+        grid_overlay_transparency_spin_box.valueChanged.connect(
+            lambda _: self.variant_grid_overlay_settings_changed.emit())
+        show_grid_overlay_check_box = SettingsBigCheckBox(
+            key='variant_grid_overlay_show',
+            default=DEFAULT_SETTINGS['variant_grid_overlay_show'])
+        grid_overlay_font_size_label = QLabel(
+            'Grid page/count overlay text size (pt)')
+        grid_overlay_transparency_label = QLabel(
+            'Grid page/count overlay background transparency (%)')
+
+        def update_grid_overlay_sub_settings_enabled(checked: bool):
+            # Grey out the overlay appearance controls when the overlay is off.
+            grid_overlay_font_size_spin_box.setEnabled(checked)
+            grid_overlay_transparency_spin_box.setEnabled(checked)
+            grid_overlay_font_size_label.setEnabled(checked)
+            grid_overlay_transparency_label.setEnabled(checked)
+
+        update_grid_overlay_sub_settings_enabled(
+            show_grid_overlay_check_box.isChecked())
+        show_grid_overlay_check_box.stateChanged.connect(
+            lambda _: (
+                update_grid_overlay_sub_settings_enabled(
+                    show_grid_overlay_check_box.isChecked()),
+                self.variant_grid_overlay_settings_changed.emit()))
 
         grid_layout.addWidget(font_size_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
@@ -96,6 +148,37 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(self.models_directory_line_edit, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(models_directory_button, 7, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(QLabel('Max image preview zoom (x)'), 8, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(max_image_preview_zoom_spin_box, 8, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(
+            QLabel('Auto-focus Add Tag box when typing in Images pane'), 9, 0,
+            Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(type_to_add_tag_check_box, 9, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(
+            QLabel('Group tags & show grid when multiple images are selected'),
+            10, 0, Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(variant_grid_view_check_box, 10, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(
+            QLabel('Max grid cells for multi-image preview'), 11, 0,
+            Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(variant_grid_cell_cap_spin_box, 11, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(QLabel('Show grid page/count overlay'), 12, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(show_grid_overlay_check_box, 12, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(grid_overlay_font_size_label, 13, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(grid_overlay_font_size_spin_box, 13, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(grid_overlay_transparency_label, 14, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(grid_overlay_transparency_spin_box, 14, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 

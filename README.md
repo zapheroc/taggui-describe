@@ -17,6 +17,7 @@ models.
 - Description box for free-form, natural language image descriptions
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
 - Batch tag operations for renaming, deleting, and sorting tags
+- Tagging near-identical (variant) images together, with a synchronized grid preview
 - Advanced image list filtering
 
 ## Installation
@@ -60,6 +61,84 @@ You can also direct generated captions into the description by choosing one
 of the description options in the `Caption position` setting in the
 Auto-Captioner pane (for example, `Overwrite the description`).
 
+## Tagging variant images
+
+<img src='images/screenshot-variant-tagging.png' alt='Variant tagger workflow' with='100%'>
+
+Many datasets contain **sets of near-identical images** — the same base picture
+with small differences (a changed expression, color, or accessory).
+TagGUI has a dedicated workflow for tagging these together instead of one at a time.
+
+When you **select two or more images** (with the feature enabled in
+**`Settings`**, which it is by default), the `Image Tags` pane and the center
+preview switch to a multi-image mode:
+
+- **Synchronized grid preview** — the center preview shows every selected image
+  in a single grid that shares one zoom and pan, so you can line up the same
+  detail across all of them at once. The **current** image has a **highlight
+  outline**; use `Left` / `Right` (or `Up` / `Down` at the top/bottom of the
+  tag list) to move the current image through the selection without changing
+  selected images. Clicking a cell also makes that image current.
+  - If the selection is bigger than **`Max grid cells for multi-image
+    preview`** (default `12`), the grid is split into pages of that many cells,
+    and cycling the current image walks through the current page before moving
+    on to the next. A small overlay in the corner of the preview shows the
+    total number of images, and the current page when there is more than one
+    (for example, `Page 2/3 · 25 images`); you can hide it and adjust its text
+    size and background transparency in `Settings`.
+- **Grouped `Image Tags` pane** — the pane shows a single combined tag list,
+  but each tag now carries a **`k/N` badge** for how many of the `N` selected
+  images have it:
+  - **`Common`** tags are on **every** selected image (the badge reads `N/N`).
+  - **`Differences`** tags are on **some but not all** of them (`k/N`, with `k`
+    below `N`). Selecting a Differences tag **dims the grid images that don't
+    have it**, so the ones that do stand out. Hover an image to brighten it
+    briefly, or — for keyboard use — **hold `Ctrl`** to brighten the current
+    image while you decide whether to add the tag to it.
+
+A **scope toggle** at the top of the pane controls where the `Add Tag` box
+adds tags:
+
+- **`All images`** (default) — tags go to **all selected images**.
+- **`Current image only`** (the button highlights) — tags go to just the
+  **current** (outlined) image, so you can adjust one variant without touching
+  the rest.
+
+You can also **right-click a tag** in the grouped list to copy it, or *Add to*
+/ *Remove from* **all selected** images or **the current image**, applying a
+tag to either scope without changing the toggle (each action is only offered
+when it would do something). Pressing `Delete` removes the selected tags from
+all selected images. The normal list behaviors apply too: double-click (or
+`F2`) to rename, and select several tags with `Ctrl`/`Shift`+click to apply
+them at once.
+
+The grouped list behaves like the normal tag list: tags keep a **stable
+position** as you edit, so removing a tag from one image only updates its
+`k/N` count instead of reshuffling the list. Newly added tags go to the end,
+renamed tags keep their position (if the rename merges into a tag that was on
+only some of the images, that tag moves to the place of the tag you renamed),
+and undo/redo puts tags back exactly where they were.
+
+At the bottom of the pane, the **`X common · Y differences` counts** double as
+**filters**: click `common` to show only the tags on every selected image,
+click `differences` to show only the ones that differ, and click the active
+one again to show everything. Choosing `differences` also switches the scope
+toggle to **`Current image only`**, and `common` switches it back to
+**`All images`**, so the `Add Tag` scope matches what you're looking at.
+
+> [!NOTE]
+> - In multi-image mode the `Image Description` box and the token counter are
+>   hidden, since they apply to a single image.
+> - You can turn this off (and always keep the single-image view) with
+>   **`Settings` → `Group tags & show grid when multiple images are selected`**
+>   (on by default).
+> - **`Max grid cells for multi-image preview`** caps how many images are
+>   drawn in the grid at once (default `12`, range `4`–`64`), so large
+>   selections are split into pages.
+> - **`Show grid page/count overlay`** (together with the overlay's text size
+>   and background transparency) controls the small page/count label in the
+>   grid preview.
+
 ## Automatic Captioning
 
 <img src='images/auto-captioner-v1.18.0.png' alt='Auto-captioner screenshot' width='100%'>
@@ -89,6 +168,20 @@ TagGUI also supports tagger models, which generate a list of tags (rather than
 a free-form caption) for each image: the [WD Tagger family](https://huggingface.co/SmilingWolf) and the
 [PixAI Tagger](https://huggingface.co/pixai-labs/pixai-tagger-v1.0).
 Tagger output is stored as tags using the same tag separator as manual tags.
+
+### Unloading the model
+
+Captioning models are large, and while a model is loaded it occupies RAM or
+VRAM that you might want back for something else.
+The small **up-arrow button** next to the `Start Auto-Captioning` button
+ejects the model from memory, freeing its RAM/VRAM, without closing the
+Auto-Captioner pane.
+The button is only enabled while a model is loaded and no captioning run is in
+progress, and the console reports `Model unloaded from memory.` once the
+unload is done.
+The next time you start captioning, the model has to be loaded again, so that
+run starts with the model-load delay.
+Closing the Auto-Captioner pane or quitting TagGUI unloads the model as well.
 
 ### Captioning parameters
 
@@ -262,6 +355,10 @@ You can nest parentheses and operators to create arbitrarily complex filters.
 
 - ⭐ Previous / next image: `Ctrl`+`Up` / `Down` (just `Up` / `Down` also works
   in some cases)
+  - With two or more images selected, this selects a single image just before
+    (respectively just after) the selection — the deliberate way to leave a
+    multi-image selection. Plain arrows keep the current image inside the
+    selection instead.
 - Jump to the first untagged image: `Ctrl`+`J`
 - Focus the `Filter Images` box: `Alt`+`F`
 - Focus the `Add Tag` box: `Alt`+`A`
@@ -290,6 +387,19 @@ You can nest parentheses and operators to create arbitrarily complex filters.
 - Reorder tags: Drag and drop the tags
 - Select multiple tags: Hold `Ctrl` or `Shift` and click the tags
 
+### Multi-image (variant) view
+
+With two or more images selected, the panes switch to the multi-image mode
+described in [Tagging variant images](#tagging-variant-images):
+
+- Cycle the current image within the selection: `Left` / `Right` (or
+  `Up` / `Down` at the top/bottom of the tag list)
+- Leave the selection: `Ctrl`+`Up` / `Down` selects a single image just
+  before/after it
+- Brighten the current image in a dimmed grid: Hold `Ctrl`
+- Make a grid cell the current image: Click the cell
+- Add or remove the selected tag(s) on one image: Right-click a grid cell
+
 ### All Tags pane
 
 - Show all images containing a tag: Select the tag (When `Tag click action` is
@@ -302,3 +412,9 @@ You can nest parentheses and operators to create arbitrarily complex filters.
 
 The `Edit` menu contains additional features for batch tag operations, such as
 `Find and Replace` (`Ctrl`+`R`) and `Batch Reorder Tags` (`Ctrl`+`B`).
+
+## Acknowledgments
+
+The "tagging variant images" feature was developed with reference to code in
+[taggui-plus](https://github.com/Overtime-Artist/taggui-plus#tagging-variant-images)
+by Overtime-Artist.

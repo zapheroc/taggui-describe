@@ -3,14 +3,15 @@ from enum import Enum
 from PySide6.QtCore import (QItemSelection, QItemSelectionModel, Qt, Signal,
                             Slot)
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import (QAbstractItemView, QDockWidget, QHBoxLayout,
-                               QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
+                               QHBoxLayout, QLabel, QLineEdit, QListView,
+                               QMessageBox, QVBoxLayout, QWidget)
 
 from models.proxy_tag_counter_model import ProxyTagCounterModel
 from models.tag_counter_model import TagCounterModel
 from utils.big_widgets import TallPushButton
 from utils.enums import AllTagsSortBy, SortOrder
+from utils.settings import get_tag_separator
 from utils.settings_widgets import SettingsComboBox
 from utils.text_edit_item_delegate import TextEditItemDelegate
 from utils.utils import get_confirmation_dialog_reply, list_with_and, pluralize
@@ -95,6 +96,24 @@ class AllTagsList(QListView):
             return
         selected_tag = selected.indexes()[0].data(Qt.ItemDataRole.EditRole)
         self.image_list_filter_requested.emit(selected_tag)
+
+    def copy_selected_tags_to_clipboard(self) -> bool:
+        """Copy the selected tags to the clipboard as separator-joined text.
+
+        Returns True if at least one tag was copied, so the caller knows the
+        copy was handled here instead of falling back to copying every tag of
+        the selected image(s).
+        """
+        ordered_indices = sorted(self.selectedIndexes(),
+                                 key=lambda index: index.row())
+        selected_tags = [str(index.data(Qt.ItemDataRole.EditRole))
+                         for index in ordered_indices
+                         if index.data(Qt.ItemDataRole.EditRole)]
+        if not selected_tags:
+            return False
+        QApplication.clipboard().setText(
+            get_tag_separator().join(selected_tags))
+        return True
 
 
 class AllTagsEditor(QDockWidget):
