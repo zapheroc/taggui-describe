@@ -73,6 +73,11 @@ class MainWindow(QMainWindow):
             self.proxy_image_list_model, self.tag_counter_model,
             self.image_tag_list_model, self.image_list, tokenizer,
             tag_separator)
+        # The thumbnails need the editor to redirect typing to the Add Tag
+        # box (see ImageListView.keyPressEvent and its
+        # _should_redirect_typing_to_tag_input) and to support hold-Ctrl grid
+        # peeking. Without this wiring both silently do nothing.
+        self.image_list.list_view.image_tags_editor = self.image_tags_editor
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self.image_tags_editor)
         self.all_tags_editor = AllTagsEditor(self.tag_counter_model)
