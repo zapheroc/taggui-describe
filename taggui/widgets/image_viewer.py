@@ -107,16 +107,15 @@ class _GridCellsLoader(QObject, QRunnable):
     Like _ImageFileLoader, registers itself in a strong-reference `registry`
     set and removes itself when it is done.
     """
-    # {path_str: QImage}, target cell size, render token, final batch?
-    loaded = Signal(dict, int, int, bool)
+    # {path_str: QImage}, target cell size, final batch?
+    loaded = Signal(dict, int, bool)
 
-    def __init__(self, path_strings: list[str], target_px: int, token: int,
+    def __init__(self, path_strings: list[str], target_px: int,
                  registry: set):
         QObject.__init__(self)
         QRunnable.__init__(self)
         self.path_strings = path_strings
         self.target_px = target_px
-        self.token = token
         self.registry = registry
         self.setAutoDelete(False)
         registry.add(self)
@@ -146,11 +145,10 @@ class _GridCellsLoader(QObject, QRunnable):
                                                             self.target_px)
                 if (results and time.monotonic() - last_emit
                         >= GRID_PARTIAL_EMIT_SECONDS):
-                    self.loaded.emit(results, self.target_px, self.token,
-                                     False)
+                    self.loaded.emit(results, self.target_px, False)
                     results = {}
                     last_emit = time.monotonic()
-            self.loaded.emit(results, self.target_px, self.token, True)
+            self.loaded.emit(results, self.target_px, True)
         finally:
             self.registry.discard(self)
 
@@ -434,12 +432,11 @@ class ImageViewer(QWidget):
         # full opacity even when it lacks the focused tag, giving keyboard-only
         # users the equivalent of hovering it with the mouse.
         self._grid_peek = False
-        # Progressive loading: a monotonically increasing token identifies the
-        # latest grid render so that a stale background decode can't overwrite a
-        # newer view.
-        self._grid_render_token = 0
         # path -> the loader currently decoding it, so re-renders while a page
-        # is loading don't start duplicate decodes.
+        # is loading don't start duplicate decodes. A stale result is dropped
+        # by the identity check on arrival (_on_grid_cells_loaded): clearing
+        # this dict (exit_grid) or reassigning a path to a newer loader
+        # invalidates any older one.
         self._grid_in_flight: dict[str, _GridCellsLoader] = {}
         # Subtle, fixed overlay (bottom-left of the viewport) showing the
         # current page and total image count while a grid is displayed. Parented
@@ -848,6 +845,9 @@ class ImageViewer(QWidget):
             return
         self._grid_mode = False
         self._grid_cell_cache.clear()
+        # Invalidate any in-flight background decode so its result is ignored on
+        # arrival. The loader keeps itself alive via the task registry until its
+        # run() finishes, so we must not drop it here.
         self._grid_in_flight.clear()
         self._grid_cell_layout = []
         self._grid_current_cell_rect = None
@@ -855,10 +855,6 @@ class ImageViewer(QWidget):
         self._grid_proxy_indices = None
         self._grid_hover_position = None
         self._grid_peek = False
-        # Invalidate any in-flight background decode so its result is ignored on
-        # arrival. The loader keeps itself alive via the task registry until its
-        # run() finishes, so we must not drop it here.
-        self._grid_render_token += 1
         self._grid_overlay_label.hide()
 
     def set_marked_paths(self, paths: list[str]):
@@ -952,8 +948,6 @@ class ImageViewer(QWidget):
         self._grid_proxy_indices = list(proxy_indices)
         self._grid_current_position = current_position
         self._grid_cell_cap = cell_cap
-        self._grid_render_token += 1
-        token = self._grid_render_token
         window_indices, highlight_position = self._grid_window(
             proxy_indices, current_position, cell_cap)
         # Only keep decoded cells for the page being shown, so paging through
@@ -983,7 +977,7 @@ class ImageViewer(QWidget):
         # Decode any cells not yet cached at full quality in the background, then
         # silently swap them in when ready (mirrors the single-image placeholder
         # -> sharp-image transition).
-        self._schedule_grid_high_quality(window_indices, token)
+        self._schedule_grid_high_quality(window_indices)
         self._update_grid_overlay()
 
     def _paths_of(self, proxy_indices: list[QModelIndex]) -> set[str]:
@@ -995,8 +989,7 @@ class ImageViewer(QWidget):
                 paths.add(str(image.path))
         return paths
 
-    def _schedule_grid_high_quality(self, window_indices: list[QModelIndex],
-                                    token: int):
+    def _schedule_grid_high_quality(self, window_indices: list[QModelIndex]):
         target_px = self._grid_cell_size(self._grid_geometry_count())
         missing: list[str] = []
         seen: set[str] = set()
@@ -1019,15 +1012,14 @@ class ImageViewer(QWidget):
             missing.append(path_string)
         if not missing:
             return
-        loader = _GridCellsLoader(missing, target_px, token,
-                                  self._image_load_tasks)
+        loader = _GridCellsLoader(missing, target_px, self._image_load_tasks)
         loader.loaded.connect(self._on_grid_cells_loaded)
         for path_string in missing:
             self._grid_in_flight[path_string] = loader
         self._image_load_thread_pool.start(loader)
 
-    @Slot(dict, int, int, bool)
-    def _on_grid_cells_loaded(self, images: dict, target_px: int, token: int,
+    @Slot(dict, int, bool)
+    def _on_grid_cells_loaded(self, images: dict, target_px: int,
                               final: bool):
         loader = self.sender()
         # Only accept results this loader is still responsible for. A path is

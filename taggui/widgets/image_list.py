@@ -490,17 +490,17 @@ class ImageListView(QListView):
         # With a multi-image selection, keep the arrow keys "inside" the
         # selection so it can't be lost by accident. Plain Left/Right/Up/Down
         # cycle the current image among the selected ones (stopping at the
-        # ends); Ctrl+Up/Down is the deliberate way to select a new image
-        # outside the selection. Other combinations (Shift+arrow to extend,
-        # etc.) keep their default behavior.
+        # ends). Ctrl+Up/Down is the deliberate way to select a new image
+        # outside the selection; that is handled by the window-wide Ctrl+Up/
+        # Down shortcuts (go_to_previous_image / go_to_next_image), so here we
+        # only consume the key to stop the default list navigation (which
+        # would toggle the selection) from also running. Other combinations
+        # (Shift+arrow to extend, etc.) keep their default behavior.
         if len(self.selectedIndexes()) >= 2 and key in arrow_keys:
             control_pressed = bool(
                 modifiers & Qt.KeyboardModifier.ControlModifier)
             shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-            if (control_pressed and not shift_pressed
-                    and key in (Qt.Key.Key_Up, Qt.Key.Key_Down)):
-                self.move_selection_beyond(
-                    -1 if key == Qt.Key.Key_Up else 1)
+            if control_pressed and not shift_pressed:
                 return
             if modifiers == Qt.KeyboardModifier.NoModifier:
                 self.switch_between_selected_images(
@@ -754,6 +754,15 @@ class ImageList(QDockWidget):
 
     @Slot()
     def go_to_previous_image(self):
+        # With a multi-image selection, Ctrl+Up is the deliberate way to leave
+        # it: select the single image just before the first selected one (see
+        # move_selection_beyond). These slots are the sole handlers of the
+        # window-wide Ctrl+Up/Down shortcuts (registered in MainWindow); the
+        # individual panes only consume the key event, so the navigation
+        # happens exactly once.
+        if len(self.list_view.selectedIndexes()) >= 2:
+            self.list_view.move_selection_beyond(-1)
+            return
         if self.list_view.selectionModel().currentIndex().row() == 0:
             return
         self.list_view.clearSelection()
@@ -763,6 +772,11 @@ class ImageList(QDockWidget):
 
     @Slot()
     def go_to_next_image(self):
+        # See go_to_previous_image: with a multi-image selection, Ctrl+Down
+        # selects the single image just after the last selected one.
+        if len(self.list_view.selectedIndexes()) >= 2:
+            self.list_view.move_selection_beyond(1)
+            return
         if (self.list_view.selectionModel().currentIndex().row()
                 == self.proxy_image_list_model.rowCount() - 1):
             return

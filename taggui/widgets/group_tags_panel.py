@@ -213,16 +213,17 @@ class _TagListView(QListView):
     the "arrow through the selected variants" navigation working while focus is
     in this panel. Up/Down navigate the tags; at the top/bottom edge they ask
     the panel to move to the previous/next selected image instead (so the
-    multi-image selection is never lost). Ctrl+Up/Down asks to select an image
-    outside the selection.
+    multi-image selection is never lost). Ctrl+Up/Down selects an image
+    outside the selection, but that is handled by the window-wide Ctrl+Up/
+    Down shortcuts (go_to_previous_image / go_to_next_image), so this list
+    only consumes those key events to stop the default navigation from also
+    running.
     """
 
     delete_requested = Signal()
     # Emitted with -1 (Up at the top) or 1 (Down at the bottom) when the user
     # tries to navigate past the edge of this list.
     edge_navigation = Signal(int)
-    # Emitted with -1/1 for Ctrl+Up / Ctrl+Down (select beyond the selection).
-    escape_navigation = Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -280,7 +281,9 @@ class _TagListView(QListView):
                 modifiers & Qt.KeyboardModifier.ControlModifier)
             shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
             if control_pressed and not shift_pressed:
-                self.escape_navigation.emit(direction)
+                # See the class docstring: the window-wide Ctrl+Up/Down
+                # shortcuts select the image outside the selection; only
+                # consume the key event here.
                 return
             if modifiers == Qt.KeyboardModifier.NoModifier:
                 if self._at_edge(direction):
@@ -409,8 +412,6 @@ class GroupTagsPanel(QWidget):
     # Move the current image to the previous (-1) / next (1) selected image,
     # requested when arrowing past the top/bottom of the tag list.
     cycle_image_requested = Signal(int)
-    # Select an image outside the current selection (Ctrl+Up / Ctrl+Down).
-    escape_selection_requested = Signal(int)
     # Rename a tag (old, new) on the selected images that contain it.
     rename_tag_requested = Signal(str, str)
     # The tag-list filter changed via the clickable summary. Carries the new
@@ -481,8 +482,6 @@ class GroupTagsPanel(QWidget):
         self.tag_list.selectionModel().selectionChanged.connect(
             self._on_selection_changed)
         self.tag_list.edge_navigation.connect(self._on_edge)
-        self.tag_list.escape_navigation.connect(
-            self.escape_selection_requested)
         self._model.rename_requested.connect(self._on_rename_requested)
 
         layout = QVBoxLayout(self)

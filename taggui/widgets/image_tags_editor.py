@@ -390,9 +390,12 @@ class ImageTagsList(QListView):
 
         When multiple images are selected, plain Up/Down at the top/bottom of
         the tag list cycles to the previous/next selected image (keeping the
-        selection intact), and Ctrl+Up/Down select a single image just outside
-        the selection. Between the ends, Up/Down navigate tags as usual. With a
-        single image selected this does nothing (returns False).
+        selection intact). Between the ends, Up/Down navigate tags as usual.
+        Ctrl+Up/Down is the deliberate way to select a single image just
+        outside the selection; it is handled by the window-wide Ctrl+Up/Down
+        shortcuts (go_to_previous_image / go_to_next_image), so here the key is
+        only consumed to stop the default list navigation from also running.
+        With a single image selected this does nothing (returns False).
         """
         view = self.image_list_view
         if view is None or len(view.selectedIndexes()) < 2:
@@ -401,7 +404,6 @@ class ImageTagsList(QListView):
         modifiers = event.modifiers()
         if (modifiers & Qt.KeyboardModifier.ControlModifier
                 and not (modifiers & Qt.KeyboardModifier.ShiftModifier)):
-            view.move_selection_beyond(direction)
             return True
         if modifiers != Qt.KeyboardModifier.NoModifier:
             return False
@@ -558,8 +560,6 @@ class ImageTagsEditor(QDockWidget):
             self._on_partial_focus_changed)
         self.group_tags_panel.cycle_image_requested.connect(
             self._cycle_selected_image)
-        self.group_tags_panel.escape_selection_requested.connect(
-            self._escape_multi_selection)
         self.group_tags_panel.rename_tag_requested.connect(
             self._rename_group_tag)
         self.group_tags_panel.filter_mode_changed.connect(
@@ -962,14 +962,6 @@ class ImageTagsEditor(QDockWidget):
         selection is kept intact instead of navigating out of it.
         """
         self.image_list.list_view.switch_between_selected_images(direction)
-
-    @Slot(int)
-    def _escape_multi_selection(self, direction: int):
-        """Select a single image outside the current multi-selection.
-
-        Used for Ctrl+Up/Down from the grouped view.
-        """
-        self.image_list.list_view.move_selection_beyond(direction)
 
     def _sync_scope_button_text(self):
         """Show the active scope in the button text.
