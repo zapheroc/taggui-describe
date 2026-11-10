@@ -302,3 +302,9 @@ You can nest parentheses and operators to create arbitrarily complex filters.
 
 The `Edit` menu contains additional features for batch tag operations, such as
 `Find and Replace` (`Ctrl`+`R`) and `Batch Reorder Tags` (`Ctrl`+`B`).
+
+## Acknowledgments
+
+The "tagging variant images" feature was developed with reference to code in
+[taggui-plus](https://github.com/Overtime-Artist/taggui-plus#tagging-variant-images)
+by Overtime-Artist.
