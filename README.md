@@ -63,6 +63,8 @@ Auto-Captioner pane (for example, `Overwrite the description`).
 
 ## Tagging variant images
 
+<img src='images/screenshot-variant-tagging.png' alt='Variant tagger workflow' with='100%'>
+
 Many datasets contain **sets of near-identical images** — the same base picture
 with small differences (a changed expression, color, or accessory).
 TagGUI has a dedicated workflow for tagging these together instead of one at a time.
@@ -76,7 +78,7 @@ preview switch to a multi-image mode:
   detail across all of them at once. The **current** image has a **highlight
   outline**; use `Left` / `Right` (or `Up` / `Down` at the top/bottom of the
   tag list) to move the current image through the selection without changing
-  what is selected. Clicking a cell also makes that image current.
+  selected images. Clicking a cell also makes that image current.
   - If the selection is bigger than **`Max grid cells for multi-image
     preview`** (default `12`), the grid is split into pages of that many cells,
     and cycling the current image walks through the current page before moving
