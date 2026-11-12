@@ -389,7 +389,12 @@ class MainWindow(QMainWindow):
         override_note_label = QLabel(override_note, override_group)
         override_note_label.setWordWrap(True)
         override_note_label.setIndent(20)
-        override_note_font = QFont()
+        # Use the application font (i.e. the configured font size) three
+        # point sizes smaller, clamped to a minimum of 1 so that the note
+        # never ends up with a zero or negative size.
+        override_note_font = QFont(QApplication.instance().font())
+        override_note_font.setPointSize(
+            max(1, override_note_font.pointSize() - 3))
         override_note_font.setItalic(True)
         override_note_label.setFont(override_note_font)
         group_layout.addWidget(override_note_label)
