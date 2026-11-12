@@ -325,6 +325,8 @@ class MainWindow(QMainWindow):
         settings_dialog.storage_backend_change_requested.connect(
             lambda new_mode: self.handle_storage_backend_change(
                 settings_dialog, new_mode))
+        settings_dialog.database_changed_requested.connect(
+            self.on_database_changed)
         settings_dialog.exec()
 
     @Slot(object, str)
@@ -458,6 +460,20 @@ class MainWindow(QMainWindow):
             else:
                 message = 'Switched to text-file storage. No data was moved.'
         QMessageBox.information(self, 'Storage', message)
+
+    @Slot()
+    def on_database_changed(self):
+        """
+        React to the active database having changed from the Settings dialog
+        (it was cleared, or a database at a new location was adopted instead
+        of the one in use). Re-point the active storage to the database that
+        is now configured, then reload the directory (if one is loaded) so
+        that the in-memory tags and descriptions come from that database
+        rather than from the stale state loaded from the previous one.
+        """
+        self.image_list_model.set_storage(get_image_storage())
+        if self.directory_path is not None and self.directory_path.is_dir():
+            self.reload_directory()
 
     @Slot()
     def reset_to_defaults(self):
