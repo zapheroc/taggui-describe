@@ -15,6 +15,8 @@ models.
 - Integrated token counter (for Stable Diffusion)
 - Automatic caption and tag generation
 - Description box for free-form, natural language image descriptions
+- Tags and descriptions stored in a local SQLite database by default (or in
+  classic `.txt` caption files), so tags follow each image across folders
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
 - Batch tag operations for renaming, deleting, and sorting tags
 - Tagging near-identical (variant) images together, with a synchronized grid preview
@@ -44,10 +46,9 @@ Python 3.12 is recommended, but Python 3.11 should also work.
 
 Load the directory containing your images by clicking the `Load Directory`
 button in the center of the window (or `File` -> `Load Directory`).
-Tags are loaded from `.txt` files in the directory with the same names as the
-images.
-Any changes you make to the tags are also automatically saved to these `.txt`
-files.
+By default, tags and descriptions are loaded from, and saved to, a local
+SQLite database (see [Tag and description storage](#tag-and-description-storage)).
+You can also store them in `.txt` files next to the images instead.
 
 ### Image Description
 
@@ -55,8 +56,9 @@ Each image also has an `Image Description` box in the `Image Tags` pane,
 below the tag list.
 It is intended for free-form, natural language descriptions that do not need
 to be divided into tags.
-Descriptions are saved automatically in the same `.txt` file as the tags:
-the tags first, then a blank line, then the description.
+Descriptions are saved automatically together with the tags: in the database
+by default, or, in text-file storage mode, in the same `.txt` file as the tags
+(the tags first, then a blank line, then the description).
 You can also direct generated captions into the description by choosing one
 of the description options in the `Caption position` setting in the
 Auto-Captioner pane (for example, `Overwrite the description`).
@@ -269,8 +271,8 @@ apply:
 - `tag:`: Images that have the filter term as a tag
     - `tag:cat` will match images with the tag `cat`.
 - `caption`: Images that contain the filter term in the caption
-    - The caption is the list of tags as a single string, as it appears in the
-      `.txt` file.
+    - The caption is the list of tags as a single string, the tags joined by
+      the tag separator.
     - `caption:cat` will match images that have `cat` anywhere in the
       caption. For example, images with the tag `orange cat` or the
       tag `catastrophe`.
@@ -413,18 +415,47 @@ described in [Tagging variant images](#tagging-variant-images):
 The `Edit` menu contains additional features for batch tag operations, such as
 `Find and Replace` (`Ctrl`+`R`) and `Batch Reorder Tags` (`Ctrl`+`B`).
 
-## Uninstalling
+## Tag and description storage
 
-By default, tags and descriptions are stored in a local SQLite database file:
+By default, TagGUI stores each image's tags and description in a local SQLite
+database file, rather than in a `.txt` file next to the image.
+Images are identified by the **content** of the file (a hash of its bytes),
+not by its name or location.
+That means an image retrieves the same tags and description no matter which
+folder you open it from, and renaming, moving, or copying the file does not
+lose its tags.
 
-- Linux: `~/.local/share/taggui-describe/taggui-describe.sqlite3`
-- Windows: `%LOCALAPPDATA%\TagGUI-Describe\taggui-describe.sqlite3`
-- macOS: `~/Library/Application Support/TagGUI-Describe/taggui-describe.sqlite3`
+Existing `.txt` caption files are not ignored: when an image has no record in
+the database yet and a caption file sits next to it, its tags and description
+are imported into the database automatically.
+Importing is additive only — it never overwrites an existing record.
 
-Deleting this file permanently removes the stored tags and descriptions. Your
-image files, and (in text-file storage mode) your `.txt` caption files, are
-not affected. The location of the database file can be changed in
-`File` -> `Settings` under "Database location".
+The storage mode and the database location can be changed in
+`File` -> `Settings`:
+
+- **`Tags and descriptions storage`** — `SQLite database` (the default) or
+  `Text files next to images` (the classic behavior: one `.txt` file per
+  image, with the tags first, then a blank line, then the description).
+  Switching backends moves no data by default. The confirmation dialog offers
+  a *Migrate and override* option, which imports the tags and descriptions of
+  the currently loaded images into the database — or writes them to caption
+  files, when switching to text files — overwriting the existing data for
+  those images.
+- **`Database location`** — by default, the database is created at:
+  - Linux: `~/.local/share/taggui-describe/taggui-describe.sqlite3`
+  - Windows: `%LOCALAPPDATA%\TagGUI-Describe\taggui-describe.sqlite3`
+  - macOS: `~/Library/Application Support/TagGUI-Describe/taggui-describe.sqlite3`
+
+  Choose a different location with `Select...` (or restore the default with
+  `Default`).
+  If a database already exists at the old location, it is moved to the new
+  location; if one already exists at the new location, you choose whether to
+  overwrite it with the old database or to keep the existing one.
+- **`Clear Database...`** — permanently deletes all tags and descriptions
+  stored in the database. The database file itself stays in place and remains
+  usable, and your image files (and, in text-file storage mode, your `.txt`
+  caption files) are not affected.
+  Deleting the database file directly has the same effect on the stored data.
 
 ## Acknowledgments
 
