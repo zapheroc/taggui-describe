@@ -3,11 +3,11 @@ from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
                             QModelIndex, QPoint, QUrl, Qt, Slot, QTimer)
-from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon,
+from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
                            QKeySequence, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
-                               QMainWindow, QMenu, QMessageBox, QStackedWidget,
-                               QVBoxLayout, QWidget)
+                               QLabel, QMainWindow, QMenu, QMessageBox,
+                               QStackedWidget, QVBoxLayout, QWidget)
 from transformers import AutoTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
@@ -355,8 +355,8 @@ class MainWindow(QMainWindow):
             message_box.setWindowTitle('Switch to Database Storage')
             message_box.setText('TagGUI will store tags and descriptions in '
                                 'the SQLite database from now on.')
-            override_text = 'Override database values'
-            informative_text = (
+            override_text = 'Migrate and override database values'
+            override_note = (
                 f'If enabled, the tags and descriptions of the {image_count} '
                 'currently loaded images will be imported from their caption '
                 'files into the database, overwriting existing database '
@@ -367,16 +367,33 @@ class MainWindow(QMainWindow):
             message_box.setText('TagGUI will store tags and descriptions in '
                                 'caption files (.txt) next to the images '
                                 'from now on.')
-            override_text = 'Override text files'
-            informative_text = (
+            override_text = 'Migrate and override text files'
+            override_note = (
                 f'If enabled, the tags and descriptions of the {image_count} '
                 'currently loaded images will be written to caption files, '
                 'overwriting existing caption files. Images without tags or '
                 'a description are skipped.')
-        message_box.setInformativeText(informative_text)
         # The check box must be a child of the message box.
         override_check_box = QCheckBox(override_text, message_box)
         message_box.setCheckBox(override_check_box)
+        # Nest the check box together with a description of what it does, so
+        # that the description is clearly associated with the option.
+        # (QMessageBox places the check box at row 2, column 2 of its grid
+        # layout.)
+        grid = message_box.layout()
+        grid.removeWidget(override_check_box)
+        override_group = QWidget(message_box)
+        group_layout = QVBoxLayout(override_group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.addWidget(override_check_box)
+        override_note_label = QLabel(override_note, override_group)
+        override_note_label.setWordWrap(True)
+        override_note_label.setIndent(20)
+        override_note_font = QFont()
+        override_note_font.setItalic(True)
+        override_note_label.setFont(override_note_font)
+        group_layout.addWidget(override_note_label)
+        grid.addWidget(override_group, 2, 2)
         message_box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         # The default action moves no data.
