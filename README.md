@@ -413,6 +413,19 @@ described in [Tagging variant images](#tagging-variant-images):
 The `Edit` menu contains additional features for batch tag operations, such as
 `Find and Replace` (`Ctrl`+`R`) and `Batch Reorder Tags` (`Ctrl`+`B`).
 
+## Uninstalling
+
+By default, tags and descriptions are stored in a local SQLite database file:
+
+- Linux: `~/.local/share/taggui-describe/taggui-describe.sqlite3`
+- Windows: `%LOCALAPPDATA%\TagGUI-Describe\taggui-describe.sqlite3`
+- macOS: `~/Library/Application Support/TagGUI-Describe/taggui-describe.sqlite3`
+
+Deleting this file permanently removes the stored tags and descriptions. Your
+image files, and (in text-file storage mode) your `.txt` caption files, are
+not affected. The location of the database file can be changed in
+`File` -> `Settings` under "Database location".
+
 ## Acknowledgments
 
 The "tagging variant images" feature was developed with reference to code in

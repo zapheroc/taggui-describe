@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import sqlite3
 import sys
 import threading
 from collections import Counter, deque
@@ -16,6 +17,10 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QCoreApplication,
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QMessageBox
 
+from models.image_storage import (ImageStorage,
+                                   export_images_to_text_files,
+                                   get_database_path, get_image_storage,
+                                   import_images)
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.thumbnail_generation import (ThumbnailGenerationTask,
@@ -113,16 +118,14 @@ class DirectoryLoadTask(QRunnable):
     garbage collected while the thread pool still references it.
     """
 
-    def __init__(self, image_path: Path, text_file_path: Path | None,
-                 tag_separator: str, worker: DirectoryLoadWorker,
-                 registry: set):
+    def __init__(self, image_path: Path, storage: ImageStorage,
+                 worker: DirectoryLoadWorker, registry: set):
         super().__init__()
         # The thread pool must not delete the C++ object while Python may
         # still reference it.
         self.setAutoDelete(False)
         self.image_path = image_path
-        self.text_file_path = text_file_path
-        self.tag_separator = tag_separator
+        self.storage = storage
         self.worker = worker
         self.registry = registry
         registry.add(self)
@@ -154,33 +157,10 @@ class DirectoryLoadTask(QRunnable):
                 print(f'Failed to get dimensions for {self.image_path}: '
                       f'{exception}', file=sys.stderr)
                 dimensions = None
-            tags = []
-            description = ""
-            if self.text_file_path is not None:
-                try:
-                    # `errors='replace'` inserts a replacement marker such as
-                    # '?' when there is malformed data.
-                    caption = self.text_file_path.read_text(
-                        encoding='utf-8', errors='replace')
-                except OSError as exception:
-                    # The caption file could not be read (for example, it was
-                    # deleted after the directory was scanned or it is not
-                    # readable). Load the image without tags or a description
-                    # instead of silently hiding it from the list. The user
-                    # can still tag the image, which (re)writes the caption
-                    # file.
-                    print(f'Failed to read caption file '
-                          f'{self.text_file_path}: {exception}',
-                          file=sys.stderr)
-                else:
-                    # TODO move the seperator to the settings
-                    tags_raw, _, description = caption.partition('\n\n')
-                    if tags_raw:
-                        tags = tags_raw.split(self.tag_separator)
-                        tags = [tag.strip() for tag in tags]
-                        tags = [tag for tag in tags if tag]
-                    description = description.strip()
-            image = Image(self.image_path, dimensions, tags, description)
+            tags, description, content_hash = (
+                self.storage.load_image(self.image_path))
+            image = Image(self.image_path, dimensions, tags, description,
+                          content_hash=content_hash)
         except Exception as exception:
             print(f'Failed to load {self.image_path}: {exception}',
                   file=sys.stderr)
@@ -206,6 +186,10 @@ class ImageListModel(QAbstractListModel):
         super().__init__()
         self.image_list_image_width = image_list_image_width
         self.tag_separator = tag_separator
+        # Where the tags and descriptions of the loaded images are read from
+        # and written to (a SQLite database or caption files next to the
+        # images), based on the storage backend setting.
+        self.storage = get_image_storage()
         self.images: list[Image] = []
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
@@ -333,10 +317,6 @@ class ImageListModel(QAbstractListModel):
             image_suffixes.append(suffix)
         image_paths = {path for path in file_paths
                        if path.suffix.lower() in image_suffixes}
-        # Comparing paths is slow on some systems, so convert the paths to
-        # strings.
-        text_file_path_strings = {str(path) for path in file_paths
-                                  if path.suffix == '.txt'}
         if not image_paths:
             # There are no images to load.
             self.directory_loaded.emit()
@@ -351,11 +331,7 @@ class ImageListModel(QAbstractListModel):
         # `directory_loaded` to be emitted (partially) more than once.
         tasks = []
         for image_path in image_paths:
-            text_file_path = image_path.with_suffix('.txt')
-            if str(text_file_path) not in text_file_path_strings:
-                text_file_path = None
-            tasks.append(DirectoryLoadTask(image_path, text_file_path,
-                                           self.tag_separator, worker,
+            tasks.append(DirectoryLoadTask(image_path, self.storage, worker,
                                            self._running_tasks))
         for task in tasks:
             self.directory_load_thread_pool.start(task)
@@ -454,18 +430,49 @@ class ImageListModel(QAbstractListModel):
     @Slot(Image)
     def write_image_tags_to_disk(self, image: Image):
         try:
-            # TODO move the seperator to the settings
-            # If there are tags, always append \n\n to the file
-            image_text = self.tag_separator.join(image.tags) + '\n\n' + image.description
-            image.path.with_suffix('.txt').write_text(
-                image_text, encoding='utf-8',
-                errors='replace')
-        except OSError:
+            self.storage.save_image(image)
+        except (OSError, sqlite3.Error) as exception:
+            print(f'Failed to save tags for {image.path}: {exception}',
+                  file=sys.stderr)
             error_message_box = QMessageBox()
             error_message_box.setWindowTitle('Error')
             error_message_box.setIcon(QMessageBox.Icon.Critical)
             error_message_box.setText(f'Failed to save tags for {image.path}.')
             error_message_box.exec()
+
+    def set_storage(self, storage: ImageStorage):
+        """
+        Switch the active storage backend (called after a successful storage
+        mode switch in the settings).
+        """
+        self.storage = storage
+
+    def export_loaded_images_to_text_files(self) -> tuple[int, list[Path]]:
+        """
+        Write the loaded images' tags and descriptions to caption files next
+        to the images (used when switching to text-file storage with the
+        override checked). Only images with non-empty tags or a description
+        are written, so no empty caption files are created. Return the number
+        of written caption files and the paths of the images that failed to
+        write.
+        """
+        images = [image for image in self.images
+                  if image.tags or image.description]
+        failed_paths = export_images_to_text_files(images, self.tag_separator)
+        return len(images) - len(failed_paths), failed_paths
+
+    def import_loaded_images_to_database(self) -> int:
+        """
+        Import the loaded images' tags and descriptions into the database
+        (used when switching to database storage with the override checked).
+        Only images with non-empty tags or a description are imported, so
+        records of images without data are left untouched. Return the number
+        of imported images.
+        """
+        images = [image for image in self.images
+                  if image.tags or image.description]
+        import_images(images, get_database_path())
+        return len(images)
 
     def restore_history_tags_and_description(self, is_undo: bool):
         if is_undo:

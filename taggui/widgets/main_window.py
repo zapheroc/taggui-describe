@@ -1,18 +1,20 @@
+import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
                             QModelIndex, QPoint, QUrl, Qt, Slot, QTimer)
 from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon,
                            QKeySequence, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu,
-                               QMessageBox, QStackedWidget, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
+                               QMainWindow, QMenu, QMessageBox, QStackedWidget,
+                               QVBoxLayout, QWidget)
 from transformers import AutoTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
+from models.image_storage import get_image_storage
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
@@ -320,7 +322,142 @@ class MainWindow(QMainWindow):
         settings_dialog = SettingsDialog(parent=self)
         settings_dialog.variant_grid_overlay_settings_changed.connect(
             self.image_viewer.refresh_grid_overlay_style)
+        settings_dialog.storage_backend_change_requested.connect(
+            lambda new_mode: self.handle_storage_backend_change(
+                settings_dialog, new_mode))
         settings_dialog.exec()
+
+    @Slot(object, str)
+    def handle_storage_backend_change(self, settings_dialog, new_mode: str):
+        """
+        Switch the tags/descriptions storage mode (from the Settings dialog).
+        Switching moves no data unless the user checks the override box:
+        then the tags and descriptions of the loaded images are written to
+        caption files (when switching to text files) or imported into the
+        database (when switching to the database).
+        """
+        old_mode = self.settings.value(
+            'storage_backend',
+            defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
+        if new_mode == old_mode:
+            return
+        if not self.image_list_model.images:
+            # There are no loaded images, so there is no data to move.
+            self._apply_storage_backend(new_mode)
+            return
+        is_to_sqlite = new_mode == 'sqlite'
+        image_count = len(self.image_list_model.images)
+        message_box = QMessageBox()
+        message_box.setIcon(QMessageBox.Icon.Question)
+        if is_to_sqlite:
+            message_box.setWindowTitle('Switch to Database Storage')
+            message_box.setText('TagGUI will store tags and descriptions in '
+                                'the SQLite database from now on.')
+            override_text = 'Override database values'
+            informative_text = (
+                f'If enabled, the tags and descriptions of the {image_count} '
+                'currently loaded images will be imported from their caption '
+                'files into the database, overwriting existing database '
+                'records for those images. Images without tags or a '
+                'description are skipped.')
+        else:
+            message_box.setWindowTitle('Switch to Text File Storage')
+            message_box.setText('TagGUI will store tags and descriptions in '
+                                'caption files (.txt) next to the images '
+                                'from now on.')
+            override_text = 'Override text files'
+            informative_text = (
+                f'If enabled, the tags and descriptions of the {image_count} '
+                'currently loaded images will be written to caption files, '
+                'overwriting existing caption files. Images without tags or '
+                'a description are skipped.')
+        message_box.setInformativeText(informative_text)
+        # The check box must be a child of the message box.
+        override_check_box = QCheckBox(override_text, message_box)
+        message_box.setCheckBox(override_check_box)
+        message_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        # The default action moves no data.
+        message_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if message_box.exec() != QMessageBox.StandardButton.Yes:
+            # The user canceled. Keep the current mode, and restore the
+            # combo to it (nothing was written).
+            settings_dialog.revert_storage_backend(old_mode)
+            return
+        if not override_check_box.isChecked():
+            # Switch without moving any data.
+            self._apply_storage_backend(new_mode)
+            return
+        # Move the loaded images' data to the new storage, then switch.
+        if is_to_sqlite:
+            try:
+                imported_count = (self.image_list_model
+                                  .import_loaded_images_to_database())
+            except (OSError, sqlite3.Error) as exception:
+                self._report_storage_switch_failure(
+                    settings_dialog,
+                    f'Failed to import the loaded images into the database: '
+                    f'{exception}.')
+                return
+            self._apply_storage_backend(new_mode,
+                                       migrated_count=imported_count)
+        else:
+            written_count, failed_paths = (
+                self.image_list_model.export_loaded_images_to_text_files())
+            if failed_paths:
+                self._report_storage_switch_failure(
+                    settings_dialog,
+                    f'Failed to write caption files for {len(failed_paths)} '
+                    f'{pluralize("image", len(failed_paths))} '
+                    f'(first: {failed_paths[0]}).')
+                return
+            self._apply_storage_backend(new_mode,
+                                       migrated_count=written_count)
+
+    def _report_storage_switch_failure(self, settings_dialog, message: str):
+        """
+        Report a failed storage mode switch and keep the current mode (the
+        Settings dialog's combo is restored to it; the setting itself was
+        not yet changed).
+        """
+        current_mode = self.settings.value(
+            'storage_backend',
+            defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
+        settings_dialog.revert_storage_backend(current_mode)
+        QMessageBox.critical(self, 'Error', message)
+
+    def _apply_storage_backend(self, new_mode: str, migrated_count: int = 0):
+        """
+        Persist a successful storage mode switch, switch the active storage,
+        and report the result.
+        """
+        self.settings.setValue('storage_backend', new_mode)
+        self.image_list_model.set_storage(get_image_storage())
+        # Reload the directory (if one is loaded) so that the in-memory
+        # tags and descriptions come from the new storage. Without this, the
+        # data that was loaded from the old storage would keep being
+        # displayed — and, the next time an image is edited, written into
+        # the new storage — even though the switch moved no data. (The
+        # reload also clears the undo/redo history, which captured states
+        # of the old storage.)
+        if self.directory_path is not None and self.directory_path.is_dir():
+            self.reload_directory()
+        if migrated_count:
+            if new_mode == 'sqlite':
+                count_text = (f'{migrated_count} '
+                              f'{pluralize("image", migrated_count)}')
+                message = (f'Switched to database storage — imported '
+                           f'{count_text} into the database.')
+            else:
+                count_text = (f'{migrated_count} '
+                              f'{pluralize("caption file", migrated_count)}')
+                message = (f'Switched to text-file storage — wrote {count_text}.')
+        else:
+            if new_mode == 'sqlite':
+                message = 'Switched to database storage. No data was moved.'
+            else:
+                message = 'Switched to text-file storage. No data was moved.'
+        QMessageBox.information(self, 'Storage', message)
 
     @Slot()
     def reset_to_defaults(self):
