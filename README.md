@@ -11,7 +11,8 @@ models.
 ## Features
 
 - Keyboard-friendly interface for fast tagging
-- Tag autocomplete based on your own most-used tags
+- Tag autocomplete based on your own most-used tags (all the tags in the
+  database, no matter which folder is open)
 - Integrated token counter (for Stable Diffusion)
 - Automatic caption and tag generation
 - Description box for free-form, natural language image descriptions
@@ -424,6 +425,12 @@ not by its name or location.
 That means an image retrieves the same tags and description no matter which
 folder you open it from, and renaming, moving, or copying the file does not
 lose its tags.
+
+The Add Tag box's autocomplete is drawn from the entire database as well, so
+every tag you have ever used is offered as a suggestion, no matter which
+folder is open.
+(In text-file storage mode, suggestions are limited to the tags in the
+currently loaded folder.)
 
 Existing `.txt` caption files are not ignored: when an image has no record in
 the database yet and a caption file sits next to it, its tags and description

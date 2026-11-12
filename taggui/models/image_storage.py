@@ -365,6 +365,25 @@ def import_images(images: list[Image], db_path: Path) -> None:
         connection.close()
 
 
+def get_database_tags(db_path: Path) -> list[tuple[str, int]]:
+    """
+    All the tags stored in the database at `db_path`, each with the number
+    of images in the database that use it, the most used first (ties broken
+    alphabetically). Tags that no image currently uses are included too, so
+    that every tag ever stored remains available (for tag suggestions).
+    """
+    connection = _connect(db_path)
+    try:
+        return [(name, count) for name, count in connection.execute(
+            'SELECT tags.name, COUNT(image_tags.image_hash) '
+            'FROM tags '
+            'LEFT JOIN image_tags ON image_tags.tag_id = tags.id '
+            'GROUP BY tags.id '
+            'ORDER BY COUNT(image_tags.image_hash) DESC, tags.name')]
+    finally:
+        connection.close()
+
+
 def export_images_to_text_files(images: list[Image],
                                 tag_separator: str) -> list[Path]:
     """

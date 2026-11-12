@@ -785,16 +785,20 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
-        self.dataChanged.emit(image_index, image_index)
+        # Save before emitting `dataChanged`, like every other change:
+        # listeners (e.g. the tag suggestions) may read the storage, so it
+        # must already reflect the new tags and description.
         self.write_image_tags_to_disk(image)
+        self.dataChanged.emit(image_index, image_index)
 
     def update_image_description(self, image_index: QModelIndex, description: str):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.description == description:
             return
         image.description = description
-        self.dataChanged.emit(image_index, image_index)
+        # Save before emitting `dataChanged` (see `update_image_tags`).
         self.write_image_tags_to_disk(image)
+        self.dataChanged.emit(image_index, image_index)
 
     def _valid_indices(self, image_indices: list) -> list[QModelIndex]:
         """Drop indices that no longer point at an image (e.g. after the
