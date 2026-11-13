@@ -549,6 +549,11 @@ class ImageListModel(QAbstractListModel):
                 self.index(image_index))
             return self.image_list_selection_model.isSelected(proxy_index)
 
+    def get_images_in_scope(self, scope: Scope | str) -> list[Image]:
+        """The images in the given scope, in model order."""
+        return [image for image_index, image in enumerate(self.images)
+                if self.is_image_in_scope(scope, image_index, image)]
+
     def get_text_match_count(self, text: str, scope: Scope | str,
                              whole_tags_only: bool, use_regex: bool,
                              location: Location | str =
