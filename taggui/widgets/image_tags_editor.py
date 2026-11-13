@@ -703,6 +703,12 @@ class ImageTagsEditor(QDockWidget):
         # model is reset while a directory is loading).
         if self.image is None:
             return
+        # The image list can be on screen before the background load of this
+        # image's tags and description has finished (it shows empty ones
+        # until then). Load them now, so the editors always display — and the
+        # user always edits against — the image's real data. No-op when the
+        # load has already finished (the common case).
+        self.image_list_model.ensure_row_loaded(self.image_index.row())
         self.set_image_tags()
         self.set_image_description()
 
