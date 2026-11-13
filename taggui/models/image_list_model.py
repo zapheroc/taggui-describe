@@ -110,22 +110,26 @@ class DirectoryLoadWorker(QObject):
 
 class DirectoryLoadTask(QRunnable):
     """
-    Load the metadata (dimensions, tags, description) of one image on a
-    worker thread.
+    Load the cheap metadata (dimensions) of one image on a worker thread.
+
+    The tags and description are loaded by a separate `StorageLoadTask`
+    (started once the image list is on screen) because, for the database
+    backend, they require the slow part of the load: hashing the whole file
+    and looking up its record. Splitting the two phases is what lets the
+    image list appear as soon as the dimensions are known.
 
     The task is added to a `registry` set and removed from it when it is
     done. The set keeps a strong reference to the task so that it is not
     garbage collected while the thread pool still references it.
     """
 
-    def __init__(self, image_path: Path, storage: ImageStorage,
-                 worker: DirectoryLoadWorker, registry: set):
+    def __init__(self, image_path: Path, worker: DirectoryLoadWorker,
+                 registry: set):
         super().__init__()
         # The thread pool must not delete the C++ object while Python may
         # still reference it.
         self.setAutoDelete(False)
         self.image_path = image_path
-        self.storage = storage
         self.worker = worker
         self.registry = registry
         registry.add(self)
@@ -157,10 +161,10 @@ class DirectoryLoadTask(QRunnable):
                 print(f'Failed to get dimensions for {self.image_path}: '
                       f'{exception}', file=sys.stderr)
                 dimensions = None
-            tags, description, content_hash = (
-                self.storage.load_image(self.image_path))
-            image = Image(self.image_path, dimensions, tags, description,
-                          content_hash=content_hash)
+            # The tags and description are still empty; they are filled in
+            # by the storage-load pass (see `start_storage_loading`) as soon
+            # as the image list is visible.
+            image = Image(self.image_path, dimensions)
         except Exception as exception:
             print(f'Failed to load {self.image_path}: {exception}',
                   file=sys.stderr)
@@ -176,11 +180,158 @@ class DirectoryLoadTask(QRunnable):
             pass
 
 
+# How many images' tags and descriptions are applied at a time when the
+# background storage load reports its results. Applying them one image at a
+# time would emit one `dataChanged` (and therefore recount the tags of every
+# image) per image; a batch keeps that to once per batch.
+STORAGE_LOAD_BATCH_SIZE = 64
+
+
+class StorageLoadWorker(QObject):
+    """
+    Receive the finished storage-load results of one directory load and
+    forward them to the model, in batches, for application.
+
+    `storage_loaded` is emitted from a worker thread and delivered to the
+    connected slot on the GUI thread (queued connection).
+    """
+    # (generation, [(row, tags, description, content_hash), ...])
+    storage_loaded = Signal(int, list)
+
+    def __init__(self, generation: int, parent: QObject = None):
+        super().__init__(parent)
+        self.generation = generation
+        self._lock = threading.Lock()
+        self._pending_task_count = 0
+        self._batch: list = []
+
+    def task_started(self):
+        with self._lock:
+            self._pending_task_count += 1
+
+    def task_finished(self, row: int, tags: list[str], description: str,
+                      content_hash: str | None):
+        with self._lock:
+            self._batch.append((row, tags, description, content_hash))
+            self._pending_task_count -= 1
+            should_flush = (self._pending_task_count == 0
+                            or len(self._batch) >= STORAGE_LOAD_BATCH_SIZE)
+        if should_flush:
+            with self._lock:
+                batch = self._batch
+                self._batch = []
+            self._emit(batch)
+
+    def _emit(self, batch: list):
+        if not batch:
+            return
+        try:
+            self.storage_loaded.emit(self.generation, batch)
+        except RuntimeError:
+            # The worker (and therefore the image list model) has been
+            # destroyed, so there is no one to deliver the results to.
+            pass
+
+
+class StorageLoadTask(QRunnable):
+    """
+    Load the tags and description of one image from the active storage on a
+    worker thread. This is the slow part of a directory load (for the
+    database backend it means hashing the file and looking up its record),
+    so it runs after the image list is already on screen, and its results
+    are applied in batches (see `StorageLoadWorker`).
+
+    Like the other tasks, it is added to a `registry` set for the lifetime
+    of the run.
+    """
+
+    def __init__(self, row: int, image: Image, storage: ImageStorage,
+                 worker: StorageLoadWorker, registry: set):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.row = row
+        self.image = image
+        self.storage = storage
+        self.worker = worker
+        self.registry = registry
+        registry.add(self)
+        worker.task_started()
+
+    def run(self):
+        tags, description, content_hash = [], '', None
+        try:
+            tags, description, content_hash = (
+                self.storage.load_image(self.image.path))
+        except Exception as exception:
+            # A failed load leaves the image without data (it stays visible
+            # and can still be tagged); the model still applies the (empty)
+            # result, so the row is no longer pending, and a later save
+            # retries the lookup against the database.
+            print(f'Failed to load the tags of {self.image.path}: '
+                  f'{exception}', file=sys.stderr)
+        self.worker.task_finished(self.row, tags, description, content_hash)
+        self.registry.discard(self)
+
+
+class StorageImportWorker(QObject):
+    """
+    Receive the finished text→database import and forward the result to the
+    image list model.
+
+    `import_finished` is emitted from a worker thread and delivered to the
+    connected slot on the GUI thread (queued connection).
+    """
+    # (succeeded, imported_count, error_message)
+    import_finished = Signal(bool, int, str)
+
+    def __init__(self, parent: QObject = None):
+        super().__init__(parent)
+
+    def finish(self, succeeded: bool, imported_count: int, error_message: str):
+        try:
+            self.import_finished.emit(succeeded, imported_count, error_message)
+        except RuntimeError:
+            # The worker (and therefore the image list model) has been
+            # destroyed, so there is no one to deliver the result to.
+            pass
+
+
+class StorageImportTask(QRunnable):
+    """
+    Import the given images' tags and descriptions into the database on a
+    worker thread (see `StorageImportWorker`).
+    """
+
+    def __init__(self, images: list[Image], db_path: Path,
+                 worker: StorageImportWorker, registry: set):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.images = images
+        self.db_path = db_path
+        self.worker = worker
+        self.registry = registry
+        registry.add(self)
+
+    def run(self):
+        try:
+            import_images(self.images, self.db_path)
+            self.worker.finish(True, len(self.images), '')
+        except (OSError, sqlite3.Error) as exception:
+            print(f'Failed to import images into the database: '
+                  f'{exception}', file=sys.stderr)
+            self.worker.finish(False, 0, str(exception))
+        self.registry.discard(self)
+
+
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
     # Emitted on the GUI thread when a directory has finished loading and the
     # images are available.
     directory_loaded = Signal()
+    # Emitted on the GUI thread when a background text→database import (see
+    # `start_import_loaded_images_to_database`) has finished:
+    # (succeeded, imported_count, error_message).
+    storage_import_finished = Signal(bool, int, str)
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -228,6 +379,16 @@ class ImageListModel(QAbstractListModel):
         self.directory_load_thread_pool.setMaxThreadCount(
             min(8, os.cpu_count() or 4))
         self.directory_load_worker = None
+        # The worker collecting the storage-load results of the current load
+        # (see `start_storage_loading`).
+        self.storage_load_worker = None
+        # The rows whose background storage load (tags and description) has
+        # not finished yet. An image in one of these rows always has empty
+        # in-memory tags and description: nothing else writes to them until
+        # the load is applied, and an operation that needs their data calls
+        # `ensure_row_loaded` first. This is what keeps editing safe while
+        # the load is still in flight.
+        self._pending_storage_load: set[int] = set()
         # Incremented for each directory load. Used to discard the results of
         # loads that are superseded by a newer load.
         self.directory_load_generation = 0
@@ -298,6 +459,7 @@ class ImageListModel(QAbstractListModel):
         self.undo_stack.clear()
         self.redo_stack.clear()
         self._last_undo_push = None
+        self._pending_storage_load.clear()
         self.endResetModel()
         self.update_undo_and_redo_actions_requested.emit()
         # Discard the results of any in-flight thumbnail generation pass.
@@ -331,7 +493,7 @@ class ImageListModel(QAbstractListModel):
         # `directory_loaded` to be emitted (partially) more than once.
         tasks = []
         for image_path in image_paths:
-            tasks.append(DirectoryLoadTask(image_path, self.storage, worker,
+            tasks.append(DirectoryLoadTask(image_path, worker,
                                            self._running_tasks))
         for task in tasks:
             self.directory_load_thread_pool.start(task)
@@ -339,7 +501,16 @@ class ImageListModel(QAbstractListModel):
     @Slot(int, list)
     def on_directory_loaded(self, generation: int,
                             images: list[Image]):
-        """Complete a directory load. Runs on the GUI thread."""
+        """
+        Complete a directory load (its fast phase: the dimensions). Runs on
+        the GUI thread.
+
+        The image list is now complete and on screen; the slow phase (the
+        tags and description, which for the database backend means hashing
+        each file and looking up its record) runs in the background and is
+        applied as it finishes, so the list is usable without waiting for
+        every image to be hashed.
+        """
         # The load has been superseded by a newer load.
         if generation != self.directory_load_generation:
             return
@@ -348,7 +519,100 @@ class ImageListModel(QAbstractListModel):
         self.images = images
         self.endResetModel()
         self.directory_loaded.emit()
+        # Start the slow phase first: the tags are the data the user works
+        # with (and feed the All Tags pane and autocomplete), while the
+        # thumbnails are only a visual nicety. Both share the same pool, and
+        # tasks start in submission order.
+        self.start_storage_loading()
         self.start_thumbnail_generation()
+
+    def start_storage_loading(self):
+        """
+        Start loading the images' tags and descriptions from the active
+        storage on background threads.
+        """
+        worker = StorageLoadWorker(self.directory_load_generation, self)
+        self.storage_load_worker = worker
+        worker.storage_loaded.connect(self.on_storage_loaded)
+        # Every row starts pending; the load (or `ensure_row_loaded`) takes
+        # the row out of the set.
+        self._pending_storage_load = set(range(len(self.images)))
+        for row, image in enumerate(self.images):
+            task = StorageLoadTask(row, image, self.storage, worker,
+                                   self._running_tasks)
+            self.directory_load_thread_pool.start(task)
+
+    @Slot(int, list)
+    def on_storage_loaded(self, generation: int, batch: list):
+        """
+        Apply a batch of loaded tags and descriptions. Runs on the GUI
+        thread.
+
+        A row that is no longer pending is skipped: it was already applied,
+        or the user has already loaded it for an edit (via
+        `ensure_row_loaded`) and possibly edited it — in both cases applying
+        the now-stale load result would clobber the newer state.
+        """
+        # The load has been superseded by a newer load.
+        if generation != self.directory_load_generation:
+            return
+        changed_rows = []
+        for row, tags, description, content_hash in batch:
+            if row >= len(self.images) or row not in self._pending_storage_load:
+                continue
+            image = self.images[row]
+            image.tags = tags
+            image.description = description
+            image.content_hash = content_hash
+            self._pending_storage_load.discard(row)
+            changed_rows.append(row)
+        if changed_rows:
+            # One `dataChanged` for the whole batch, so the tag counter and
+            # the image tags editor update once per batch instead of once
+            # per image.
+            self.dataChanged.emit(self.index(min(changed_rows)),
+                                  self.index(max(changed_rows)))
+
+    def ensure_row_loaded(self, row: int):
+        """
+        Make sure the image at `row` has its tags and description loaded from
+        the active storage.
+
+        If the background storage load for the row has not finished yet, the
+        load is done synchronously now (one file at a time, so the cost is
+        bounded), so that an edit made before the background load arrives is
+        applied on top of the image's real data instead of an empty state.
+        No-op when the row has already been loaded (the common case).
+        """
+        if row < 0 or row >= len(self.images):
+            return
+        if row not in self._pending_storage_load:
+            return
+        image = self.images[row]
+        try:
+            tags, description, content_hash = self.storage.load_image(
+                image.path)
+        except (OSError, sqlite3.Error) as exception:
+            # The load failed (for example, the database is unavailable).
+            # The row stays pending, so a later edit or save retries it.
+            print(f'Failed to load the tags of {image.path}: {exception}',
+                  file=sys.stderr)
+            return
+        image.tags = tags
+        image.description = description
+        image.content_hash = content_hash
+        self._pending_storage_load.discard(row)
+
+    def _ensure_all_rows_loaded(self):
+        """
+        Synchronously load every image whose background storage load has not
+        finished yet. Called by `add_to_undo_stack`, so that an undo snapshot
+        (and the operation that follows it) always sees the images' real data
+        instead of the empty state of a load in flight. No-op when nothing is
+        still loading (the common case).
+        """
+        for row in list(self._pending_storage_load):
+            self.ensure_row_loaded(row)
 
     def start_thumbnail_generation(self):
         """Start generating thumbnails on background threads."""
@@ -396,6 +660,13 @@ class ImageListModel(QAbstractListModel):
                           should_ask_for_confirmation: bool):
         """Add the current state of the image tags and descriptions to the
         undo stack."""
+        # Every batch operation (and the single-image edits in the main
+        # window) goes through this method, so it is the one place that can
+        # make the in-flight background load complete: the snapshot must
+        # capture the images' real tags and descriptions, not the empty
+        # state of an image whose load has not arrived yet. No-op when the
+        # load has already finished (the common case).
+        self._ensure_all_rows_loaded()
         tags = [image.tags.copy() for image in self.images]
         descriptions = [image.description for image in self.images]
         self._push_history_item(HistoryItem(
@@ -461,18 +732,30 @@ class ImageListModel(QAbstractListModel):
         failed_paths = export_images_to_text_files(images, self.tag_separator)
         return len(images) - len(failed_paths), failed_paths
 
-    def import_loaded_images_to_database(self) -> int:
+    def start_import_loaded_images_to_database(self):
         """
-        Import the loaded images' tags and descriptions into the database
-        (used when switching to database storage with the override checked).
+        Import the loaded images' tags and descriptions into the database in
+        a background thread (used when switching to database storage with
+        the override checked). The result is reported on the GUI thread via
+        the `storage_import_finished` signal:
+        (succeeded, imported_count, error_message).
+
         Only images with non-empty tags or a description are imported, so
-        records of images without data are left untouched. Return the number
-        of imported images.
+        records of images without data are left untouched. (Images whose
+        background load has not finished yet are always in that empty state,
+        so they are skipped rather than importing a stale state.)
+
+        The import is done in the background because, for images loaded in
+        text-file mode, it must hash every file in full, which can take a
+        while and must not block the GUI thread.
         """
         images = [image for image in self.images
                   if image.tags or image.description]
-        import_images(images, get_database_path())
-        return len(images)
+        worker = StorageImportWorker(self)
+        worker.import_finished.connect(self.storage_import_finished)
+        task = StorageImportTask(images, get_database_path(), worker,
+                                 self._running_tasks)
+        self.directory_load_thread_pool.start(task)
 
     def restore_history_tags_and_description(self, is_undo: bool):
         if is_undo:
@@ -781,6 +1064,10 @@ class ImageListModel(QAbstractListModel):
         return removed_tag_count
 
     def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
+        # Load the image's data first if its background load has not arrived
+        # yet, so the new tags are based on the image's real state (this
+        # method does not go through `add_to_undo_stack`, which would do it).
+        self.ensure_row_loaded(image_index.row())
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.tags == tags:
             return
@@ -789,6 +1076,9 @@ class ImageListModel(QAbstractListModel):
         self.write_image_tags_to_disk(image)
 
     def update_image_description(self, image_index: QModelIndex, description: str):
+        # Load the image's data first if its background load has not arrived
+        # yet, for the same reason as in `update_image_tags`.
+        self.ensure_row_loaded(image_index.row())
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.description == description:
             return

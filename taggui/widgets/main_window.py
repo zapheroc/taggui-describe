@@ -1,4 +1,3 @@
-import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
@@ -44,6 +43,12 @@ class MainWindow(QMainWindow):
         # The path of the currently loaded directory. This is set later when a
         # directory is loaded.
         self.directory_path = None
+        # The in-flight background text→database import (if any): whether one
+        # is running, the settings dialog that requested it, and the backend
+        # to switch to when it finishes.
+        self._storage_import_in_progress = False
+        self._storage_import_dialog = None
+        self._storage_import_mode = None
         image_list_image_width = self.settings.value(
             'image_list_image_width',
             defaultValue=DEFAULT_SETTINGS['image_list_image_width'], type=int)
@@ -343,6 +348,15 @@ class MainWindow(QMainWindow):
             defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
         if new_mode == old_mode:
             return
+        if self._storage_import_in_progress:
+            # A text→database import from a previous switch is still running
+            # in the background. Switching now would race it, so keep the
+            # current mode and ask the user to try again in a moment.
+            settings_dialog.revert_storage_backend(old_mode)
+            QMessageBox.information(self, 'Storage',
+                                    'An import into the database is still '
+                                    'running. Please try again in a moment.')
+            return
         if not self.image_list_model.images:
             # There are no loaded images, so there is no data to move.
             self._apply_storage_backend(new_mode)
@@ -414,17 +428,14 @@ class MainWindow(QMainWindow):
             return
         # Move the loaded images' data to the new storage, then switch.
         if is_to_sqlite:
-            try:
-                imported_count = (self.image_list_model
-                                  .import_loaded_images_to_database())
-            except (OSError, sqlite3.Error) as exception:
-                self._report_storage_switch_failure(
-                    settings_dialog,
-                    f'Failed to import the loaded images into the database: '
-                    f'{exception}.')
-                return
-            self._apply_storage_backend(new_mode,
-                                       migrated_count=imported_count)
+            # The import can take a while (it hashes every image file in
+            # full), so it runs in a background thread; the switch is applied
+            # when it finishes (see `on_storage_import_finished`).
+            self._storage_import_in_progress = True
+            self._storage_import_dialog = settings_dialog
+            self._storage_import_mode = new_mode
+            self.image_list_model.start_import_loaded_images_to_database()
+            return
         else:
             written_count, failed_paths = (
                 self.image_list_model.export_loaded_images_to_text_files())
@@ -449,6 +460,28 @@ class MainWindow(QMainWindow):
             defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
         settings_dialog.revert_storage_backend(current_mode)
         QMessageBox.critical(self, 'Error', message)
+
+    @Slot(bool, int, str)
+    def on_storage_import_finished(self, succeeded: bool,
+                                   imported_count: int, error_message: str):
+        """
+        A background text→database import (started by
+        `handle_storage_backend_change`) has finished. Runs on the GUI
+        thread.
+        """
+        self._storage_import_in_progress = False
+        settings_dialog = self._storage_import_dialog
+        new_mode = self._storage_import_mode
+        self._storage_import_dialog = None
+        self._storage_import_mode = None
+        if not succeeded:
+            self._report_storage_switch_failure(
+                settings_dialog,
+                f'Failed to import the loaded images into the database: '
+                f'{error_message}.')
+            return
+        self._apply_storage_backend(new_mode,
+                                   migrated_count=imported_count)
 
     def _apply_storage_backend(self, new_mode: str, migrated_count: int = 0):
         """
@@ -736,6 +769,8 @@ class MainWindow(QMainWindow):
             self.update_undo_and_redo_actions)
         self.image_list_model.directory_loaded.connect(
             self.on_directory_loaded)
+        self.image_list_model.storage_import_finished.connect(
+            self.on_storage_import_finished)
         # Rows are inserted or removed from the proxy image list model when the
         # filter is changed.
         self.proxy_image_list_model.rowsInserted.connect(
