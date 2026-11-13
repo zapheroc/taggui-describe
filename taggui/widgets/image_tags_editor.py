@@ -12,7 +12,7 @@ from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
-from models.tag_counter_model import TagCounterModel
+from models.tag_suggestion_model import TagSuggestionModel
 from utils.image import Image
 from utils.settings import (DEFAULT_SETTINGS, get_settings,
                             get_tag_separator)
@@ -57,8 +57,8 @@ class TagInputBox(QLineEdit):
     tags_addition_requested = Signal(list, list)
 
     def __init__(self, image_tag_list_model: QStringListModel,
-                 tag_counter_model: TagCounterModel, image_list: ImageList,
-                 tag_separator: str):
+                 tag_suggestion_model: TagSuggestionModel,
+                 image_list: ImageList, tag_separator: str):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
         self.image_list = image_list
@@ -71,7 +71,7 @@ class TagInputBox(QLineEdit):
             'autocomplete_tags',
             defaultValue=DEFAULT_SETTINGS['autocomplete_tags'], type=bool)
         if autocomplete_tags:
-            self.completer = QCompleter(tag_counter_model)
+            self.completer = QCompleter(tag_suggestion_model)
             self.setCompleter(self.completer)
 
             def add_completed_tag(text: str):
@@ -500,7 +500,7 @@ class ImageTagsEditor(QDockWidget):
                                    if ref is not None]
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
-                 tag_counter_model: TagCounterModel,
+                 tag_suggestion_model: TagSuggestionModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
                  tokenizer: PreTrainedTokenizerBase, tag_separator: str):
         super().__init__()
@@ -519,7 +519,7 @@ class ImageTagsEditor(QDockWidget):
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
-                                         tag_counter_model, image_list,
+                                         tag_suggestion_model, image_list,
                                          tag_separator)
         # Grouped-view scope toggle: when checked, the Add Tag box adds only
         # to the current (highlighted) image; unchecked adds to all selected.

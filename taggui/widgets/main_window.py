@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
@@ -14,10 +15,12 @@ from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
-from models.image_storage import get_image_storage
+from models.image_storage import (get_database_path, get_database_tag_names,
+                                  get_image_storage, get_storage_backend)
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
+from models.tag_suggestion_model import TagSuggestionModel
 from utils.big_widgets import BigPushButton
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
@@ -57,6 +60,9 @@ class MainWindow(QMainWindow):
         self.image_list_model.proxy_image_list_model = (
             self.proxy_image_list_model)
         self.tag_counter_model = TagCounterModel()
+        # The suggestions offered in the Add Tag box (database-wide when the
+        # database is the active storage backend).
+        self.tag_suggestion_model = TagSuggestionModel()
         self.image_tag_list_model = ImageTagListModel()
 
         self.setWindowIcon(QIcon(QPixmap(get_resource_path(ICON_PATH))))
@@ -72,7 +78,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.image_list)
         self.image_tags_editor = ImageTagsEditor(
-            self.proxy_image_list_model, self.tag_counter_model,
+            self.proxy_image_list_model, self.tag_suggestion_model,
             self.image_tag_list_model, self.image_list, tokenizer,
             tag_separator)
         # The thumbnails need the editor to redirect typing to the Add Tag
@@ -470,6 +476,7 @@ class MainWindow(QMainWindow):
         # of the old storage.)
         if self.directory_path is not None and self.directory_path.is_dir():
             self.reload_directory()
+        self.update_tag_suggestions()
         if migrated_count:
             if new_mode == 'sqlite':
                 count_text = (f'{migrated_count} '
@@ -500,6 +507,42 @@ class MainWindow(QMainWindow):
         self.image_list_model.set_storage(get_image_storage())
         if self.directory_path is not None and self.directory_path.is_dir():
             self.reload_directory()
+        self.update_tag_suggestions()
+
+    def update_tag_suggestions(self):
+        """
+        Refresh the tag suggestions offered in the Add Tag box. They are the
+        tags of the loaded images, and (when the SQLite database is the
+        active storage backend) all the tags stored in it too, so that every
+        tag ever used is offered no matter which folder is open. The count of
+        a tag is always how many of the loaded images use it, so the tags the
+        user is using most in the current folder sort first and tags that are
+        only in the database sort last (alphabetically), ready to be added.
+        When the database cannot be read, the suggestions are the tags of the
+        loaded images only.
+        """
+        local_tag_counts = self.tag_counter_model.tag_counter
+        database_tag_names = None
+        if get_storage_backend() == 'sqlite':
+            try:
+                database_tag_names = get_database_tag_names(
+                    get_database_path())
+            except (OSError, sqlite3.Error) as exception:
+                # The database is unavailable (for example, it is corrupted).
+                # Suggest the loaded images' tags only, so the completer
+                # keeps working.
+                print(f'Failed to load tag suggestions from the database: '
+                      f'{exception}', file=sys.stderr)
+        if database_tag_names is None:
+            suggestions = list(local_tag_counts.most_common())
+        else:
+            tag_counts = dict(local_tag_counts)
+            for tag_name in database_tag_names:
+                tag_counts.setdefault(tag_name, 0)
+            suggestions = sorted(tag_counts.items(),
+                                 key=lambda tag_and_count: (
+                                     -tag_and_count[1], tag_and_count[0]))
+        self.tag_suggestion_model.update_suggestions(suggestions)
 
     @Slot()
     def reset_to_defaults(self):
@@ -776,6 +819,8 @@ class MainWindow(QMainWindow):
         self.image_list_model.modelReset.connect(
             lambda: self.tag_counter_model.count_tags(
                 self.image_list_model.images))
+        self.image_list_model.modelReset.connect(
+            self.update_tag_suggestions)
         self.image_list_model.dataChanged.connect(
             self.on_image_data_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(
@@ -1002,6 +1047,7 @@ class MainWindow(QMainWindow):
         if roles == [Qt.ItemDataRole.DecorationRole]:
             return
         self.tag_counter_model.count_tags(self.image_list_model.images)
+        self.update_tag_suggestions()
         self.image_tags_editor.reload_image_tags_if_changed(
             first_changed_index, last_changed_index)
 

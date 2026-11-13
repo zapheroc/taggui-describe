@@ -365,6 +365,20 @@ def import_images(images: list[Image], db_path: Path) -> None:
         connection.close()
 
 
+def get_database_tag_names(db_path: Path) -> list[str]:
+    """
+    All the tag names stored in the database at `db_path`, alphabetically.
+    Tags that no image currently uses are included too, so that every tag
+    ever stored remains available (for tag suggestions).
+    """
+    connection = _connect(db_path)
+    try:
+        return [row[0] for row in connection.execute(
+            'SELECT name FROM tags ORDER BY name')]
+    finally:
+        connection.close()
+
+
 def export_images_to_text_files(images: list[Image],
                                 tag_separator: str) -> list[Path]:
     """

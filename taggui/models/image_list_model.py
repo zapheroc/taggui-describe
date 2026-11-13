@@ -934,6 +934,11 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
+        # Save before emitting `dataChanged`: listeners (e.g. the tag
+        # suggestions) may read the storage, so it must already reflect the
+        # new tags and description. Batch mode defers the duplicate
+        # copies' refresh so that one combined `dataChanged` covers the
+        # edited image and its updated copies.
         self._begin_batch_sync()
         self.write_image_tags_to_disk(image)
         rows = self._finish_batch_rows([image_index.row()])
@@ -945,6 +950,7 @@ class ImageListModel(QAbstractListModel):
         if image.description == description:
             return
         image.description = description
+        # Save before emitting `dataChanged` (see `update_image_tags`).
         self._begin_batch_sync()
         self.write_image_tags_to_disk(image)
         rows = self._finish_batch_rows([image_index.row()])
