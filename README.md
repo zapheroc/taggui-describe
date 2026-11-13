@@ -483,8 +483,8 @@ TagGUI makes duplicates easy to spot and clean up:
 - **`Duplicates` button** — in the `Images` pane, on the `Selection mode`
   row. Click it to show only images that have at least one other loaded file
   with identical content, and click it again to show everything.
-- **`Select Duplicates`** — right-click a duplicate image to select every
-  copy of it at once.
+- **`Select Duplicates`** — right-click a duplicate image to select every 
+  visible copy of it at once.
 - **`Delete Duplicates...`** — right-click one copy of a set of
   duplicates to keep it: every other loaded copy of the same file — along
   with any `.txt` caption files next to them — is moved to the trash. No

@@ -2,6 +2,8 @@
 
 Guidance for AI agents (and new developers) working on the TagGUI codebase.
 
+Do not commit changes with git unless explicitly asked to do so.
+
 ## What this is
 
 TagGUI is a cross-platform desktop application written in Python + PySide6 (Qt 6).
