@@ -15,7 +15,7 @@ from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
-from models.image_storage import (get_database_path, get_database_tags,
+from models.image_storage import (get_database_path, get_database_tag_names,
                                   get_image_storage, get_storage_backend)
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -511,24 +511,37 @@ class MainWindow(QMainWindow):
 
     def update_tag_suggestions(self):
         """
-        Refresh the tag suggestions offered in the Add Tag box. When the
-        SQLite database is the active storage backend, they are all the tags
-        stored in it, so that every tag ever used is offered no matter which
-        folder is open. Otherwise (or when the database cannot be read) they
-        are the tags of the loaded images.
+        Refresh the tag suggestions offered in the Add Tag box. They are the
+        tags of the loaded images, and (when the SQLite database is the
+        active storage backend) all the tags stored in it too, so that every
+        tag ever used is offered no matter which folder is open. The count of
+        a tag is always how many of the loaded images use it, so the tags the
+        user is using most in the current folder sort first and tags that are
+        only in the database sort last (alphabetically), ready to be added.
+        When the database cannot be read, the suggestions are the tags of the
+        loaded images only.
         """
-        suggestions = None
+        local_tag_counts = self.tag_counter_model.tag_counter
+        database_tag_names = None
         if get_storage_backend() == 'sqlite':
             try:
-                suggestions = get_database_tags(get_database_path())
+                database_tag_names = get_database_tag_names(
+                    get_database_path())
             except (OSError, sqlite3.Error) as exception:
                 # The database is unavailable (for example, it is corrupted).
-                # Suggest the loaded images' tags instead, so the completer
+                # Suggest the loaded images' tags only, so the completer
                 # keeps working.
                 print(f'Failed to load tag suggestions from the database: '
                       f'{exception}', file=sys.stderr)
-        if suggestions is None:
-            suggestions = list(self.tag_counter_model.most_common_tags)
+        if database_tag_names is None:
+            suggestions = list(local_tag_counts.most_common())
+        else:
+            tag_counts = dict(local_tag_counts)
+            for tag_name in database_tag_names:
+                tag_counts.setdefault(tag_name, 0)
+            suggestions = sorted(tag_counts.items(),
+                                 key=lambda tag_and_count: (
+                                     -tag_and_count[1], tag_and_count[0]))
         self.tag_suggestion_model.update_suggestions(suggestions)
 
     @Slot()

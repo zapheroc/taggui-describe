@@ -430,7 +430,10 @@ lose its tags.
 
 The Add Tag box's autocomplete is drawn from the entire database as well, so
 every tag you have ever used is offered as a suggestion, no matter which
-folder is open.
+folder is open. The count shown next to each suggestion is how many images in
+the currently loaded folder use that tag, so the tags you are using most in
+this folder sort first and tags that exist only in the database sort last
+with a count of zero.
 (In text-file storage mode, suggestions are limited to the tags in the
 currently loaded folder.)
 

@@ -6,10 +6,11 @@ class TagSuggestionModel(QAbstractListModel):
     The tag suggestions offered by the Add Tag box's completer.
 
     Each suggestion is a `(tag, count)` pair, where `count` is the number of
-    images that use the tag. When the SQLite database is the active storage
-    backend the suggestions are all the tags stored in it, so every tag ever
-    used is offered no matter which folder is open; otherwise they are the
-    tags of the loaded images.
+    the loaded images that use the tag. When the SQLite database is the
+    active storage backend the suggestions include all the tags stored in it,
+    so every tag ever used is offered no matter which folder is open; tags
+    that no loaded image uses have a count of zero and sort last, ready to
+    be added. Otherwise the suggestions are the tags of the loaded images.
     """
 
     def __init__(self):
