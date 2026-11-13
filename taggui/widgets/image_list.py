@@ -4,11 +4,13 @@ from functools import reduce
 from operator import or_
 from pathlib import Path
 
-from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
-                            QItemSelectionRange, QModelIndex, QRect, QSize, QUrl,
-                            Qt, Signal, Slot)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics,
-                           QIcon, QPainter, QKeyEvent, QPalette, QPen)
+from PySide6.QtCore import (QByteArray, QFile, QItemSelection,
+                            QItemSelectionModel, QItemSelectionRange,
+                            QModelIndex, QRect, QSize, QUrl, Qt, Signal, Slot)
+from PySide6.QtGui import (QColor, QContextMenuEvent, QDesktopServices,
+                           QFont, QFontMetrics, QIcon, QPainter, QKeyEvent,
+                           QPalette, QPen, QPixmap)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QPushButton,
@@ -19,11 +21,13 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        infix_notation, nums, one_of, printables)
 
 from dialogs.filter_help_dialog import FilterHelpDialog
+from models.image_storage import get_storage_backend
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.settings_widgets import SettingsComboBox
-from utils.utils import get_confirmation_dialog_reply, pluralize
+from utils.utils import (get_confirmation_dialog_reply, get_resource_path,
+                         pluralize)
 
 
 def replace_filter_wildcards(filter_: str | list) -> str | list:
@@ -118,18 +122,21 @@ class ImageListItemDelegate(QStyledItemDelegate):
     smaller, dimmer font and the tag preview on the following one or two
     lines. Tags that do not fit are truncated with an ellipsis; the full
     text is shown as a tooltip (see the `ToolTipRole` data in
-    `ImageListModel`). Untagged images are marked with a blue dot on the
-    right side of the row.
+    `ImageListModel`). Status indicators are drawn on the right side of the
+    row: an amber 'n/k' indicator marks an image that has at least one
+    duplicate file (n is this copy's position among the k files that share
+    one record and the same tags), and a blue dot marks an untagged image.
     """
 
     # Number of lines the tag preview may occupy (the file name has its own
     # line above it).
     MAX_TAG_LINES = 2
-    # Width (in pixels) reserved on the right of the text for the untagged
-    # dot, so that the text never runs into it.
+    # Minimum width (in pixels) reserved on the right of the text for the
+    # status indicators, so that the text never runs into them.
     STATUS_COLUMN_WIDTH = 16
     UNTAGGED_DOT_DIAMETER = 7
     UNTAGGED_DOT_COLOR = QColor('#4da3ff')
+    DUPLICATE_INDICATOR_COLOR = QColor('#f5a623')
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -180,12 +187,25 @@ class ImageListItemDelegate(QStyledItemDelegate):
 
         display_text = index.data(Qt.ItemDataRole.DisplayRole) or ''
         file_name, _, tags_text = display_text.partition('\n')
-        # Reserve the status column so the text never overlaps the dot.
-        text_rect = text_rect.adjusted(0, 0, -self.STATUS_COLUMN_WIDTH, 0)
-
+        image = index.data(Qt.ItemDataRole.UserRole)
+        has_untagged = image is not None and not image.tags
+        has_duplicate = image is not None and image.duplicate_count > 1
+        duplicate_indicator = (f'{image.duplicate_position}'
+                               f'/{image.duplicate_count}'
+                               if has_duplicate else '')
         name_font = self._name_font(option.font)
         name_metrics = QFontMetrics(name_font)
         tag_metrics = QFontMetrics(option.font)
+        # Reserve the status column so the text never overlaps the 'n/k'
+        # duplicate indicator and the untagged dot.
+        reserved_width = 4
+        if has_untagged:
+            reserved_width += self.UNTAGGED_DOT_DIAMETER + 4
+        if has_duplicate:
+            reserved_width += (name_metrics.horizontalAdvance(
+                                   duplicate_indicator) + 4)
+        text_rect = text_rect.adjusted(
+            0, 0, -max(self.STATUS_COLUMN_WIDTH, reserved_width), 0)
         name_height = name_metrics.height()
         tag_height = tag_metrics.height()
         tag_lines = (self._wrap_and_elide(tag_metrics, tags_text,
@@ -213,17 +233,34 @@ class ImageListItemDelegate(QStyledItemDelegate):
                              line)
             line_y += tag_height
 
-        # Mark untagged images with a blue dot.
-        image = index.data(Qt.ItemDataRole.UserRole)
-        if image is not None and not image.tags:
+        # Draw the status indicators on the right, rightmost to leftmost:
+        # a blue dot for an untagged image and the amber 'n/k' duplicate
+        # indicator (n = this copy's position among the k duplicate files).
+        right_edge = option.rect.right() - 4
+        if has_untagged:
             dot_diameter = self.UNTAGGED_DOT_DIAMETER
-            dot_rect = QRect(option.rect.right() - dot_diameter - 4,
-                             option.rect.top() +
-                             (option.rect.height() - dot_diameter) // 2,
-                             dot_diameter, dot_diameter)
+            dot_x = right_edge - dot_diameter
+            dot_y = option.rect.top() + (option.rect.height()
+                                         - dot_diameter) // 2
             painter.setPen(QPen(QColor('#ffffff'), 1))
             painter.setBrush(self.UNTAGGED_DOT_COLOR)
-            painter.drawEllipse(dot_rect)
+            painter.drawEllipse(QRect(dot_x, dot_y, dot_diameter,
+                                      dot_diameter))
+            right_edge = dot_x - 4
+        if has_duplicate:
+            indicator_width = name_metrics.horizontalAdvance(
+                duplicate_indicator)
+            indicator_height = name_metrics.height()
+            indicator_y = option.rect.top() + (option.rect.height()
+                                               - indicator_height) // 2
+            painter.setFont(name_font)
+            painter.setPen(self.DUPLICATE_INDICATOR_COLOR)
+            painter.drawText(QRect(right_edge - indicator_width,
+                                   indicator_y, indicator_width,
+                                   indicator_height),
+                             Qt.AlignmentFlag.AlignRight
+                             | Qt.AlignmentFlag.AlignVCenter,
+                             duplicate_indicator)
 
     def sizeHint(self, option: QStyleOptionViewItem,
                  index: QModelIndex) -> QSize:
@@ -294,6 +331,15 @@ class ImageListView(QListView):
         super().__init__(parent)
         self.proxy_image_list_model = proxy_image_list_model
         self.tag_separator = tag_separator
+        # The image the context menu was last opened on (set in
+        # `contextMenuEvent`). `None` until the first context menu.
+        #
+        # Store the `Image` object, not a `QModelIndex`: the next model
+        # reset (e.g. the directory reload after a deletion) leaves a
+        # stored index stale, yet `QModelIndex.isValid()` does not notice
+        # that — `data()` on such an index segfaults the app. A Python
+        # object reference survives the reset.
+        self._context_menu_image = None
         self.setModel(proxy_image_list_model)
         self.setWordWrap(True)
         self.setItemDelegate(ImageListItemDelegate(self))
@@ -333,6 +379,13 @@ class ImageListView(QListView):
         self.delete_images_action.setShortcut('Ctrl+Del')
         self.delete_images_action.triggered.connect(
             self.delete_selected_images)
+        self.select_duplicates_action = self.addAction('Select Duplicates')
+        self.select_duplicates_action.triggered.connect(
+            self.select_duplicate_images)
+        self.delete_duplicates_action = self.addAction(
+            'Delete Duplicates...')
+        self.delete_duplicates_action.triggered.connect(
+            self.delete_duplicate_images)
         self.open_image_action = self.addAction('Open Image in Default App')
         self.open_image_action.setShortcut('Ctrl+O')
         self.open_image_action.triggered.connect(self.open_image)
@@ -350,11 +403,39 @@ class ImageListView(QListView):
         self.context_menu.addAction(self.move_images_action)
         self.context_menu.addAction(self.copy_images_action)
         self.context_menu.addAction(self.delete_images_action)
+        self.context_menu.addAction(self.select_duplicates_action)
+        self.context_menu.addAction(self.delete_duplicates_action)
         self.context_menu.addAction(self.open_image_action)
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
+        # 'Select Duplicates' also depends on the current image, and moving
+        # the current index (arrow keys, right-clicking another row) emits
+        # `currentChanged` without changing the selection, so update the
+        # enabled state on that too.
+        self.selectionModel().currentChanged.connect(
+            self.update_context_menu_actions)
 
     def contextMenuEvent(self, event):
+        # Remember the image the menu was opened on so the menu actions
+        # can act on it — 'Delete Duplicates...' keeps the copy the menu
+        # was opened on. For a right-click that is the image under the
+        # cursor; for a keyboard-triggered menu the current image: the
+        # event position of a keyboard event is synthetic (`pos()` may be
+        # null, per the Qt docs), so `indexAt(event.pos())` would pick an
+        # arbitrary row — typically the first — instead of the one the
+        # user is working with.
+        if event.reason() == QContextMenuEvent.Reason.Mouse:
+            context_index = self.indexAt(event.pos())
+        else:
+            context_index = self.currentIndex()
+        self._context_menu_image = (
+            context_index.data(Qt.ItemDataRole.UserRole)
+            if context_index.isValid() else None)
+        # Recompute the enabled states right before showing the menu, in
+        # case the current index changed since the last
+        # `selectionChanged`/`currentChanged` (e.g. right-clicking the row
+        # that is already current emits no signal at all).
+        self.update_context_menu_actions()
         self.context_menu.exec_(event.globalPos())
 
     @Slot()
@@ -654,6 +735,84 @@ class ImageListView(QListView):
         self.directory_reload_requested.emit()
 
     @Slot()
+    def select_duplicate_images(self):
+        # Select every visible row of an image whose content is the same as
+        # the current image's (the copies share one record and the same tags).
+        current_index = self.currentIndex()
+        if not current_index.isValid():
+            return
+        current_image = current_index.data(Qt.ItemDataRole.UserRole)
+        if (current_image is None or not current_image.content_hash
+                or current_image.duplicate_count < 2):
+            return
+        content_hash = current_image.content_hash
+        item_selection = QItemSelection()
+        found_count = 0
+        for row in range(self.proxy_image_list_model.rowCount()):
+            index = self.proxy_image_list_model.index(row, 0)
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image is not None and image.content_hash == content_hash:
+                if found_count == 0:
+                    self.setCurrentIndex(index)
+                item_selection.append(QItemSelectionRange(index))
+                found_count += 1
+        self.selectionModel().select(
+            item_selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    @Slot()
+    def delete_duplicate_images(self):
+        # Keep the image the menu was opened on and move every other loaded
+        # copy of the same file content — and any `.txt` caption file next
+        # to it — to the trash. The selection is not involved: no
+        # pre-selection is needed, and copies hidden by a filter are
+        # deleted too (they are looked up among the loaded images, not the
+        # visible ones).
+        keeper = self._context_menu_image
+        if keeper is None:
+            current_index = self.currentIndex()
+            if current_index.isValid():
+                keeper = current_index.data(Qt.ItemDataRole.UserRole)
+        if (keeper is None or not keeper.content_hash
+                or keeper.duplicate_count < 2):
+            return
+        content_hash = keeper.content_hash
+        source_model = self.proxy_image_list_model.sourceModel()
+        deleted_paths = []
+        for row in range(source_model.rowCount()):
+            image = source_model.index(row, 0).data(Qt.ItemDataRole.UserRole)
+            if (image is not None and image is not keeper
+                    and image.content_hash == content_hash):
+                deleted_paths.append(image.path)
+        if not deleted_paths:
+            return
+        kept_paths = [keeper.path]
+        title = 'Delete Duplicate Files'
+        question = (f'Delete {len(deleted_paths)} duplicate '
+                    f'{pluralize("file", len(deleted_paths))} '
+                    f'{"and its" if len(deleted_paths) == 1 else "and their"} '
+                    f'caption file(s)?\n\n'
+                    f'Kept:\n'
+                    f'{"\n".join(f"  {path}" for path in kept_paths)}\n\n'
+                    f'Deleted:\n'
+                    f'{"\n".join(f"  {path}" for path in deleted_paths)}')
+        reply = get_confirmation_dialog_reply(title, question)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for image_path in deleted_paths:
+            image_file = QFile(image_path)
+            if not image_file.moveToTrash():
+                QMessageBox.critical(self, 'Error',
+                                     f'Failed to delete {image_path}.')
+            caption_file_path = image_path.with_suffix('.txt')
+            caption_file = QFile(caption_file_path)
+            if caption_file.exists():
+                if not caption_file.moveToTrash():
+                    QMessageBox.critical(self, 'Error',
+                                         f'Failed to delete '
+                                         f'{caption_file_path}.')
+        self.directory_reload_requested.emit()
+
+    @Slot()
     def open_image(self):
         selected_images = self.get_selected_images()
         image_path = selected_images[0].path
@@ -678,6 +837,31 @@ class ImageListView(QListView):
         self.copy_images_action.setText(copy_images_action_name)
         self.delete_images_action.setText(delete_images_action_name)
         self.open_image_action.setVisible(selected_image_count == 1)
+        current_index = self.currentIndex()
+        current_image = (current_index.data(Qt.ItemDataRole.UserRole)
+                         if current_index.isValid() else None)
+        self.select_duplicates_action.setEnabled(
+            bool(current_image is not None
+                 and current_image.content_hash
+                 and current_image.duplicate_count > 1))
+        # Enable "Delete Duplicates..." when the menu was opened on a
+        # duplicate image: it keeps that copy and deletes the other loaded
+        # copies of the same file content, so the selection is not involved.
+        context_image = self._context_menu_image
+        if context_image is None:
+            context_image = current_image
+        self.delete_duplicates_action.setEnabled(
+            bool(context_image is not None
+                 and context_image.content_hash
+                 and context_image.duplicate_count > 1))
+
+
+def make_duplicates_icon() -> QIcon:
+    """
+    Create the icon for the `Duplicates` filter button.
+    """
+    svg_path = get_resource_path(Path('images/duplicate-images.svg'))
+    return QIcon(str(svg_path))
 
 
 class ImageList(QDockWidget):
@@ -707,6 +891,22 @@ class ImageList(QDockWidget):
         selection_mode_layout.addWidget(selection_mode_label)
         selection_mode_layout.addWidget(self.selection_mode_combo_box,
                                         stretch=1)
+        self.filter_duplicates_button = QPushButton()
+        self.filter_duplicates_button.setIcon(make_duplicates_icon())
+        self.filter_duplicates_button.setIconSize(QSize(24, 24))
+        self.filter_duplicates_button.setFixedWidth(
+            self.selection_mode_combo_box.sizeHint().height())
+        self.filter_duplicates_button.setFixedHeight(
+            self.selection_mode_combo_box.sizeHint().height())
+        self.filter_duplicates_button.setCheckable(True)
+        self.filter_duplicates_button.setToolTip(
+            'Show only duplicate images')
+        # Duplicates can only be detected in database storage mode (by
+        # content hash), so the button starts hidden in text-file mode and
+        # the main window keeps it in sync when the backend changes.
+        self.filter_duplicates_button.setVisible(
+            get_storage_backend() == 'sqlite')
+        selection_mode_layout.addWidget(self.filter_duplicates_button)
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
         self.image_index_label = QLabel()

@@ -309,7 +309,9 @@ class MainWindow(QMainWindow):
         # them after reloading the directory.
         filter_text = self.image_list.filter_line_edit.text()
         select_index_key = ('image_index'
-                            if self.proxy_image_list_model.filter is None
+                            if (self.proxy_image_list_model.filter is None
+                                and not self.proxy_image_list_model
+                                .filter_duplicates)
                             else 'filtered_image_index')
         select_index = self.settings.value(select_index_key, type=int) or 0
         # Selecting the image is deferred to `on_directory_loaded` because
@@ -457,6 +459,8 @@ class MainWindow(QMainWindow):
         """
         self.settings.setValue('storage_backend', new_mode)
         self.image_list_model.set_storage(get_image_storage())
+        # The Duplicates filter only works with the database backend.
+        self._set_duplicates_filter_visible(new_mode == 'sqlite')
         # Reload the directory (if one is loaded) so that the in-memory
         # tags and descriptions come from the new storage. Without this, the
         # data that was loaded from the old storage would keep being
@@ -667,7 +671,8 @@ class MainWindow(QMainWindow):
         self.proxy_image_list_model.filter = filter_
         # Apply the new filter.
         self.proxy_image_list_model.invalidateFilter()
-        if filter_ is None:
+        if (filter_ is None
+                and not self.proxy_image_list_model.filter_duplicates):
             all_tags_list_selection_model = (self.all_tags_editor
                                              .all_tags_list.selectionModel())
             all_tags_list_selection_model.clearSelection()
@@ -683,6 +688,43 @@ class MainWindow(QMainWindow):
             self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(0, 0))
 
+    @Slot(bool)
+    def set_image_list_filter_duplicates(self, filter_duplicates: bool):
+        self.proxy_image_list_model.filter_duplicates = filter_duplicates
+        # Apply the new filter.
+        self.proxy_image_list_model.invalidateFilter()
+        if (self.proxy_image_list_model.filter is None
+                and not filter_duplicates):
+            # All images are shown again: select the previously selected
+            # image in the unfiltered image list.
+            select_index = self.settings.value('image_index', type=int) or 0
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(select_index, 0))
+        else:
+            # Select the first image.
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(0, 0))
+        self.image_list.update_image_index_label(
+            self.image_list.list_view.currentIndex())
+
+    def _set_duplicates_filter_visible(self, visible: bool):
+        """
+        Show or hide the Duplicates filter button. It only works in database
+        storage mode, where duplicates are detected by content hash, so it
+        is hidden in text-file storage mode; the filter is cleared first if
+        it was on.
+        """
+        button = self.image_list.filter_duplicates_button
+        if not visible and button.isChecked():
+            # The filter is not functional in the new storage mode: clear
+            # it so the image list shows all images again.
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+            self.proxy_image_list_model.filter_duplicates = False
+            self.proxy_image_list_model.invalidateFilter()
+        button.setVisible(visible)
+
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index of the currently selected image."""
@@ -691,13 +733,17 @@ class MainWindow(QMainWindow):
         if not proxy_image_index.isValid():
             return
         settings_key = ('image_index'
-                        if self.proxy_image_list_model.filter is None
+                        if (self.proxy_image_list_model.filter is None
+                            and not self.proxy_image_list_model
+                            .filter_duplicates)
                         else 'filtered_image_index')
         self.settings.setValue(settings_key, proxy_image_index.row())
 
     def connect_image_list_signals(self):
         self.image_list.filter_line_edit.textChanged.connect(
             self.set_image_list_filter)
+        self.image_list.filter_duplicates_button.toggled.connect(
+            self.set_image_list_filter_duplicates)
         self.image_list_selection_model.currentChanged.connect(
             self.save_image_index)
         self.image_list_selection_model.currentChanged.connect(
