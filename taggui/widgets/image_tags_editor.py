@@ -732,6 +732,14 @@ class ImageTagsEditor(QDockWidget):
         if self.image is None:
             return
         current_description = self.description_editor.toPlainText()
+        # Populate the editor programmatically (e.g. loading a different image,
+        # or a storage-mode switch followed by a directory reload) sets the text
+        # to exactly the image's current description. Do not treat that as an
+        # edit and schedule a save; only react when the text actually differs
+        # from the image's description. This mirrors the equality guard in
+        # MainWindow.update_image_tags for the tag list.
+        if current_description == self.image.description:
+            return
         self.image.description = current_description
         self.description_save_timer.start()
 

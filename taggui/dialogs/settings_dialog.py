@@ -1,16 +1,34 @@
-from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout)
+import sqlite3
+from pathlib import Path
 
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QVBoxLayout)
+
+from models.image_storage import (clear_database, get_database_path,
+                                  get_default_database_path, migrate_database)
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox)
+from utils.utils import pluralize
 
 
 class SettingsDialog(QDialog):
     # Emitted when the grid page/count overlay appearance settings change so
     # an open grid preview can re-render immediately.
     variant_grid_overlay_settings_changed = Signal()
+    # Emitted when the tags/descriptions storage backend changes. Carries the
+    # new backend ('sqlite' or 'text'). The change is not persisted until the
+    # main window has confirmed (or migrated) it, so the combo is plain and
+    # the main window may revert it with `revert_storage_backend`.
+    storage_backend_change_requested = Signal(str)
+    # Emitted after the active database has changed in a way that makes the
+    # currently loaded images' data stale: the database was cleared, or a
+    # database at a new location was adopted (moved to, or already present
+    # there) instead of the one that was in use. The main window re-points its
+    # active storage to the new database and reloads the directory.
+    database_changed_requested = Signal()
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -132,6 +150,54 @@ class SettingsDialog(QDialog):
                 update_grid_overlay_sub_settings_enabled(
                     show_grid_overlay_check_box.isChecked()),
                 self.variant_grid_overlay_settings_changed.emit()))
+        self.storage_backend_combo = QComboBox()
+        self.storage_backend_combo.addItem('SQLite database', 'sqlite')
+        self.storage_backend_combo.addItem('Text files next to images', 'text')
+        storage_backend = self.settings.value(
+            'storage_backend',
+            defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
+        # Set the initial value before connecting, so that it does not emit
+        # the change signal.
+        storage_backend_index = self.storage_backend_combo.findData(
+            storage_backend)
+        if storage_backend_index != -1:
+            self.storage_backend_combo.setCurrentIndex(
+                storage_backend_index)
+        self.storage_backend_combo.currentIndexChanged.connect(
+            self.handle_storage_backend_change)
+        database_location = self.settings.value(
+            'database_path',
+            defaultValue=DEFAULT_SETTINGS['database_path'], type=str)
+        self.database_location_line_edit = QLineEdit()
+        # The line edit shows the active location: the setting, or the
+        # platform default when it is empty.
+        self.database_location_line_edit.setText(
+            database_location if database_location
+            else str(get_default_database_path()))
+        self.database_location_line_edit.setMinimumWidth(400)
+        self.database_location_line_edit.setClearButtonEnabled(True)
+        self.database_location_line_edit.editingFinished.connect(
+            self.handle_database_location_commit)
+        self.database_location_button = QPushButton('Select...')
+        self.database_location_button.setFixedWidth(
+            int(self.database_location_button.sizeHint().width() * 1.3))
+        self.database_location_button.clicked.connect(
+            self.set_database_location_path)
+        # Restores the platform-default database location (the same
+        # migrate/overwrite/use-existing rules apply).
+        self.database_default_button = QPushButton('Default')
+        self.database_default_button.setFixedWidth(
+            int(self.database_default_button.sizeHint().width() * 1.3))
+        self.database_default_button.clicked.connect(
+            self.reset_database_location_to_default)
+        clear_database_button = QPushButton('Clear Database...')
+        clear_database_button.setFixedWidth(
+            int(clear_database_button.sizeHint().width() * 1.3))
+        clear_database_button.clicked.connect(self.handle_clear_database)
+        self._update_storage_rows_enabled()
+        # The database location that is currently active. Used so that the
+        # same location is not migrated again on repeated commits.
+        self._last_database_location = self._effective_database_location()
 
         grid_layout.addWidget(font_size_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
@@ -179,6 +245,24 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(grid_overlay_transparency_label, 14, 0,
                               Qt.AlignmentFlag.AlignRight)
         grid_layout.addWidget(grid_overlay_transparency_spin_box, 14, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(
+            QLabel('Tags and descriptions storage'), 15, 0,
+            Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(self.storage_backend_combo, 15, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(QLabel('Database location'), 16, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(self.database_location_line_edit, 16, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        location_buttons = QHBoxLayout()
+        location_buttons.setSpacing(8)
+        location_buttons.addWidget(self.database_location_button)
+        location_buttons.addWidget(self.database_default_button)
+        location_buttons.addStretch()
+        grid_layout.addLayout(location_buttons, 17, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(clear_database_button, 18, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 
@@ -236,3 +320,207 @@ class SettingsDialog(QDialog):
             dir=initial_directory_path)
         if models_directory_path:
             self.models_directory_line_edit.setText(models_directory_path)
+
+    def _update_storage_rows_enabled(self):
+        """
+        Enable the database location row only while SQLite storage is
+        selected.
+        """
+        is_sqlite = self.storage_backend_combo.currentData() == 'sqlite'
+        self.database_location_line_edit.setEnabled(is_sqlite)
+        self.database_location_button.setEnabled(is_sqlite)
+        self.database_default_button.setEnabled(is_sqlite)
+
+    @Slot(int)
+    def handle_storage_backend_change(self, index: int):
+        self._update_storage_rows_enabled()
+        self.storage_backend_change_requested.emit(
+            self.storage_backend_combo.currentData())
+
+    def revert_storage_backend(self, value: str):
+        """
+        Restore the storage backend combo to `value` without re-emitting
+        the change signal (used when a switch is canceled or fails).
+        """
+        index = self.storage_backend_combo.findData(value)
+        if index == -1:
+            return
+        self.storage_backend_combo.blockSignals(True)
+        self.storage_backend_combo.setCurrentIndex(index)
+        self.storage_backend_combo.blockSignals(False)
+        self._update_storage_rows_enabled()
+
+    def _effective_database_location(self) -> Path:
+        """
+        The database location the line edit currently represents (the text,
+        or the platform default when it is empty).
+        """
+        text = self.database_location_line_edit.text().strip()
+        if text:
+            return Path(text)
+        return get_default_database_path()
+
+    @Slot()
+    def set_database_location_path(self):
+        """
+        Choose a database location with a file dialog. The save dialog is
+        asked not to confirm overwriting an existing file so that selecting a
+        location that already has a database simply returns the path; the
+        "use the existing database / overwrite it with the current one"
+        choice is then handled by `handle_database_location_commit`, exactly
+        like the typed location and the Default button.
+        """
+        database_location = self.settings.value(
+            'database_path',
+            defaultValue=DEFAULT_SETTINGS['database_path'], type=str)
+        initial_path = (Path(database_location).parent
+                        if database_location
+                        else get_default_database_path().parent)
+        database_location = QFileDialog.getSaveFileName(
+            parent=self, caption='Select location of the TagGUI database',
+            dir=str(initial_path),
+            filter='SQLite database (*.sqlite3)',
+            options=QFileDialog.Option.DontConfirmOverwrite)[0]
+        if database_location:
+            self.database_location_line_edit.setText(database_location)
+            self.handle_database_location_commit()
+
+    @Slot()
+    def reset_database_location_to_default(self):
+        """
+        Restore the platform-default database location. The same rules as a
+        typed location apply: a database at the current location is moved to
+        the default location, or — if a database already exists there and the
+        user declines to overwrite it — that existing one is used.
+        """
+        self.database_location_line_edit.setText(
+            str(get_default_database_path()))
+        self.handle_database_location_commit()
+
+    @Slot()
+    def handle_database_location_commit(self):
+        """
+        Persist the committed database location. When it has changed and a
+        database exists at the old location, move it to the new location.
+        When a database already exists at the new location, ask whether to
+        overwrite it; if the user declines, the existing database at the new
+        location is used instead (the old one is left in place). After the
+        active database has changed (moved, adopted, or newly selected), emit
+        `database_changed_requested` so the main window re-points its storage
+        and reloads the directory.
+        """
+        new_location = self._effective_database_location()
+        old_location = self._last_database_location
+        if new_location == old_location:
+            return
+        self._last_database_location = new_location
+        # Store the platform default as an empty string (so the setting reads
+        # as "default"); otherwise store the explicit path.
+        self.settings.setValue(
+            'database_path',
+            '' if new_location == get_default_database_path()
+            else str(new_location))
+        if old_location.is_file():
+            try:
+                if new_location.is_file():
+                    message_box = QMessageBox()
+                    message_box.setWindowTitle('Move Database')
+                    message_box.setIcon(QMessageBox.Icon.Warning)
+                    message_box.setText(f'A database already exists at '
+                                        f'{new_location}.')
+                    message_box.setInformativeText(
+                        f'Overwrite it with the database at {old_location}? '
+                        'If you decline, the existing database at the new '
+                        'location is used instead.')
+                    message_box.setStandardButtons(
+                        QMessageBox.StandardButton.Yes
+                        | QMessageBox.StandardButton.No)
+                    # Overwriting is destructive, so the safe button (No) is
+                    # the default.
+                    message_box.setDefaultButton(
+                        QMessageBox.StandardButton.No)
+                    if message_box.exec() != QMessageBox.StandardButton.Yes:
+                        # Use the existing database at the new location. It
+                        # is already the active one (adopted and persisted
+                        # above), and the database at the old location is
+                        # left in place.
+                        QMessageBox.information(
+                            self, 'Move Database',
+                            f'Using the existing database at '
+                            f'{new_location}.')
+                        self.database_changed_requested.emit()
+                        return
+                migrate_database(old_location, new_location)
+            except OSError:
+                # The move failed; the database at the old location is
+                # intact, so restore it.
+                self._revert_database_location(old_location)
+                QMessageBox.critical(self, 'Error',
+                                     f'Failed to move the database to '
+                                     f'{new_location}.')
+                return
+            QMessageBox.information(self, 'Move Database',
+                                    f'The database has been moved to '
+                                    f'{new_location}.')
+        # The active database is now `new_location`: the old one was moved
+        # there, an existing one was adopted, or it was newly selected with
+        # nothing to move. Re-point the live storage to it and reload the
+        # directory so the in-memory tags and descriptions come from it
+        # rather than from the database that was in use before.
+        self.database_changed_requested.emit()
+
+    def _revert_database_location(self, previous_location: Path):
+        """
+        Restore the database location line edit and setting to
+        `previous_location`.
+        """
+        default_location = get_default_database_path()
+        self.settings.setValue(
+            'database_path',
+            '' if previous_location == default_location
+            else str(previous_location))
+        self.database_location_line_edit.setText(str(previous_location))
+        self._last_database_location = previous_location
+
+    @Slot()
+    def handle_clear_database(self):
+        """
+        Delete all records from the database (the database file itself stays
+        usable, and nothing outside it is touched).
+        """
+        database_path = get_database_path()
+        if not database_path.is_file():
+            QMessageBox.information(self, 'Clear Database',
+                                    f'There is no database at '
+                                    f'{database_path}.')
+            return
+        message_box = QMessageBox()
+        message_box.setWindowTitle('Clear Database')
+        message_box.setIcon(QMessageBox.Icon.Warning)
+        message_box.setText(
+            f'Permanently delete all tags and descriptions stored in the '
+            f'TagGUI database at {database_path}?')
+        message_box.setInformativeText(
+            'This cannot be undone. Image files and .txt caption files are '
+            'not affected.')
+        message_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        # A destructive action, so the safe button is the default.
+        message_box.setDefaultButton(QMessageBox.StandardButton.No)
+        if message_box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            cleared_count = clear_database(database_path)
+        except sqlite3.Error:
+            QMessageBox.critical(self, 'Error',
+                                 f'Failed to clear the database at '
+                                 f'{database_path}.')
+            return
+        QMessageBox.information(
+            self, 'Clear Database',
+            f'Cleared {cleared_count} '
+            f'{pluralize("image record", cleared_count)} from the database.')
+        # The database is now empty, but the loaded images still show their
+        # (now deleted) tags and descriptions. Ask the main window to reload
+        # the directory so they are cleared from the display too.
+        self.database_changed_requested.emit()
