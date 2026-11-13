@@ -328,6 +328,15 @@ class ImageListView(QListView):
         super().__init__(parent)
         self.proxy_image_list_model = proxy_image_list_model
         self.tag_separator = tag_separator
+        # The image the context menu was last opened on (set in
+        # `contextMenuEvent`). `None` until the first right-click.
+        #
+        # Store the `Image` object, not a `QModelIndex`: the next model
+        # reset (e.g. the directory reload after a deletion) leaves a
+        # stored index stale, yet `QModelIndex.isValid()` does not notice
+        # that — `data()` on such an index segfaults the app. A Python
+        # object reference survives the reset.
+        self._context_menu_image = None
         self.setModel(proxy_image_list_model)
         self.setWordWrap(True)
         self.setItemDelegate(ImageListItemDelegate(self))
@@ -371,7 +380,7 @@ class ImageListView(QListView):
         self.select_duplicates_action.triggered.connect(
             self.select_duplicate_images)
         self.delete_duplicates_action = self.addAction(
-            'Delete Duplicate Files...')
+            'Delete Duplicates...')
         self.delete_duplicates_action.triggered.connect(
             self.delete_duplicate_images)
         self.open_image_action = self.addAction('Open Image in Default App')
@@ -404,6 +413,14 @@ class ImageListView(QListView):
             self.update_context_menu_actions)
 
     def contextMenuEvent(self, event):
+        # Remember the image under the cursor (a keyboard-triggered menu
+        # may have none; `currentIndex` is the fallback in that case) so
+        # the menu actions can act on it — 'Delete Duplicates...' keeps
+        # the copy the menu was opened on.
+        context_index = self.indexAt(event.pos())
+        self._context_menu_image = (
+            context_index.data(Qt.ItemDataRole.UserRole)
+            if context_index.isValid() else None)
         # Recompute the enabled states right before showing the menu, in
         # case the current index changed since the last
         # `selectionChanged`/`currentChanged` (e.g. right-clicking the row
@@ -734,30 +751,31 @@ class ImageListView(QListView):
 
     @Slot()
     def delete_duplicate_images(self):
-        # Group the selected images by content hash. For each group of two or
-        # more selected copies, keep the current image (or the first selected
-        # copy of the group, if it is not selected) and move the other copies
-        # and their caption files to the trash.
-        selected_images = self.get_selected_images()
-        groups: dict[str, list[Image]] = {}
-        for image in selected_images:
-            if image.content_hash:
-                groups.setdefault(image.content_hash, []).append(image)
-        duplicate_groups = [images for images in groups.values()
-                            if len(images) > 1]
-        if not duplicate_groups:
+        # Keep the image the menu was opened on and move every other loaded
+        # copy of the same file content — and any `.txt` caption file next
+        # to it — to the trash. The selection is not involved: no
+        # pre-selection is needed, and copies hidden by a filter are
+        # deleted too (they are looked up among the loaded images, not the
+        # visible ones).
+        keeper = self._context_menu_image
+        if keeper is None:
+            current_index = self.currentIndex()
+            if current_index.isValid():
+                keeper = current_index.data(Qt.ItemDataRole.UserRole)
+        if (keeper is None or not keeper.content_hash
+                or keeper.duplicate_count < 2):
             return
-        current_index = self.currentIndex()
-        current_image = (current_index.data(Qt.ItemDataRole.UserRole)
-                         if current_index.isValid() else None)
-        kept_paths = []
+        content_hash = keeper.content_hash
+        source_model = self.proxy_image_list_model.sourceModel()
         deleted_paths = []
-        for images in duplicate_groups:
-            keeper = current_image if current_image in images else images[0]
-            kept_paths.append(keeper.path)
-            for image in images:
-                if image is not keeper:
-                    deleted_paths.append(image.path)
+        for row in range(source_model.rowCount()):
+            image = source_model.index(row, 0).data(Qt.ItemDataRole.UserRole)
+            if (image is not None and image is not keeper
+                    and image.content_hash == content_hash):
+                deleted_paths.append(image.path)
+        if not deleted_paths:
+            return
+        kept_paths = [keeper.path]
         title = 'Delete Duplicate Files'
         question = (f'Delete {len(deleted_paths)} duplicate '
                     f'{pluralize("file", len(deleted_paths))} '
@@ -816,15 +834,16 @@ class ImageListView(QListView):
             bool(current_image is not None
                  and current_image.content_hash
                  and current_image.duplicate_count > 1))
-        # Enable "Delete Duplicate Files..." only when the selection contains
-        # at least two copies of the same file content.
-        selected_hash_counts: dict[str, int] = {}
-        for image in self.get_selected_images():
-            if image.content_hash:
-                selected_hash_counts[image.content_hash] = (
-                    selected_hash_counts.get(image.content_hash, 0) + 1)
+        # Enable "Delete Duplicates..." when the menu was opened on a
+        # duplicate image: it keeps that copy and deletes the other loaded
+        # copies of the same file content, so the selection is not involved.
+        context_image = self._context_menu_image
+        if context_image is None:
+            context_image = current_image
         self.delete_duplicates_action.setEnabled(
-            any(count > 1 for count in selected_hash_counts.values()))
+            bool(context_image is not None
+                 and context_image.content_hash
+                 and context_image.duplicate_count > 1))
 
 
 class ImageList(QDockWidget):
