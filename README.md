@@ -480,9 +480,10 @@ TagGUI makes duplicates easy to spot and clean up:
   the duplicates and `k` is the total number of duplicate files (for example,
   `2/3`). Hovering an image shows the same information, for example
   "Duplicate: 2 of 3 files share these tags".
-- **`Duplicates` button** — in the `Images` pane, on the `Selection mode`
-  row. Click it to show only images that have at least one other loaded file
-  with identical content, and click it again to show everything.
+- **`Duplicates` button** — an icon of two overlapping images, in the
+  `Images` pane, on the `Selection mode` row. Click it to show only images
+  that have at least one other loaded file with identical content, and click
+  it again to show everything.
 - **`Select Duplicates`** — right-click a duplicate image to select every 
   visible copy of it at once.
 - **`Delete Duplicates...`** — right-click one copy of a set of

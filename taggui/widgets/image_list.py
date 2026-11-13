@@ -4,12 +4,13 @@ from functools import reduce
 from operator import or_
 from pathlib import Path
 
-from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
-                            QItemSelectionRange, QModelIndex, QRect, QSize, QUrl,
-                            Qt, Signal, Slot)
+from PySide6.QtCore import (QByteArray, QFile, QItemSelection,
+                            QItemSelectionModel, QItemSelectionRange,
+                            QModelIndex, QRect, QSize, QUrl, Qt, Signal, Slot)
 from PySide6.QtGui import (QColor, QContextMenuEvent, QDesktopServices,
                            QFont, QFontMetrics, QIcon, QPainter, QKeyEvent,
-                           QPalette, QPen)
+                           QPalette, QPen, QPixmap)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QPushButton,
@@ -25,7 +26,8 @@ from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.settings_widgets import SettingsComboBox
-from utils.utils import get_confirmation_dialog_reply, pluralize
+from utils.utils import (get_confirmation_dialog_reply, get_resource_path,
+                         pluralize)
 
 
 def replace_filter_wildcards(filter_: str | list) -> str | list:
@@ -854,6 +856,14 @@ class ImageListView(QListView):
                  and context_image.duplicate_count > 1))
 
 
+def make_duplicates_icon() -> QIcon:
+    """
+    Create the icon for the `Duplicates` filter button.
+    """
+    svg_path = get_resource_path(Path('images/duplicate-images.svg'))
+    return QIcon(str(svg_path))
+
+
 class ImageList(QDockWidget):
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
@@ -881,11 +891,16 @@ class ImageList(QDockWidget):
         selection_mode_layout.addWidget(selection_mode_label)
         selection_mode_layout.addWidget(self.selection_mode_combo_box,
                                         stretch=1)
-        self.filter_duplicates_button = QPushButton('Duplicates')
+        self.filter_duplicates_button = QPushButton()
+        self.filter_duplicates_button.setIcon(make_duplicates_icon())
+        self.filter_duplicates_button.setIconSize(QSize(24, 24))
+        self.filter_duplicates_button.setFixedWidth(
+            self.selection_mode_combo_box.sizeHint().height())
+        self.filter_duplicates_button.setFixedHeight(
+            self.selection_mode_combo_box.sizeHint().height())
         self.filter_duplicates_button.setCheckable(True)
         self.filter_duplicates_button.setToolTip(
-            'Show only images that have at least one other loaded file\n'
-            'with identical content.')
+            'Show only duplicate images')
         # Duplicates can only be detected in database storage mode (by
         # content hash), so the button starts hidden in text-file mode and
         # the main window keeps it in sync when the backend changes.
