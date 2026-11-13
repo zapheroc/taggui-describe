@@ -694,6 +694,14 @@ class ImageTagsEditor(QDockWidget):
                 proxy_image_index)
             self.image_index = self._group_current_index
             return
+        if proxy_image_index is None or not proxy_image_index.isValid():
+            # The selection was cleared or the index is stale (for example,
+            # the model is reset while a directory is loading). There is no
+            # image to show. Older PySide6 versions also hand back None here
+            # instead of an invalid QModelIndex.
+            self.image_index = None
+            self.image = None
+            return
         self.image_index = self.proxy_image_list_model.mapToSource(
             proxy_image_index)
         # On image load save the image reference for later use
@@ -703,6 +711,21 @@ class ImageTagsEditor(QDockWidget):
         # model is reset while a directory is loading).
         if self.image is None:
             return
+        # The mapped source index can be unusable even when the image is
+        # available: `mapToSource` may return an index that doesn't resolve
+        # (older PySide6 versions hand back None instead of an invalid
+        # QModelIndex, and the `image_index` property normalizes both to
+        # None). Recover the row from the image object — it is unique in the
+        # list — instead of crashing on `None.row()`.
+        if self.image_index is None or not self.image_index.isValid():
+            try:
+                row = self.image_list_model.images.index(self.image)
+            except ValueError:
+                # The image is no longer in the list (for example, deleted
+                # while the directory was loading). As for an invalid index
+                # above, leave the editors untouched.
+                return
+            self.image_index = self.image_list_model.index(row, 0)
         # The image list can be on screen before the background load of this
         # image's tags and description has finished (it shows empty ones
         # until then). Load them now, so the editors always display — and the
