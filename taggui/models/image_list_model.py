@@ -191,6 +191,13 @@ class ImageListModel(QAbstractListModel):
         # images), based on the storage backend setting.
         self.storage = get_image_storage()
         self.images: list[Image] = []
+        # Content hash -> the rows of the loaded images sharing it, for groups
+        # of two or more images only. In database mode the storage record is
+        # keyed by the image's content, so such a group is a set of duplicates
+        # sharing one record: a save to one must be reflected in the in-memory
+        # copies of the others (see `_sync_duplicate_images`). Rebuilt on
+        # every directory load.
+        self._duplicate_index: dict[str, list[int]] = {}
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
         # What the most recent `add_to_undo_stack` call displaced (the oldest
@@ -265,6 +272,9 @@ class ImageListModel(QAbstractListModel):
             text = image.path.name
             if image.tags:
                 text += f'\n{self.tag_separator.join(image.tags)}'
+            if image.duplicate_count > 1:
+                text += (f'\nDuplicate: {image.duplicate_position} of '
+                         f'{image.duplicate_count} files share these tags')
             return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail, if it has been generated yet. Thumbnails are
@@ -295,6 +305,7 @@ class ImageListModel(QAbstractListModel):
         # The view now shows an empty list until the load is complete.
         self.beginResetModel()
         self.images.clear()
+        self._duplicate_index = {}
         self.undo_stack.clear()
         self.redo_stack.clear()
         self._last_undo_push = None
@@ -346,9 +357,39 @@ class ImageListModel(QAbstractListModel):
         images.sort(key=lambda image_: image_.path)
         self.beginResetModel()
         self.images = images
+        self._build_duplicate_index()
         self.endResetModel()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
+
+    def _build_duplicate_index(self):
+        """
+        Map each content hash to the rows of the loaded images that share it,
+        keeping only groups of two or more images, and record the group size
+        and each member's 1-based position in it on the image
+        (`Image.duplicate_count` and `Image.duplicate_position`; both 0 for
+        unique or unhashed images).
+
+        In database mode a record is keyed by the image's content, so a group
+        of two or more files is a set of duplicates sharing one record. The
+        position follows the list order (the images are sorted by path).
+        """
+        rows_by_hash: dict[str, list[int]] = {}
+        for row, image in enumerate(self.images):
+            if image.content_hash:
+                rows_by_hash.setdefault(image.content_hash, []).append(row)
+        self._duplicate_index = {content_hash: rows
+                                 for content_hash, rows
+                                 in rows_by_hash.items()
+                                 if len(rows) > 1}
+        for image in self.images:
+            image.duplicate_count = 0
+            image.duplicate_position = 0
+        for rows in self._duplicate_index.values():
+            for position, row in enumerate(rows, start=1):
+                image = self.images[row]
+                image.duplicate_count = len(rows)
+                image.duplicate_position = position
 
     def start_thumbnail_generation(self):
         """Start generating thumbnails on background threads."""
@@ -439,6 +480,44 @@ class ImageListModel(QAbstractListModel):
             error_message_box.setIcon(QMessageBox.Icon.Critical)
             error_message_box.setText(f'Failed to save tags for {image.path}.')
             error_message_box.exec()
+            # The save failed, so the storage still holds the old values; do
+            # not sync the other in-memory copies to the unsaved ones.
+            return
+        self._sync_duplicate_images(image)
+
+    def _sync_duplicate_images(self, image: Image):
+        """
+        Bring the in-memory copies of the other loaded images that share
+        `image`'s content in line with the values that were just saved.
+
+        In database mode the storage record is keyed by the image's content,
+        so all duplicates share the record that the save updated. Without
+        this, the other copies would keep showing — and, if edited, write
+        back — stale tags. Emits `dataChanged` for the refreshed images so
+        the image list and the tag editor show the new values. Suppressed
+        while an undo/redo restore is in progress: the restore's own final
+        `dataChanged` covers the refreshed copies, and an intermediate
+        refresh would disturb the grouped tag panel's order bookkeeping.
+        """
+        rows = self._duplicate_index.get(image.content_hash)
+        if not rows:
+            return
+        changed_rows = []
+        for row in rows:
+            if row >= len(self.images):
+                continue
+            sibling = self.images[row]
+            if sibling is image:
+                continue
+            if (sibling.tags != image.tags
+                    or sibling.description != image.description):
+                sibling.tags = image.tags.copy()
+                sibling.description = image.description
+                changed_rows.append(row)
+        if not changed_rows or self.is_restoring_history:
+            return
+        self.dataChanged.emit(self.index(min(changed_rows)),
+                              self.index(max(changed_rows)))
 
     def set_storage(self, storage: ImageStorage):
         """
@@ -501,30 +580,42 @@ class ImageListModel(QAbstractListModel):
             history_item.action_name, tags, descriptions,
             history_item.should_ask_for_confirmation)
         destination_stack.append(reverse_item)
-        changed_image_indices = []
-        for (image_index, (image, history_image_tags,
-                           history_image_description)) in enumerate(
-                zip(self.images, history_item.tags,
-                    history_item.descriptions)):
-            if (image.tags == history_image_tags
-                    and image.description == history_image_description):
-                continue
-            changed_image_indices.append(image_index)
-            image.tags = history_image_tags.copy()
-            image.description = history_image_description
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.is_restoring_history = True
-            # Lets the grouped tag panel restore the tag order saved with the
-            # item being restored, and save the current order with its reverse.
-            self.restoring_history_items = (history_item, reverse_item)
-            try:
+        # The flag spans the whole restore (not just the final
+        # `dataChanged`): the per-image saves sync the duplicates' in-memory
+        # copies, and their `dataChanged` must not refresh the grouped tag
+        # panel mid-restore (see `_sync_duplicate_images`).
+        self.is_restoring_history = True
+        try:
+            # Compute the changed images from the *pre-restore* state: the
+            # saves below sync the in-memory copies of the other duplicates
+            # (see `_sync_duplicate_images`), so a sibling may already match
+            # the history value by the time the loop reaches it, and
+            # computing the list mid-loop would drop it from the
+            # `dataChanged` range, leaving its row stale in the views.
+            changed_image_indices = [
+                image_index
+                for (image_index, (image, history_image_tags,
+                                   history_image_description)) in enumerate(
+                        zip(self.images, history_item.tags,
+                            history_item.descriptions))
+                if (image.tags != history_image_tags
+                        or image.description != history_image_description)]
+            for image_index in changed_image_indices:
+                image = self.images[image_index]
+                image.tags = history_item.tags[image_index].copy()
+                image.description = history_item.descriptions[image_index]
+                self.write_image_tags_to_disk(image)
+            if changed_image_indices:
+                # Lets the grouped tag panel restore the tag order saved with
+                # the item being restored, and save the current order with its
+                # reverse.
+                self.restoring_history_items = (history_item, reverse_item)
                 self.dataChanged.emit(
                     self.index(changed_image_indices[0]),
                     self.index(changed_image_indices[-1]))
-            finally:
-                self.is_restoring_history = False
-                self.restoring_history_items = None
+        finally:
+            self.is_restoring_history = False
+            self.restoring_history_items = None
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot()
