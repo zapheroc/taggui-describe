@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
 from transformers import AutoTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
+from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
@@ -575,6 +576,12 @@ class MainWindow(QMainWindow):
         find_and_replace_dialog.exec()
 
     @Slot()
+    def show_export_images_dialog(self):
+        export_images_dialog = ExportImagesDialog(
+            parent=self, image_list_model=self.image_list_model)
+        export_images_dialog.exec()
+
+    @Slot()
     def show_batch_reorder_tags_dialog(self):
         batch_reorder_tags_dialog = BatchReorderTagsDialog(
             parent=self, image_list_model=self.image_list_model,
@@ -684,6 +691,11 @@ class MainWindow(QMainWindow):
                                            parent=self)
         reset_to_defaults_action.triggered.connect(self.reset_to_defaults)
         view_menu.addAction(reset_to_defaults_action)
+
+        tools_menu = menu_bar.addMenu('Tools')
+        export_images_action = QAction('Export Images...', parent=self)
+        export_images_action.triggered.connect(self.show_export_images_dialog)
+        tools_menu.addAction(export_images_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
