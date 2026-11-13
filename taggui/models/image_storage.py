@@ -405,11 +405,30 @@ def export_images_to_text_files(images: list[Image],
 
 def migrate_database(old_path: Path, new_path: Path) -> None:
     """
-    Copy the database file from `old_path` to `new_path` (the caller
+    Move the database file from `old_path` to `new_path` (the caller
     confirms the overwrite when a file already exists at `new_path`).
+
+    The file is copied, the copy is verified to be a byte-for-byte match
+    with the original (size and content hash), and only then is the
+    original deleted. If the copy cannot be verified, it is removed and
+    the original is left in place (an OSError is raised), so a failed
+    move never destroys the only copy of the database.
     """
     new_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(old_path, new_path)
+    # Verify the copy before deleting the original: the size check fails
+    # fast, the content hash proves the bytes match.
+    if (old_path.stat().st_size != new_path.stat().st_size
+            or compute_content_hash(old_path) != compute_content_hash(new_path)):
+        # The copy is not a verified match, so remove it and keep the
+        # original.
+        try:
+            new_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise OSError('The copy of the database could not be verified '
+                      'against the original')
+    old_path.unlink()
 
 
 def get_image_storage() -> ImageStorage:
