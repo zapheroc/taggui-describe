@@ -16,7 +16,7 @@ from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
-from models.image_storage import (get_database_path, get_database_tags,
+from models.image_storage import (get_database_path, get_database_tag_names,
                                   get_image_storage, get_storage_backend)
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -316,7 +316,9 @@ class MainWindow(QMainWindow):
         # them after reloading the directory.
         filter_text = self.image_list.filter_line_edit.text()
         select_index_key = ('image_index'
-                            if self.proxy_image_list_model.filter is None
+                            if (self.proxy_image_list_model.filter is None
+                                and not self.proxy_image_list_model
+                                .filter_duplicates)
                             else 'filtered_image_index')
         select_index = self.settings.value(select_index_key, type=int) or 0
         # Selecting the image is deferred to `on_directory_loaded` because
@@ -464,6 +466,8 @@ class MainWindow(QMainWindow):
         """
         self.settings.setValue('storage_backend', new_mode)
         self.image_list_model.set_storage(get_image_storage())
+        # The Duplicates filter only works with the database backend.
+        self._set_duplicates_filter_visible(new_mode == 'sqlite')
         # Reload the directory (if one is loaded) so that the in-memory
         # tags and descriptions come from the new storage. Without this, the
         # data that was loaded from the old storage would keep being
@@ -508,24 +512,37 @@ class MainWindow(QMainWindow):
 
     def update_tag_suggestions(self):
         """
-        Refresh the tag suggestions offered in the Add Tag box. When the
-        SQLite database is the active storage backend, they are all the tags
-        stored in it, so that every tag ever used is offered no matter which
-        folder is open. Otherwise (or when the database cannot be read) they
-        are the tags of the loaded images.
+        Refresh the tag suggestions offered in the Add Tag box. They are the
+        tags of the loaded images, and (when the SQLite database is the
+        active storage backend) all the tags stored in it too, so that every
+        tag ever used is offered no matter which folder is open. The count of
+        a tag is always how many of the loaded images use it, so the tags the
+        user is using most in the current folder sort first and tags that are
+        only in the database sort last (alphabetically), ready to be added.
+        When the database cannot be read, the suggestions are the tags of the
+        loaded images only.
         """
-        suggestions = None
+        local_tag_counts = self.tag_counter_model.tag_counter
+        database_tag_names = None
         if get_storage_backend() == 'sqlite':
             try:
-                suggestions = get_database_tags(get_database_path())
+                database_tag_names = get_database_tag_names(
+                    get_database_path())
             except (OSError, sqlite3.Error) as exception:
                 # The database is unavailable (for example, it is corrupted).
-                # Suggest the loaded images' tags instead, so the completer
+                # Suggest the loaded images' tags only, so the completer
                 # keeps working.
                 print(f'Failed to load tag suggestions from the database: '
                       f'{exception}', file=sys.stderr)
-        if suggestions is None:
-            suggestions = list(self.tag_counter_model.most_common_tags)
+        if database_tag_names is None:
+            suggestions = list(local_tag_counts.most_common())
+        else:
+            tag_counts = dict(local_tag_counts)
+            for tag_name in database_tag_names:
+                tag_counts.setdefault(tag_name, 0)
+            suggestions = sorted(tag_counts.items(),
+                                 key=lambda tag_and_count: (
+                                     -tag_and_count[1], tag_and_count[0]))
         self.tag_suggestion_model.update_suggestions(suggestions)
 
     @Slot()
@@ -709,7 +726,8 @@ class MainWindow(QMainWindow):
         self.proxy_image_list_model.filter = filter_
         # Apply the new filter.
         self.proxy_image_list_model.invalidateFilter()
-        if filter_ is None:
+        if (filter_ is None
+                and not self.proxy_image_list_model.filter_duplicates):
             all_tags_list_selection_model = (self.all_tags_editor
                                              .all_tags_list.selectionModel())
             all_tags_list_selection_model.clearSelection()
@@ -725,6 +743,43 @@ class MainWindow(QMainWindow):
             self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(0, 0))
 
+    @Slot(bool)
+    def set_image_list_filter_duplicates(self, filter_duplicates: bool):
+        self.proxy_image_list_model.filter_duplicates = filter_duplicates
+        # Apply the new filter.
+        self.proxy_image_list_model.invalidateFilter()
+        if (self.proxy_image_list_model.filter is None
+                and not filter_duplicates):
+            # All images are shown again: select the previously selected
+            # image in the unfiltered image list.
+            select_index = self.settings.value('image_index', type=int) or 0
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(select_index, 0))
+        else:
+            # Select the first image.
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(0, 0))
+        self.image_list.update_image_index_label(
+            self.image_list.list_view.currentIndex())
+
+    def _set_duplicates_filter_visible(self, visible: bool):
+        """
+        Show or hide the Duplicates filter button. It only works in database
+        storage mode, where duplicates are detected by content hash, so it
+        is hidden in text-file storage mode; the filter is cleared first if
+        it was on.
+        """
+        button = self.image_list.filter_duplicates_button
+        if not visible and button.isChecked():
+            # The filter is not functional in the new storage mode: clear
+            # it so the image list shows all images again.
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+            self.proxy_image_list_model.filter_duplicates = False
+            self.proxy_image_list_model.invalidateFilter()
+        button.setVisible(visible)
+
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index of the currently selected image."""
@@ -733,13 +788,17 @@ class MainWindow(QMainWindow):
         if not proxy_image_index.isValid():
             return
         settings_key = ('image_index'
-                        if self.proxy_image_list_model.filter is None
+                        if (self.proxy_image_list_model.filter is None
+                            and not self.proxy_image_list_model
+                            .filter_duplicates)
                         else 'filtered_image_index')
         self.settings.setValue(settings_key, proxy_image_index.row())
 
     def connect_image_list_signals(self):
         self.image_list.filter_line_edit.textChanged.connect(
             self.set_image_list_filter)
+        self.image_list.filter_duplicates_button.toggled.connect(
+            self.set_image_list_filter_duplicates)
         self.image_list_selection_model.currentChanged.connect(
             self.save_image_index)
         self.image_list_selection_model.currentChanged.connect(

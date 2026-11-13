@@ -365,21 +365,16 @@ def import_images(images: list[Image], db_path: Path) -> None:
         connection.close()
 
 
-def get_database_tags(db_path: Path) -> list[tuple[str, int]]:
+def get_database_tag_names(db_path: Path) -> list[str]:
     """
-    All the tags stored in the database at `db_path`, each with the number
-    of images in the database that use it, the most used first (ties broken
-    alphabetically). Tags that no image currently uses are included too, so
-    that every tag ever stored remains available (for tag suggestions).
+    All the tag names stored in the database at `db_path`, alphabetically.
+    Tags that no image currently uses are included too, so that every tag
+    ever stored remains available (for tag suggestions).
     """
     connection = _connect(db_path)
     try:
-        return [(name, count) for name, count in connection.execute(
-            'SELECT tags.name, COUNT(image_tags.image_hash) '
-            'FROM tags '
-            'LEFT JOIN image_tags ON image_tags.tag_id = tags.id '
-            'GROUP BY tags.id '
-            'ORDER BY COUNT(image_tags.image_hash) DESC, tags.name')]
+        return [row[0] for row in connection.execute(
+            'SELECT name FROM tags ORDER BY name')]
     finally:
         connection.close()
 
@@ -405,11 +400,30 @@ def export_images_to_text_files(images: list[Image],
 
 def migrate_database(old_path: Path, new_path: Path) -> None:
     """
-    Copy the database file from `old_path` to `new_path` (the caller
+    Move the database file from `old_path` to `new_path` (the caller
     confirms the overwrite when a file already exists at `new_path`).
+
+    The file is copied, the copy is verified to be a byte-for-byte match
+    with the original (size and content hash), and only then is the
+    original deleted. If the copy cannot be verified, it is removed and
+    the original is left in place (an OSError is raised), so a failed
+    move never destroys the only copy of the database.
     """
     new_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(old_path, new_path)
+    # Verify the copy before deleting the original: the size check fails
+    # fast, the content hash proves the bytes match.
+    if (old_path.stat().st_size != new_path.stat().st_size
+            or compute_content_hash(old_path) != compute_content_hash(new_path)):
+        # The copy is not a verified match, so remove it and keep the
+        # original.
+        try:
+            new_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise OSError('The copy of the database could not be verified '
+                      'against the original')
+    old_path.unlink()
 
 
 def get_image_storage() -> ImageStorage:
