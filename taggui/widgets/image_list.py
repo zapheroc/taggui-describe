@@ -7,8 +7,9 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QRect, QSize, QUrl,
                             Qt, Signal, Slot)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics,
-                           QIcon, QPainter, QKeyEvent, QPalette, QPen)
+from PySide6.QtGui import (QColor, QContextMenuEvent, QDesktopServices,
+                           QFont, QFontMetrics, QIcon, QPainter, QKeyEvent,
+                           QPalette, QPen)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QPushButton,
@@ -329,7 +330,7 @@ class ImageListView(QListView):
         self.proxy_image_list_model = proxy_image_list_model
         self.tag_separator = tag_separator
         # The image the context menu was last opened on (set in
-        # `contextMenuEvent`). `None` until the first right-click.
+        # `contextMenuEvent`). `None` until the first context menu.
         #
         # Store the `Image` object, not a `QModelIndex`: the next model
         # reset (e.g. the directory reload after a deletion) leaves a
@@ -413,11 +414,18 @@ class ImageListView(QListView):
             self.update_context_menu_actions)
 
     def contextMenuEvent(self, event):
-        # Remember the image under the cursor (a keyboard-triggered menu
-        # may have none; `currentIndex` is the fallback in that case) so
-        # the menu actions can act on it — 'Delete Duplicates...' keeps
-        # the copy the menu was opened on.
-        context_index = self.indexAt(event.pos())
+        # Remember the image the menu was opened on so the menu actions
+        # can act on it — 'Delete Duplicates...' keeps the copy the menu
+        # was opened on. For a right-click that is the image under the
+        # cursor; for a keyboard-triggered menu the current image: the
+        # event position of a keyboard event is synthetic (`pos()` may be
+        # null, per the Qt docs), so `indexAt(event.pos())` would pick an
+        # arbitrary row — typically the first — instead of the one the
+        # user is working with.
+        if event.reason() == QContextMenuEvent.Reason.Mouse:
+            context_index = self.indexAt(event.pos())
+        else:
+            context_index = self.currentIndex()
         self._context_menu_image = (
             context_index.data(Qt.ItemDataRole.UserRole)
             if context_index.isValid() else None)
