@@ -17,6 +17,8 @@ models.
 - Description box for free-form, natural language image descriptions
 - Tags and descriptions stored in a local SQLite database by default (or in
   classic `.txt` caption files), so tags follow each image across folders
+- Duplicate file handling: byte-identical copies share one set of tags, with
+  an `n/k` indicator, a `Duplicates` filter, and a cleanup action
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
 - Batch tag operations for renaming, deleting, and sorting tags
 - Tagging near-identical (variant) images together, with a synchronized grid preview
@@ -456,6 +458,39 @@ The storage mode and the database location can be changed in
   usable, and your image files (and, in text-file storage mode, your `.txt`
   caption files) are not affected.
   Deleting the database file directly has the same effect on the stored data.
+
+## Duplicate files
+
+In database storage mode, an image's tags are tied to the **content** of the
+file (see [Tag and description storage](#tag-and-description-storage)).
+Among the loaded images, two or more files with **byte-for-byte identical
+content** are therefore duplicates of each other: they share one tag record,
+so they always show the same tags and description, and editing one copy
+updates the other copies automatically.
+(This is separate from [variant images](#tagging-variant-images), which are
+*near*-identical files that keep their own tags.)
+
+In text-file storage mode there are no duplicates: every file has its own
+caption file.
+
+TagGUI makes duplicates easy to spot and clean up:
+
+- **`n/k` indicator** — each duplicate image shows an amber `n/k` marker to
+  the right of its file name, where `n` is the position of that copy among
+  the duplicates and `k` is the total number of duplicate files (for example,
+  `2/3`). Hovering an image shows the same information, for example
+  "Duplicate: 2 of 3 files share these tags".
+- **`Duplicates` button** — in the `Images` pane, on the `Selection mode`
+  row. Click it to show only images that have at least one other loaded file
+  with identical content, and click it again to show everything.
+- **`Select Duplicates`** — right-click a duplicate image to select every
+  copy of it at once.
+- **`Delete Duplicate Files...`** — right-click an image while its selection
+  contains at least two copies of the same file. For each group of copies,
+  the current image (or the first selected copy, if it is not one of them)
+  is kept, and the rest — along with any `.txt` caption files next to them —
+  are moved to the trash. A confirmation dialog lists exactly which files
+  are kept and which are deleted.
 
 ## Acknowledgments
 
