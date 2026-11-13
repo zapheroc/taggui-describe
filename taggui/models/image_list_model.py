@@ -220,6 +220,15 @@ class ImageListModel(QAbstractListModel):
         # renamed tag to the tag(s) that replaced it, so the grouped tag panel
         # can keep the new name in the old tag's position.
         self.tag_renames: dict[str, list[str]] | None = None
+        # Batch-synchronization state (see `_begin_batch_sync`,
+        # `_finish_batch_rows` and `_sync_duplicate_images`). While a batch
+        # operation (e.g. `rename_tags`) saves its images in a loop,
+        # `_sync_duplicate_images` records the refreshed duplicate copies here
+        # instead of emitting a `dataChanged` for each; the operation then
+        # emits one combined `dataChanged` (and thus one tag recount) instead
+        # of one per touched duplicate group.
+        self._batch_depth = 0
+        self._deferred_sync_rows: list[int] = []
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
         # Thumbnails are generated on background threads so that image
@@ -516,8 +525,41 @@ class ImageListModel(QAbstractListModel):
                 changed_rows.append(row)
         if not changed_rows or self.is_restoring_history:
             return
+        if self._batch_depth:
+            # A batch operation is in progress: it will emit one combined
+            # `dataChanged` covering these refreshed copies (see
+            # `_finish_batch_rows`), so just record the rows for it instead of
+            # emitting -- every one of those emissions would trigger a full
+            # tag recount.
+            self._deferred_sync_rows.extend(changed_rows)
+            return
         self.dataChanged.emit(self.index(min(changed_rows)),
                               self.index(max(changed_rows)))
+
+    def _begin_batch_sync(self):
+        """
+        Enter batch-synchronization mode. The duplicate copies refreshed by
+        the saves that follow (see `_sync_duplicate_images`) are deferred
+        instead of each emitting its own `dataChanged`; end the mode with
+        `_finish_batch_rows`.
+        """
+        self._batch_depth += 1
+
+    def _finish_batch_rows(self, changed_rows: list[int]) -> tuple[int, int] | None:
+        """
+        End batch-synchronization mode. Combine the rows a batch operation
+        changed with the duplicate copies its saves refreshed (deferred by
+        `_sync_duplicate_images`), clear the deferred rows, and return their
+        overall (min, max) row so the operation can emit one `dataChanged`
+        over them. Return None when nothing changed.
+        """
+        all_rows = list(changed_rows)
+        all_rows.extend(self._deferred_sync_rows)
+        self._deferred_sync_rows = []
+        self._batch_depth = max(0, self._batch_depth - 1)
+        if not all_rows:
+            return None
+        return min(all_rows), max(all_rows)
 
     def set_storage(self, storage: ImageStorage):
         """
@@ -685,6 +727,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Find and Replace',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
@@ -707,15 +750,17 @@ class ImageListModel(QAbstractListModel):
             else:
                 image.tags = text.split(self.tag_separator)
             self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def sort_tags_alphabetically(self, do_not_reorder_first_tag: bool):
         """Sort the tags for each image in alphabetical order."""
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
@@ -729,9 +774,10 @@ class ImageListModel(QAbstractListModel):
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
                 self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def sort_tags_by_frequency(self, tag_counter: Counter,
                                do_not_reorder_first_tag: bool):
@@ -742,6 +788,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
@@ -757,15 +804,17 @@ class ImageListModel(QAbstractListModel):
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
                 self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def reverse_tags_order(self, do_not_reorder_first_tag: bool):
         """Reverse the order of the tags for each image."""
         self.add_to_undo_stack(action_name='Reverse Order of Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
@@ -775,15 +824,17 @@ class ImageListModel(QAbstractListModel):
             else:
                 image.tags = list(reversed(image.tags))
             self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def shuffle_tags(self, do_not_reorder_first_tag: bool):
         """Shuffle the tags for each image randomly."""
         self.add_to_undo_stack(action_name='Shuffle Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
@@ -795,9 +846,10 @@ class ImageListModel(QAbstractListModel):
             else:
                 random.shuffle(image.tags)
             self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def move_tags_to_front(self, tags_to_move: list[str]):
         """
@@ -806,6 +858,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Move Tags to Front',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if not any(tag in image.tags for tag in tags_to_move):
                 continue
@@ -820,9 +873,10 @@ class ImageListModel(QAbstractListModel):
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
                 self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     def remove_duplicate_tags(self) -> int:
         """
@@ -833,6 +887,7 @@ class ImageListModel(QAbstractListModel):
                                should_ask_for_confirmation=True)
         changed_image_indices = []
         removed_tag_count = 0
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             tag_count = len(image.tags)
             unique_tag_count = len(set(image.tags))
@@ -843,9 +898,10 @@ class ImageListModel(QAbstractListModel):
             # Use a dictionary instead of a set to preserve the order.
             image.tags = list(dict.fromkeys(image.tags))
             self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
         return removed_tag_count
 
     def remove_empty_tags(self) -> int:
@@ -857,6 +913,7 @@ class ImageListModel(QAbstractListModel):
                                should_ask_for_confirmation=True)
         changed_image_indices = []
         removed_tag_count = 0
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             old_tag_count = len(image.tags)
             image.tags = [tag for tag in image.tags if tag.strip()]
@@ -866,9 +923,10 @@ class ImageListModel(QAbstractListModel):
             changed_image_indices.append(image_index)
             removed_tag_count += old_tag_count - new_tag_count
             self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        rows = self._finish_batch_rows(changed_image_indices)
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
         return removed_tag_count
 
     def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
@@ -876,16 +934,22 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
-        self.dataChanged.emit(image_index, image_index)
+        self._begin_batch_sync()
         self.write_image_tags_to_disk(image)
+        rows = self._finish_batch_rows([image_index.row()])
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]), self.index(rows[1]))
 
     def update_image_description(self, image_index: QModelIndex, description: str):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.description == description:
             return
         image.description = description
-        self.dataChanged.emit(image_index, image_index)
+        self._begin_batch_sync()
         self.write_image_tags_to_disk(image)
+        rows = self._finish_batch_rows([image_index.row()])
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]), self.index(rows[1]))
 
     def _valid_indices(self, image_indices: list) -> list[QModelIndex]:
         """Drop indices that no longer point at an image (e.g. after the
@@ -914,6 +978,7 @@ class ImageListModel(QAbstractListModel):
         should_ask_for_confirmation = len(tags_by_index) > 1
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
         changed_indices = []
+        self._begin_batch_sync()
         for image_index, tags in tags_by_index:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
             # A tag that only differs in letter case from one the image
@@ -930,11 +995,14 @@ class ImageListModel(QAbstractListModel):
             self.write_image_tags_to_disk(image)
             changed_indices.append(image_index)
         if not changed_indices:
+            self._finish_batch_rows([])
             self.discard_last_undo_entry()
             return
-        min_image_index = min(changed_indices, key=lambda index: index.row())
-        max_image_index = max(changed_indices, key=lambda index: index.row())
-        self.dataChanged.emit(min_image_index, max_image_index)
+        rows = self._finish_batch_rows([index.row() for index in
+                                       changed_indices])
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     @Slot(list, list)
     def remove_tags_from_images(self, tags: list[str],
@@ -955,6 +1023,7 @@ class ImageListModel(QAbstractListModel):
         should_ask_for_confirmation = len(image_indices) > 1
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
         changed_indices = []
+        self._begin_batch_sync()
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
             if not any(tag in tags_to_remove for tag in image.tags):
@@ -964,11 +1033,14 @@ class ImageListModel(QAbstractListModel):
             self.write_image_tags_to_disk(image)
             changed_indices.append(image_index)
         if not changed_indices:
+            self._finish_batch_rows([])
             self.discard_last_undo_entry()
             return
-        min_image_index = min(changed_indices, key=lambda index: index.row())
-        max_image_index = max(changed_indices, key=lambda index: index.row())
-        self.dataChanged.emit(min_image_index, max_image_index)
+        rows = self._finish_batch_rows([index.row() for index in
+                                       changed_indices])
+        if rows is not None:
+            self.dataChanged.emit(self.index(rows[0]),
+                                  self.index(rows[1]))
 
     @Slot(str, str, list)
     def rename_tag_in_images(self, old_tag: str, new_tag: str,
@@ -997,6 +1069,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(
             action_name='Rename Tag',
             should_ask_for_confirmation=len(targets) > 1)
+        self._begin_batch_sync()
         for image_index in targets:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
             renamed = []
@@ -1004,10 +1077,10 @@ class ImageListModel(QAbstractListModel):
                 renamed.extend(new_tags if tag == old_tag else [tag])
             image.tags = list(dict.fromkeys(renamed))
             self.write_image_tags_to_disk(image)
-        min_image_index = min(targets, key=lambda index: index.row())
-        max_image_index = max(targets, key=lambda index: index.row())
-        self._emit_renamed(min_image_index, max_image_index,
-                           {old_tag: new_tags})
+        rows = self._finish_batch_rows([index.row() for index in targets])
+        if rows is not None:
+            self._emit_renamed(self.index(rows[0]), self.index(rows[1]),
+                               {old_tag: new_tags})
 
     def _emit_renamed(self, first_index: QModelIndex, last_index: QModelIndex,
                       renames: dict[str, list[str]]):
@@ -1036,6 +1109,7 @@ class ImageListModel(QAbstractListModel):
             should_ask_for_confirmation=True)
         changed_image_indices = []
         renames: dict[str, list[str]] = {}
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
@@ -1059,10 +1133,12 @@ class ImageListModel(QAbstractListModel):
             for old_tag in old_tags:
                 self._note_rename(renames, old_tag, [new_tag])
         if changed_image_indices:
-            self._emit_renamed(self.index(changed_image_indices[0]),
-                               self.index(changed_image_indices[-1]),
-                               renames)
+            rows = self._finish_batch_rows(changed_image_indices)
+            if rows is not None:
+                self._emit_renamed(self.index(rows[0]), self.index(rows[1]),
+                                   renames)
         else:
+            self._finish_batch_rows([])
             self.discard_last_undo_entry()
 
     @Slot(list)
@@ -1073,6 +1149,7 @@ class ImageListModel(QAbstractListModel):
             action_name=f'Delete {pluralize("Tag", len(tags))}',
             should_ask_for_confirmation=True)
         changed_image_indices = []
+        self._begin_batch_sync()
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
@@ -1092,7 +1169,10 @@ class ImageListModel(QAbstractListModel):
             changed_image_indices.append(image_index)
             self.write_image_tags_to_disk(image)
         if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            rows = self._finish_batch_rows(changed_image_indices)
+            if rows is not None:
+                self.dataChanged.emit(self.index(rows[0]),
+                                      self.index(rows[1]))
         else:
+            self._finish_batch_rows([])
             self.discard_last_undo_entry()
