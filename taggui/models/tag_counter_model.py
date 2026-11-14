@@ -74,3 +74,22 @@ class TagCounterModel(QAbstractListModel):
             self.tag_counter.update(image.tags)
         self.most_common_tags = self.tag_counter.most_common()
         self.endResetModel()
+
+    def apply_tag_delta(self, old_tags: list[str], new_tags: list[str]):
+        """
+        Update the tag counts for one image's tags changing (from
+        `old_tags` to `new_tags`) without recounting every image. Used for
+        the per-caption path, where a single image is updated and a full
+        recount would be O(all images x tags). Repeated tags are handled
+        per occurrence, exactly as `count_tags` does.
+        """
+        for tag in old_tags:
+            count = self.tag_counter[tag] - 1
+            if count:
+                self.tag_counter[tag] = count
+            else:
+                del self.tag_counter[tag]
+        self.tag_counter.update(new_tags)
+        self.beginResetModel()
+        self.most_common_tags = self.tag_counter.most_common()
+        self.endResetModel()

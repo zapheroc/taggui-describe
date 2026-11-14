@@ -996,6 +996,11 @@ class ImageViewer(QWidget):
         for proxy_index in window_indices:
             image: Image = self.proxy_image_list_model.data(
                 proxy_index, Qt.ItemDataRole.UserRole)
+            # `data()` returns None for an index that is invalid or that
+            # points past the end of the model (e.g. a stale index across a
+            # directory load); skip it rather than dereference it.
+            if image is None:
+                continue
             path_string = str(image.path)
             if path_string in seen:
                 continue
@@ -1139,6 +1144,11 @@ class ImageViewer(QWidget):
         for position, proxy_index in enumerate(window_indices):
             image: Image = self.proxy_image_list_model.data(
                 proxy_index, Qt.ItemDataRole.UserRole)
+            # `data()` returns None for an index that is invalid or that
+            # points past the end of the model (e.g. a stale index across a
+            # directory load); leave that cell out rather than dereference it.
+            if image is None:
+                continue
             is_marked = str(image.path) in self._grid_marked_paths
             if is_marked:
                 marked_count += 1

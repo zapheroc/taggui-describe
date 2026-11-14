@@ -1,12 +1,14 @@
 # Based on the PixAI Tagger v1.0 Hugging Face repository
 # (https://huggingface.co/pixai-labs/pixai-tagger-v1.0) and its
 # `tagger_pipeline.py`.
+import numpy as np
 import torch
 from transformers import AutoImageProcessor, AutoModel
 
 from auto_captioning.transformers_captioning_model import (
     TransformersCaptioningModel)
-from auto_captioning.models.wd_tagger import KAOMOJIS, get_tags_to_exclude
+from auto_captioning.models.wd_tagger import (KAOMOJIS, get_tags_to_exclude,
+                                               select_top_tags)
 from auto_captioning.settings_group import SettingGroup
 from auto_captioning.worker_context import WorkerContext
 from utils.image import Image
@@ -46,6 +48,9 @@ class PixAiTagger(TransformersCaptioningModel):
         self.tagger_settings = caption_settings['wd_tagger_settings']
         self.pixai_tagger_settings = caption_settings['pixai_tagger_settings']
         self.show_probabilities = self.tagger_settings['show_probabilities']
+        # The per-category thresholds feed `_pixai_thresholds`, so a settings
+        # change invalidates the cached arrays (they are rebuilt on next use).
+        self._pixai_thresholds_cache = None
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
@@ -73,7 +78,43 @@ class PixAiTagger(TransformersCaptioningModel):
         # no-op for the parameters (including 4-bit ones) and a no-op when
         # the model is on the CPU.
         model.to(self.device)
+        # Precomputed once here (not per image) for `generate_caption`: the
+        # transformed tag names in their original order (kaomoji kept, other
+        # underscores turned into spaces) and a name -> index map for fast
+        # exclusion. These depend only on the model config, so computing them
+        # once avoids a per-caption Python pass over every tag.
+        config = model.config
+        self.pixai_tags = [tag if tag in KAOMOJIS else tag.replace('_', ' ')
+                           for tag in config.tags]
+        self.pixai_name_to_index = {tag: index for index, tag in
+                                    enumerate(self.pixai_tags)}
+        self._pixai_thresholds_cache = None
         return model
+
+    def _pixai_thresholds(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        The per-tag `(covered, threshold)` arrays. A tag is covered when it
+        falls within a `tags_split` range; its threshold is the user's
+        per-category setting when present, else the model's recommended
+        threshold, else 0.0. Rebuilt only when the per-category settings
+        change (see `update_caption_settings`).
+        """
+        if self._pixai_thresholds_cache is not None:
+            return self._pixai_thresholds_cache
+        config = self.model.config
+        category_thresholds = config.category_best_threshold or {}
+        total = len(config.tags)
+        covered = np.zeros(total, dtype=bool)
+        thresholds = np.zeros(total, dtype=np.float64)
+        start = 0
+        for category, count in config.tags_split:
+            threshold = self.pixai_tagger_settings.get(
+                category, category_thresholds.get(category, 0.0))
+            covered[start:start + count] = True
+            thresholds[start:start + count] = threshold
+            start += count
+        self._pixai_thresholds_cache = (covered, thresholds)
+        return self._pixai_thresholds_cache
 
     def get_model_inputs(self, image_prompt: str, image: Image):
         # The processor handles resizing, square padding, and normalization,
@@ -87,41 +128,23 @@ class PixAiTagger(TransformersCaptioningModel):
                          image_prompt: str) -> tuple[str, str]:
         with torch.inference_mode():
             probabilities = (self.model(model_inputs['pixel_values'])
-                             .sigmoid()[0].cpu().tolist())
-        config = self.model.config
-        tags = config.tags
-        tags_split = config.tags_split
-        category_thresholds = config.category_best_threshold or {}
+                             .sigmoid()[0].cpu().numpy().astype(np.float32))
+        # A tag is included only if its probability is strictly greater than
+        # its category's threshold (see `_pixai_thresholds`).
+        covered, thresholds = self._pixai_thresholds()
+        keep = covered & (probabilities > thresholds)
+        # Exclude the configured tags (precomputed name -> index map).
         tags_to_exclude = get_tags_to_exclude(
             self.tagger_settings['tags_to_exclude'])
-        tags_and_probabilities = []
-        start = 0
-        for category, count in tags_split:
-            # Use the user-configured threshold for the category, falling
-            # back to the model's recommended threshold.
-            threshold = self.pixai_tagger_settings.get(
-                category, category_thresholds.get(category, 0.0))
-            for index in range(start, start + count):
-                probability = probabilities[index]
-                # A tag is included only if its probability is strictly
-                # greater than the category threshold.
-                if probability <= threshold:
-                    continue
-                tag = tags[index]
-                if tag not in KAOMOJIS:
-                    tag = tag.replace('_', ' ')
-                if tag in tags_to_exclude:
-                    continue
-                tags_and_probabilities.append((tag, probability))
-            start += count
-        # Sort the tags by probability.
-        tags_and_probabilities.sort(key=lambda x: x[1], reverse=True)
-        tags_and_probabilities = tags_and_probabilities[
-                                :self.tagger_settings['max_tags']]
-        if tags_and_probabilities:
-            tags, probabilities = zip(*tags_and_probabilities)
-        else:
-            tags, probabilities = (), ()
+        if tags_to_exclude:
+            for name in tags_to_exclude:
+                index = self.pixai_name_to_index.get(name)
+                if index is not None:
+                    keep[index] = False
+        # Keep the top tags by probability (descending, ties in tag order).
+        tags, probabilities = select_top_tags(
+            probabilities, keep, self.pixai_tags,
+            self.tagger_settings['max_tags'])
         caption = self.context.tag_separator.join(tags)
         if self.show_probabilities:
             console_output_caption = self.context.tag_separator.join(

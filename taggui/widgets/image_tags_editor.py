@@ -699,9 +699,13 @@ class ImageTagsEditor(QDockWidget):
         # On image load save the image reference for later use
         self.image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
-        # The image is None when the index is invalid (for example, when the
-        # model is reset while a directory is loading).
+        # The image is None when the index is invalid or out of range (for
+        # example, when the model is reset while a directory is loading).
+        # Drop the stale image index too, so a later `dataChanged` (which
+        # compares against `self.image_index.row()`) does not treat a row
+        # that no longer exists as the current image.
         if self.image is None:
+            self.image_index = None
             return
         self.set_image_tags()
         self.set_image_description()

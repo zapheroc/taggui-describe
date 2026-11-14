@@ -1,20 +1,36 @@
 # AGENTS.md
 
-Guidance for AI agents (and new developers) working on the TagGUI codebase.
+Guidance for AI agents (and new developers) working on the TagGUI-Describe codebase.
 
 Do not commit changes with git unless explicitly asked to do so.
 
 ## What this is
 
-TagGUI is a cross-platform desktop application written in Python + PySide6 (Qt 6).
-It loads a directory of images, reads/writes per-image `.txt` caption files, and
-provides fast keyboard-driven manual tagging (autocomplete, token counting,
-batch rename/delete/reorder, advanced filtering) plus automatic caption/tag
-generation using local AI models. Its target users are people building LoRA
-training datasets for image models (Stable Diffusion, Flux, Anima, etc.).
+TagGUI-Describe is a **fork** of TagGUI, a cross-platform desktop application
+written in Python + PySide6 (Qt 6). It loads a directory of images, reads/writes
+their tags and descriptions, and provides fast keyboard-driven manual tagging
+(autocomplete, token counting, batch rename/delete/reorder, advanced filtering)
+plus automatic caption/tag generation using local AI models. Its target users
+are people building LoRA training datasets for image models (Stable Diffusion,
+Flux, Anima, etc.).
 
-There is **no** web backend, database, test suite, CI, or package manifest
-(`pyproject.toml`/`setup.py`) — it is a plain script-based app.
+Fork additions over upstream TagGUI (the parts this doc covers that upstream
+does not):
+- A **pluggable storage layer** (`taggui/models/image_storage.py`): tags and
+  descriptions live either in per-image `.txt` caption files (the historical
+  format) or in a **local SQLite database keyed by the image's content hash**
+  (the default). The two are switchable in Settings, with migration in both
+  directions. See "Storage backends and the database" below.
+- **Duplicate-content awareness**: images with identical bytes share one
+  database record and are kept in sync, and a "Duplicates" filter lists them.
+- The **PixAI Tagger** (`pixai-labs/pixai-tagger-v1.0`) alongside the WD Tagger
+  as the fast "tagger" models (both vectorized — see "Performance notes").
+- A **multi-image grid preview** in the image viewer (variant grid).
+
+There is **no** web backend, CI, or package manifest
+(`pyproject.toml`/`setup.py`) — it is a plain script-based app. There is **no
+in-repo test suite**; the performance work was verified with a standalone suite
+in `/tmp/opencode/taggui-bench/scripts/test_fixes.py` (not part of the repo).
 
 ## Running it
 
@@ -61,6 +77,9 @@ taggui/widgets/image_list.py       Images pane; FilterLineEdit with the pyparsin
                                    filter grammar; image context menu actions
 taggui/widgets/image_tags_editor.py Tag pane: TagInputBox (autocomplete),
                                    tag list, token counter, description editor
+taggui/widgets/group_tags_panel.py Grouped tags view for multi-image
+                                   (variant) selections: every tag across the selection with a
+                                   k/N count badge, stable order, "Only differences" filter
 taggui/widgets/all_tags_editor.py  All Tags pane: click action, sort, rename,
                                    delete of tags across images
 taggui/widgets/auto_captioner.py   Auto-Captioner dock: settings form (per-model
@@ -69,10 +88,18 @@ taggui/widgets/auto_captioner.py   Auto-Captioner dock: settings form (per-model
 taggui/widgets/image_viewer.py     Full-resolution image display (background load)
 taggui/models/image_list_model.py  Core data model: Image list, directory load,
                                    undo/redo, ALL batch tag operations, disk I/O
+                                   (reads/writes go through the active storage
+                                   backend; syncs duplicate-content images)
+taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate
 taggui/models/proxy_image_list_model.py  Filter evaluation (recursive AST walk)
-taggui/models/tag_counter_model.py       Tag frequency counter (autocomplete source)
+taggui/models/tag_counter_model.py       Tag frequency counter (autocomplete source) + apply_tag_delta (incremental update)
 taggui/models/proxy_tag_counter_model.py Sorting/filtering for the All Tags list
 taggui/models/image_tag_list_model.py    QStringListModel for one image's tags
+taggui/models/image_export.py        Export Images: copy/symlink/hard-link the
+                                    image files into an output folder (unique
+                                    names) and write their caption files
+taggui/models/tag_suggestion_model.py  TagSuggestionModel: the (tag, count)
+                                    pairs behind the Add Tag box's completer
 taggui/auto_captioning/auto_captioning_model.py        ABC: prompt template vars,
                                    get_image_prompt, abstract hooks
 taggui/auto_captioning/transformers_captioning_model.py  Hugging Face backend
@@ -93,8 +120,9 @@ taggui/auto_captioning/models_list.py     MODELS list (combo box) +
                                    get_model_class(model_id) dispatch
 taggui/auto_captioning/models/*.py        One small subclass per model family
 taggui/auto_captioning/settings_group.py  SettingGroup enum (UI show/hide groups)
-taggui/dialogs/*.py                      Find & Replace, Batch Reorder, Settings,
-                                   multi-image caption confirmation dialogs
+taggui/dialogs/*.py                      Find & Replace, Batch Reorder, Settings
+                                   (storage backend + database path), Export Images,
+                                   Filter Help, multi-image caption confirmation dialogs
 taggui/utils/*.py                        Settings helpers, Image dataclass,
                                    enums, thumbnail generation, QSettings-backed
                                    widgets, small Qt utilities
@@ -107,26 +135,110 @@ dev_local/                               Gitignored local dev notes (if present)
 
 ## Core concepts
 
-### Data model and on-disk format
+### Data model
 
 - `Image` (in `taggui/utils/image.py`) is a plain dataclass:
   `path: Path`, `dimensions`, `tags: list[str]`, `description: str`,
-  `thumbnail`. `ImageListModel` (`taggui/models/image_list_model.py`) owns the
-  list, the undo/redo stacks, and all disk I/O.
-- Each image's tags live in a sibling `.txt` file with the same stem. Format:
-  `tags joined by the tag separator` + `"\n\n"` + `description`.
-  Read: `caption.partition('\n\n')` in `DirectoryLoadTask.run()`.
-  Write: `ImageListModel.write_image_tags_to_disk()`. Both use
-  `errors='replace'`. If you change the file format, update both sides.
-- The tag separator (default `,` + optional space) is read from QSettings via
-  `get_tag_separator()` **once at `ImageListModel` construction**. Changing it
-  in Settings requires an app restart (the Settings dialog warns about this).
+  `thumbnail`, plus the fork's `content_hash: str | None` (the stable blake2b
+  hash of the file's content — the key of the image's database record, set by
+  the storage backend when it loads the image; `None` in text-file mode),
+  `duplicate_count: int` (how many of the loaded images share this image's
+  content, itself included; set when the directory loads), and
+  `duplicate_position: int` (this copy's 1-based position among them).
+  `ImageListModel` (`taggui/models/image_list_model.py`) owns the list, the
+  undo/redo stacks, and all persistence — routed through the active storage
+  backend (see "Storage backends and the database").
 - `ImageListModel.data(index, Qt.ItemDataRole.UserRole)` returns the `Image`
   object itself — this is how all code gets image data.
 - `ImageListModel.proxy_image_list_model` and `.image_list_selection_model`
   are **back-references assigned in `MainWindow.__init__` after
   construction** (circular wiring; the model needs them for scope checks like
   "Filtered images" / "Selected images").
+- The tag separator (default `,` + optional space) is read from QSettings via
+  `get_tag_separator()` **once at `ImageListModel` construction** and captured
+  by both storage backends. Changing it in Settings requires an app restart
+  (the Settings dialog warns about this).
+- `Image` field order matters: `content_hash`, `duplicate_count`,
+  `duplicate_position` are trailing fields with defaults; keep new fields
+  after them if you add any.
+
+### Storage backends and the database
+
+Fork addition: tags and descriptions do not have to live in `.txt` files.
+`taggui/models/image_storage.py` is the pluggable storage layer:
+
+- `ImageStorage` (ABC): `load_image(image_path) -> (tags, description,
+  content_hash | None)` and `save_image(image)`.
+- `TextFileStorage` — the historical format: a `<stem>.txt` caption file next
+  to the image containing `tags joined by the tag separator` + `"\n\n"` +
+  `description`. Read/write use `errors='replace'`; a failed read must never
+  hide an image (return empty tags/description instead).
+- `SqliteStorage` (the **default**) — one SQLite database keyed by the image's
+  **content hash** (`compute_content_hash`, blake2b over 1 MiB chunks), so
+  identical images in different folders share one record and always show the
+  same tags. A fresh connection is opened per operation (the GUI thread and the
+  directory-load worker threads never share one); `PRAGMA foreign_keys = ON`
+  and `busy_timeout = 5000`; schema migrations run on connect, serialized by a
+  module-level lock (fresh first loads race on the DDL without it).
+- `get_storage_backend()` reads the `storage_backend` setting (`'sqlite'` |
+  `'text'`, default `'sqlite'`); `get_image_storage()` constructs the active
+  backend; `ImageListModel.set_storage()` switches it (called by
+  `MainWindow._apply_storage_backend` after a confirmed switch, which also
+  reloads the directory so the in-memory data comes from the new storage).
+
+**Schema** (v1; version tracked in `PRAGMA user_version`, future changes
+appended to `_MIGRATIONS`, each step in its own transaction, all DDL
+`IF NOT EXISTS` so concurrent first connections don't fail):
+
+- `images(hash TEXT PRIMARY KEY, description TEXT)` — one row per distinct
+  image content.
+- `tags(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)` — the
+  de-duplicated set of all tag names ever stored (case-sensitive, as in the
+  caption files).
+- `image_tags(image_hash REFERENCES images(hash) ON DELETE CASCADE,
+  tag_id REFERENCES tags(id), position INTEGER, PRIMARY KEY (image_hash,
+  position))` — which tags an image has, in order; index
+  `image_tags_tag_id` for tag → images lookups.
+
+**Semantics to preserve:**
+- `SqliteStorage.load_image` hashes the file, looks up the record. **When no
+  record exists, it imports a caption file into the database** (additive only —
+  never overwrites an existing record). This is the text → database import
+  path that runs on first load of each image.
+- `save_image` upserts via `_upsert_image`: update the description, replace
+  the image's `image_tags` rows, `INSERT OR IGNORE` the tag names. **Old tag
+  rows are never deleted** — every tag ever stored stays available as a tag
+  suggestion. Do not "clean up" the `tags` table; the suggestions rely on it.
+- Database failure (corrupted file, unreadable filesystem) degrades: loads
+  fall back to the caption file so images stay visible; saves retry against
+  the database and surface an error. A failed save must not sync the
+  duplicate copies to unsaved values (see `write_image_tags_to_disk`).
+- Helpers: `get_database_tag_names(db_path)` (all tag names, alphabetical —
+  feeds the tag suggestions), `clear_database(db_path)` (wipes records, keeps
+  the file and schema), `import_images(images, db_path)`,
+  `export_images_to_text_files(images, tag_separator)` (writes caption files
+  next to the images; used by `ImageListModel.export_loaded_images_to_text_files`
+  when switching to text-file storage), `migrate_database(old, new)` (moves
+  the DB file: copy, verify size + content hash, then delete the original — a
+  failed move never destroys the only copy).
+- Database location: the `database_path` setting, or the platform default
+  (Windows `%LOCALAPPDATA%/TagGUI-Describe/`, macOS
+  `~/Library/Application Support/TagGUI-Describe/`, Linux
+  `$XDG_DATA_HOME` or `~/.local/share`) with file name
+  `taggui-describe.sqlite3`.
+
+**Duplicate-content handling** (database mode): loaded images that share a
+content hash share one record; `ImageListModel._duplicate_index` maps each
+hash to its rows, and `_sync_duplicate_images` (called after every successful
+save via `write_image_tags_to_disk`) copies the saved tags/description to the
+other in-memory copies and emits `dataChanged` for them (suppressed while an
+undo/redo restore is in progress; deferred into the batch's combined
+`dataChanged` while a batch operation runs — see
+`_begin_batch_sync`/`_finish_batch_rows`). The image list shows an amber
+`n/k` indicator on duplicates, and the proxy model has a `filter_duplicates`
+toggle (shown only in database mode) that keeps images with
+`duplicate_count >= 2`; the context menu offers "Select Duplicates" and
+"Delete Duplicates…".
 
 ### Undo/redo and batch operations
 
@@ -137,21 +249,36 @@ dev_local/                               Gitignored local dev notes (if present)
 - The canonical batch-operation pattern (see `find_and_replace`,
   `rename_tags`, `delete_tags`, `sort_tags_*`, `move_tags_to_front`, etc. in
   `ImageListModel`):
-  1. `add_to_undo_stack(...)`
+  1. `add_to_undo_stack(...)` and `_begin_batch_sync()`
   2. Loop over `self.images`, skip images out of scope (`is_image_in_scope`)
   3. Mutate `image.tags` / `image.description`, call `write_image_tags_to_disk`
-     for changed images
-  4. Emit `dataChanged(self.index(min), self.index(max))` once at the end
+     for changed images (each save may also refresh the image's duplicate
+     copies; while the batch is active those refreshes are deferred instead of
+     each emitting their own `dataChanged`)
+  4. `_finish_batch_rows(changed_rows)` combines the changed rows with the
+     deferred duplicate-sync rows, then emit
+     `dataChanged(self.index(min), self.index(max))` **once** over them
 - `Scope` (`ALL_IMAGES` / `FILTERED_IMAGES` / `SELECTED_IMAGES`) and `Location`
   (`CAPTIONS` / `DESCRIPTIONS`) are defined in `image_list_model.py` and used
   by the dialogs.
-- `MainWindow.on_image_data_changed` recomputes the tag counter and reloads the
-  tag editor on any `dataChanged`, **except** when only the DecorationRole
-  (thumbnail) changed — keep that check working; thumbnails change for every
-  image.
 - Single-image edits flow through `update_image_tags` /
   `update_image_description` (both persist to disk) or via the tag editor's
   `QStringListModel` signals wired in `MainWindow.connect_image_tags_editor_signals`.
+  **The save happens before `dataChanged` is emitted** — listeners may read
+  the storage, so it must already reflect the new values.
+- `MainWindow.on_image_data_changed` is the **only** `dataChanged` handler
+  (direct, same-thread connection) and consumes the model's pending flags:
+  - thumbnail-only change (only `DecorationRole`) → do nothing (thumbnails
+    change for every image; keep this check working);
+  - `_pending_description_only` (set by `update_image_description`) → neither
+    recount nor suggestion refresh;
+  - `_pending_tag_delta = (old_tags, new_tags)` (set by `update_image_tags`)
+    and a single-row change → `TagCounterModel.apply_tag_delta(old, new)`
+    (incremental) + `update_tag_suggestions()`;
+  - otherwise (multi-row batch/undo, or no flag) → full `count_tags(images)`
+    + drop `_cached_database_tag_names` + `update_tag_suggestions()`.
+  Then it reloads the tag editor if the current image changed. **Do not add a
+  second `dataChanged` handler** — the flags are consumed here exactly once.
 
 ### Filtering (Images pane)
 
@@ -192,6 +319,14 @@ dev_local/                               Gitignored local dev notes (if present)
 - The auto-captioner's per-model settings (prompt, device, seed, temperature,
   ...) are also persisted this way, keyed by the widget key strings in
   `auto_captioner.py`.
+- Storage (fork): `storage_backend` (`'sqlite'` default, or `'text'`) and
+  `database_path` (`''` default = the platform default location, see
+  "Storage backends and the database"). Both are managed by the Settings
+  dialog (`taggui/dialogs/settings_dialog.py`), which emits
+  `storage_backend_change_requested` / `database_changed_requested` so
+  `MainWindow` can confirm/migrate/reload — the dialog itself only edits
+  settings; the switching logic lives in `MainWindow._apply_storage_backend`
+  and `on_database_changed`.
 - Settings that require a restart (font size, tag separator, image width, file
   formats, autocomplete, models directory) show a warning in the Settings
   dialog; new restart-required settings should too.
@@ -297,7 +432,8 @@ AutoCaptioningModel (ABC; auto_captioning_model.py)
 │   ├── Joycaption, Kosmos2, Llava1Point5, LlavaLlama3, LlavaNext*
 │   ├── Moondream1 / Moondream2
 │   ├── Phi3Vision
-│   └── WdTagger  (ONNX Runtime, not actually transformers — see below)
+│   ├── WdTagger   (ONNX Runtime, not actually transformers — see below)
+│   └── PixAiTagger (torch ViT-Det classifier — see below)
 └── LlamaCaptioningModel (llama_captioning_model.py)
     ├── Gemma4
     └── Qwen38
@@ -322,6 +458,24 @@ AutoCaptioningModel (ABC; auto_captioning_model.py)
   preprocessing, rating tags (category `9` in `selected_tags.csv`) are dropped,
   and `show_probabilities` only changes the console output. GPU use requires
   `onnxruntime-gpu` (CUDAExecutionProvider).
+- `PixAiTagger` (fork addition, `models/pixai_tagger.py`) is a plain image
+  **classifier** (ViT-Det, loaded via `AutoModel` with `trust_remote_code`),
+  not a text-to-text model: no prompt, `generate_caption` runs
+  `model(pixel_values).sigmoid()` over all tags. A tag is kept when its
+  probability is **strictly greater** than its category's threshold (the
+  per-category user setting, else the model's `category_best_threshold`, else
+  0.0; categories come from the config's `tags_split` ranges) — see
+  `_pixai_thresholds` (cached in `_pixai_thresholds_cache`, rebuilt on
+  `update_caption_settings`). Tag names get underscores → spaces (kaomoji in
+  the `KAOMOJIS` set kept as-is). `load_model` must call `model.to(device)`
+  after `from_pretrained`: the RoPE `freqs_cis` buffers are non-persistent and
+  would otherwise stay on the CPU, crashing the forward pass.
+- **Both taggers share the vectorized post-processing**
+  `select_top_tags(probabilities, keep, tag_names, max_tags)` in
+  `wd_tagger.py` (numpy boolean mask + stable `np.argsort` descending, ties in
+  tag order). The rating/exclude name→index maps are precomputed in
+  `__init__`/`load_model`. This was the "Fix 1" perf work — see
+  "Performance notes".
 
 ### The caption_settings dict contract
 
@@ -369,6 +523,74 @@ UI row with a `SettingGroup` if it should be user-visible.
   commas with `\,`); forced words use `|` for alternatives and require
   `num_beams > 1` (enforced by `get_error_message`).
 
+## Performance notes
+
+The captioning performance work was measured, fixed, and re-measured (Nov
+2026). All numbers live in `dev_local/perf_captioning_report.md`
+(**gitignored** — only present on some machines; read it if it exists), and
+the verified test suite is
+`/tmp/opencode/taggui-bench/scripts/test_fixes.py` (Parts A–D, 45 checks;
+not part of the repo, needs the repo + its venv on `sys.path`).
+
+### Worker side (per image)
+
+- **The model inference is the dominant per-image term** (~45 ms of a ~66 ms
+  total for WD Tagger at 1024² on GPU). An earlier draft of the report
+  claimed a ~47 ms "Python loop" — that was a measurement artifact:
+  `WdTaggerModel.generate_tags` calls `session.run(...)` as its first
+  statement, and the stage bench measured `generate_tags`, so inference was
+  double-counted (report §0).
+- The pure-Python post-processing loop was ~3 ms (WD, 10,861 tags) / ~8.8 ms
+  (PixAI, 30,877 tags) per image. After vectorizing to the shared
+  `select_top_tags` ("Fix 1", both taggers) it is ~0.3 ms / ~1.5 ms.
+- When benchmarking a tagger's "loop", **fake the inference** (monkeypatch
+  `InferenceSession.run` / the `model(pixel_values)` call) or you re-measure
+  inference.
+
+### GUI side (per caption) — the part that scaled with the dataset
+
+The old per-caption path was `count_tags` (full recount of **all** images) +
+`SELECT name FROM tags` over the **whole** database + merge/sort + completer
+update. It grew with both dataset and database size (19.9 ms at 20k images;
+37.5 ms at 20k images + a 50k-tag database). The current path ("Fixes 2 & 3"):
+
+- **Fix 2 — incremental tag counter.** `update_image_tags` /
+  `update_image_description` set the `_pending_tag_delta` /
+  `_pending_description_only` flags before emitting `dataChanged`; the only
+  `dataChanged` handler (`MainWindow.on_image_data_changed`) applies
+  `TagCounterModel.apply_tag_delta` for single-image changes and falls back to
+  a full `count_tags` for batches/undo. Description-only captions do **neither**
+  a recount nor a suggestion refresh.
+- **Fix 3 — cached database tag names.**
+  `MainWindow._cached_database_tag_names` is a **`list[str]`** (the
+  alphabetical `get_database_tag_names` result) — **a list, not a set**:
+  iterating a set of 50k names measured ~3× slower than the equivalent list
+  (23.4 ms vs 7.2 ms), and the earlier per-caption
+  `cached.update(local_names)` was redundant (the merge starts from the tag
+  counter, which holds the local names). The cache must be invalidated
+  (`= None`) in `_apply_storage_backend`, `on_database_changed`, and the
+  full-recount branch of `on_image_data_changed` — new places that can change
+  the stored tag set must do the same.
+
+Measured per-caption GUI chain (30 tags/image, idle machine): old 1.2–37.5 ms
+→ new **~0.2 ms (1k-tag DB) / ~6.8 ms (50k-tag DB)**, and **flat in image
+count** — the GUI side can no longer outrun the model.
+
+### Bench hygiene on this machine
+
+- The harness's `llama-server` (look up its PID; it holds ~23 GB of the RTX
+  3090's VRAM) saturates CPU **and** GPU while it generates — measurements
+  taken near it inflate 100–1000×. Bench only when a 1-second `/proc/stat`
+  sample shows the whole system at ~0.5% busy; `ps` `%CPU` is a lifetime
+  average and cannot be trusted for this.
+- Report the **minimum** over iterations: contention only inflates numbers.
+- Isolated XDG databases (the bench/test scripts point `XDG_DATA_HOME` at
+  `/tmp/opencode/taggui-bench/xdg-data/`) **persist across runs**, and the
+  database is keyed by **content hash**: byte-identical test images (e.g.
+  solid-color PNGs) collide with prior runs, so "updated" tags silently no-op
+  against the stale record. Delete the DB at test start or generate
+  `os.urandom` pixels per run.
+
 ## Recipe: adding a new captioning model
 
 1. Create `taggui/auto_captioning/models/<name>.py` with a small subclass:
@@ -390,9 +612,36 @@ UI row with a `SettingGroup` if it should be user-visible.
 
 ## Gotchas and known issues
 
-- **No tests.** Verify changes by running the GUI. The ML import chain is
-  loaded eagerly (`transformers`, `torch`, etc. are imported at module import
-  time in several files), so the GUI cannot run without the heavy deps.
+- **No in-repo tests.** Verify changes by running the GUI. The ML import
+  chain is loaded eagerly (`transformers`, `torch`, etc. are imported at
+  module import time in several files), so the GUI cannot run without the
+  heavy deps. The performance work was verified with a standalone suite
+  (`/tmp/opencode/taggui-bench/scripts/test_fixes.py`, not in the repo) —
+  re-run it after touching the taggers, the tag counter, or the
+  storage/suggestion paths.
+- **The database is keyed by content hash, not path.** Copying an image file
+  into the folder (or a byte-identical file in another folder) shares the
+  original's record and tags — that is a feature, but it means byte-identical
+  test images collide with prior runs (updates silently no-op against the
+  stale record), and "delete the file" does not remove the record (neither
+  should it; the record may belong to another copy).
+- **`_upsert_image` never deletes tag rows.** When an image loses a tag, the
+  `image_tags` row goes away but the `tags` name stays — by design, so every
+  tag ever stored remains a suggestion. Don't "clean up" the `tags` table.
+- **The pending-delta flags are consumed exactly once.**
+  `MainWindow.on_image_data_changed` is the only `dataChanged` handler and
+  reads/clears `_pending_tag_delta` / `_pending_description_only`; adding a
+  second handler (or emitting an extra `dataChanged` for the same edit) will
+  either re-run the full recount or drop the delta.
+- **`_cached_database_tag_names` must stay a `list`, not a `set`.** At 50k
+  tag names, iterating a set measured ~3× slower than the equivalent list
+  (see "Performance notes"), and any new code path that can change the stored
+  tag set must invalidate the cache (`= None`).
+- **Storage is captured at construction time.** `ImageListModel` and both
+  backends hold the `tag_separator` from when they were built, and switching
+  backends only takes effect after `set_storage` + directory reload
+  (`MainWindow._apply_storage_backend`); code that reads settings directly
+  instead of the active storage will see stale data after a switch.
 - **`self.device` only exists on the transformers backend.**
   `TransformersCaptioningModel.__init__` sets `self.device` (a `torch.device`);
   the llama-cpp backend has no such attribute. Never reference `self.device`

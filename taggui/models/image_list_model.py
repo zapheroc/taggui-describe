@@ -205,6 +205,19 @@ class ImageListModel(QAbstractListModel):
         # a bulk operation that ends up changing nothing can be fully undone
         # from the history. None when there is nothing to restore.
         self._last_undo_push = None
+        # (old_tags, new_tags) for the image most recently updated through
+        # `update_image_tags`, so the tag counter can apply that one image's
+        # change incrementally instead of recounting every image (see
+        # `MainWindow.on_image_data_changed`). Set right before the
+        # `dataChanged` is emitted and consumed (and cleared) by that slot;
+        # None when the most recent change did not come from
+        # `update_image_tags`.
+        self._pending_tag_delta: tuple[list[str], list[str]] | None = None
+        # True when the most recent change came from
+        # `update_image_description` (a description-only change, for which
+        # the tag counter needs no update at all). Same lifecycle as
+        # `_pending_tag_delta`.
+        self._pending_description_only = False
         # True only while restoring tags from the undo/redo history. Consumers
         # (e.g. the Common/Differences panel) use this to distinguish a genuine
         # new edit from a history restore, so an undone/redone tag returns to
@@ -265,7 +278,21 @@ class ImageListModel(QAbstractListModel):
         return len(self.images)
 
     def data(self, index, role=None) -> Image | str | QIcon | QSize:
-        image = self.images[index.row()]
+        # The index may be invalid or point past the end of `self.images`:
+        # the selection model and the proxy can briefly hold an index that
+        # was valid before a directory load reset the list (the load runs on
+        # background threads, so the reset and the deferred view re-syncs
+        # interleave). `data()` is a virtual called from C++, so it must
+        # never raise -- a Python exception escaping it aborts the process
+        # (a segfault). Callers already treat a `None` result as "no image"
+        # (e.g. `ImageTagsEditor.load_image_tags`), so return `None` for a
+        # bad index instead of indexing the list.
+        if index is None or not index.isValid():
+            return None
+        row = index.row()
+        if row < 0 or row >= len(self.images):
+            return None
+        image = self.images[row]
         if role == Qt.ItemDataRole.UserRole:
             return image
         if role == Qt.ItemDataRole.DisplayRole:
@@ -938,6 +965,12 @@ class ImageListModel(QAbstractListModel):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.tags == tags:
             return
+        # Remember the old and new tag lists so the tag counter can apply
+        # this image's change incrementally (see
+        # `MainWindow.on_image_data_changed`) instead of recounting every
+        # image for each caption.
+        self._pending_tag_delta = (list(image.tags), list(tags))
+        self._pending_description_only = False
         image.tags = tags
         # Save before emitting `dataChanged`: listeners (e.g. the tag
         # suggestions) may read the storage, so it must already reflect the
@@ -954,6 +987,10 @@ class ImageListModel(QAbstractListModel):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.description == description:
             return
+        # Description-only change: the tag counter needs no update (see
+        # `MainWindow.on_image_data_changed`).
+        self._pending_tag_delta = None
+        self._pending_description_only = True
         image.description = description
         # Save before emitting `dataChanged` (see `update_image_tags`).
         self._begin_batch_sync()
