@@ -88,12 +88,6 @@ def compute_content_hash(image_path: Path) -> str:
     The same bytes always produce the same hash, regardless of the file's
     name or location, so the database can identify an image by its content
     rather than its path.
-
-    xxh3-128 replaced the original blake2b because it is several times
-    faster to compute (measured ~3.5x on cold reads and ~7x on warm reads of
-    real images; `dev_local/perf_hash_thumbnails_report.md`). The hash
-    identifies file content for tag storage — it is not a security boundary —
-    and a 128-bit digest has no practical collision risk at dataset sizes.
     """
     hash_object = xxhash.xxh3_128()
     with open(image_path, 'rb') as image_file:
