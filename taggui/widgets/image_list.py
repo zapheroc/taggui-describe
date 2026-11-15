@@ -21,7 +21,6 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        infix_notation, nums, one_of, printables)
 
 from dialogs.filter_help_dialog import FilterHelpDialog
-from models.image_storage import get_storage_backend
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
@@ -901,11 +900,8 @@ class ImageList(QDockWidget):
         self.filter_duplicates_button.setCheckable(True)
         self.filter_duplicates_button.setToolTip(
             'Show only duplicate images')
-        # Duplicates can only be detected in database storage mode (by
-        # content hash), so the button starts hidden in text-file mode and
-        # the main window keeps it in sync when the backend changes.
-        self.filter_duplicates_button.setVisible(
-            get_storage_backend() == 'sqlite')
+        # Duplicates are detected by content hash in both storage modes, so
+        # the button is always visible.
         selection_mode_layout.addWidget(self.filter_duplicates_button)
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)

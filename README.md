@@ -18,8 +18,9 @@ models.
 - Description box for free-form, natural language image descriptions
 - Tags and descriptions stored in a local SQLite database by default (or in
   classic `.txt` caption files), so tags follow each image across folders
-- Duplicate file handling: byte-identical copies share one set of tags, with
-  an `n/k` indicator, a `Duplicates` filter, and a cleanup action
+- Duplicate file handling: byte-identical copies are detected in both
+  storage modes, with an `n/k` indicator, a `Duplicates` filter, and a
+  cleanup action
 - Background-generated thumbnails with an on-disk cache, so re-opening a
   folder is fast
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
@@ -29,7 +30,7 @@ models.
 
 ## Installation
 
-This fork does not publish prebuilt releases, so you install it by running it
+This fork does not yet publish prebuilt releases, so you install it by running it
 from source.
 
 ### 1. Install Python
@@ -131,8 +132,10 @@ A few details worth knowing:
 - The cache is a disposable optimization.
   Every entry can always be regenerated from the original image, so clearing
   the cache is always safe.
-- In **text-file storage mode** the on-disk cache is skipped, and thumbnails
-  are always generated fresh from the image files.
+- The cache works in **both storage modes**. In text-file mode the database
+  is used only for the content hashes that key the cache (never for the tags
+  or description, which stay in the caption files) — so the database
+  location matters in text-file mode, too.
 
 The cache is stored in your platform's cache directory:
 
@@ -544,6 +547,10 @@ The storage mode and the database location can be changed in
   the currently loaded images into the database — or writes them to caption
   files, when switching to text files — overwriting the existing data for
   those images.
+  Note that even in text-file mode the same database is still used: to cache
+  the content hashes of your images, which key the thumbnail cache and drive
+  [duplicate detection](#duplicate-files).
+  Your tags and description never touch it in that mode.
 - **`Database location`** — by default, the database is created at:
   - Linux: `~/.local/share/taggui-describe/taggui-describe.sqlite3`
   - Windows: `%LOCALAPPDATA%\TagGUI-Describe\taggui-describe.sqlite3`
@@ -579,17 +586,23 @@ Images with no tags and no description do not get a caption file.
 
 ## Duplicate files
 
-In database storage mode, an image's tags are tied to the **content** of the
-file (see [Tag and description storage](#tag-and-description-storage)).
-Among the loaded images, two or more files with **byte-for-byte identical
-content** are therefore duplicates of each other: they share one tag record,
-so they always show the same tags and description, and editing one copy
-updates the other copies automatically.
+TagGUI detects duplicates in **both storage modes**: among the loaded images,
+two or more files with **byte-for-byte identical content** are duplicates of
+each other.
 (This is separate from [variant images](#tagging-variant-images), which are
 *near*-identical files that keep their own tags.)
 
-In text-file storage mode there are no duplicates: every file has its own
-caption file.
+What duplicates do depends on the storage mode:
+
+- In **database storage mode** the copies share one tag record (tags are tied
+  to the **content** of the file — see [Tag and description
+  storage](#tag-and-description-storage)), so they always show the same tags
+  and description, and editing one copy updates the other copies
+  automatically.
+- In **text-file storage mode** each copy keeps its own caption file, so the
+  copies do not follow each other automatically.
+  To apply a tag change to all copies, use `Select Duplicates` and then any
+  batch operation on the selection.
 
 TagGUI makes duplicates easy to spot and clean up:
 
@@ -597,7 +610,7 @@ TagGUI makes duplicates easy to spot and clean up:
   the right of its file name, where `n` is the position of that copy among
   the duplicates and `k` is the total number of duplicate files (for example,
   `2/3`). Hovering an image shows the same information, for example
-  "Duplicate: 2 of 3 files share these tags".
+  "Duplicate: 2 of 3 files have identical content".
 - **`Duplicates` button** — an icon of two overlapping images, in the
   `Images` pane, on the `Selection mode` row. Click it to show only images
   that have at least one other loaded file with identical content, and click

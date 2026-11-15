@@ -372,6 +372,31 @@ def _buffer_hash_cache_row(connection: sqlite3.Connection, image_path: Path,
         _flush_hash_cache_buffer(connection)
 
 
+def _flush_hash_cache(db_path: Path) -> None:
+    """
+    Write the `hash_cache` rows buffered during a directory load (see
+    `_flush_hash_cache_buffer`).
+
+    Runs on the GUI thread after all the worker tasks of a load have
+    finished, using a fresh connection so it never shares one with a
+    still-live load worker thread. The buffer is module-global, so this
+    drains rows from any in-flight load too — safe, because the rows are
+    content-addressed and `INSERT OR REPLACE` is idempotent. A failed write
+    leaves the rows queued (see `_flush_hash_cache_buffer`) and is not
+    raised here: the load has already succeeded, and the rows are derived
+    data.
+    """
+    with _hash_cache_pending_lock:
+        pending = len(_hash_cache_pending) > 0
+    if not pending:
+        return
+    connection = _connect(db_path)
+    try:
+        _flush_hash_cache_buffer(connection)
+    finally:
+        connection.close()
+
+
 def _resolve_content_hash(connection: sqlite3.Connection, image_path: Path,
                           file_stat: os.stat_result) -> str:
     """
@@ -405,11 +430,19 @@ def _resolve_content_hash(connection: sqlite3.Connection, image_path: Path,
 class ImageStorage(ABC):
     """Read and write the tags and descriptions of the loaded images."""
 
+    # Whether files with identical content share their stored tags and
+    # description (database mode: one record per content; text-file mode:
+    # each file has its own caption file).
+    shared_content_records: bool = False
+
     @abstractmethod
     def load_image(self, image_path: Path) -> tuple[list[str], str, str | None]:
         """
-        Load the tags, description and (when applicable) content hash of one
-        image.
+        Load the tags, description and content hash of one image.
+
+        The content hash is None when it could not be resolved (for example
+        when the database holding the hash cache is unavailable); the image
+        must still load.
         """
 
     @abstractmethod
@@ -429,18 +462,51 @@ class TextFileStorage(ImageStorage):
     """
     Store each image's tags and description in a caption file
     (`<stem>.txt`) next to the image, the historical TagGUI format.
+
+    The tags and description never touch the database. The content hash of
+    each image is still resolved on load (and cached in the database's
+    `hash_cache` table), because it keys the on-disk thumbnail cache and
+    drives the duplicate-content detection.
     """
 
-    def __init__(self, tag_separator: str):
+    def __init__(self, tag_separator: str, db_path: Path):
         self.tag_separator = tag_separator
+        self.db_path = db_path
 
     def load_image(self, image_path: Path) -> tuple[list[str], str, str | None]:
+        # The caption file first: the tags and description must load even
+        # when the database (hash cache) is unavailable.
         tags, description = read_caption_file(image_path, self.tag_separator)
-        return tags, description, None
+        try:
+            file_stat = image_path.stat()
+        except OSError as exception:
+            print(f'Failed to read {image_path}: {exception}',
+                  file=sys.stderr)
+            return tags, description, None
+        try:
+            connection = _connect_reusable(self.db_path)
+            content_hash = _resolve_content_hash(
+                connection, image_path, file_stat)
+        except (OSError, sqlite3.Error) as exception:
+            # The database is unavailable (corrupted file, unwritable
+            # location, ...): the image still loads, and its thumbnail is
+            # simply not cached (the cache is keyed by the content hash,
+            # which could not be resolved).
+            print(f'Failed to resolve the content hash of {image_path}: '
+                  f'{exception}', file=sys.stderr)
+            content_hash = None
+        return tags, description, content_hash
 
     def save_image(self, image: Image) -> None:
         write_caption_file(image.path, image.tags, image.description,
                            self.tag_separator)
+
+    def flush_hash_cache(self) -> None:
+        """
+        Write the `hash_cache` rows buffered during the directory load
+        (see `_flush_hash_cache`).
+        """
+        _flush_hash_cache(self.db_path)
 
 
 class SqliteStorage(ImageStorage):
@@ -457,6 +523,8 @@ class SqliteStorage(ImageStorage):
     connection per thread (`_connect_reusable`); saves keep using fresh
     connections.
     """
+
+    shared_content_records = True
 
     def __init__(self, db_path: Path, tag_separator: str):
         self.db_path = db_path
@@ -531,26 +599,10 @@ class SqliteStorage(ImageStorage):
 
     def flush_hash_cache(self) -> None:
         """
-        Write the `hash_cache` rows buffered during the directory load.
-
-        Called by the model when a load completes (GUI thread, after all
-        the worker tasks have finished), using a fresh connection so it
-        never shares one with a still-live load worker thread. The buffer
-        is module-global, so this drains rows from any in-flight load too —
-        safe, because the rows are content-addressed and `INSERT OR
-        REPLACE` is idempotent. A failed write leaves the rows queued (see
-        `_flush_hash_cache_buffer`) and is not raised here: the load has
-        already succeeded, and the rows are derived data.
+        Write the `hash_cache` rows buffered during the directory load
+        (see `_flush_hash_cache`).
         """
-        with _hash_cache_pending_lock:
-            pending = len(_hash_cache_pending) > 0
-        if not pending:
-            return
-        connection = _connect(self.db_path)
-        try:
-            _flush_hash_cache_buffer(connection)
-        finally:
-            connection.close()
+        _flush_hash_cache(self.db_path)
 
 
 def clear_database(db_path: Path) -> int:
@@ -661,6 +713,10 @@ def get_image_storage() -> ImageStorage:
     The storage backend that matches the current settings.
     """
     tag_separator = get_tag_separator()
+    database_path = get_database_path()
     if get_storage_backend() == 'sqlite':
-        return SqliteStorage(get_database_path(), tag_separator)
-    return TextFileStorage(tag_separator)
+        return SqliteStorage(database_path, tag_separator)
+    # Text-file mode uses the same database for the content hashes that key
+    # the thumbnail cache and drive duplicate detection (never for the tags
+    # or description, which stay in the caption files).
+    return TextFileStorage(tag_separator, database_path)

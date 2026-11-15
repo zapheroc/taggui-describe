@@ -472,8 +472,6 @@ class MainWindow(QMainWindow):
         """
         self.settings.setValue('storage_backend', new_mode)
         self.image_list_model.set_storage(get_image_storage())
-        # The Duplicates filter only works with the database backend.
-        self._set_duplicates_filter_visible(new_mode == 'sqlite')
         # Reload the directory (if one is loaded) so that the in-memory
         # tags and descriptions come from the new storage. Without this, the
         # data that was loaded from the old storage would keep being
@@ -800,24 +798,6 @@ class MainWindow(QMainWindow):
                 self.proxy_image_list_model.index(0, 0))
         self.image_list.update_image_index_label(
             self.image_list.list_view.currentIndex())
-
-    def _set_duplicates_filter_visible(self, visible: bool):
-        """
-        Show or hide the Duplicates filter button. It only works in database
-        storage mode, where duplicates are detected by content hash, so it
-        is hidden in text-file storage mode; the filter is cleared first if
-        it was on.
-        """
-        button = self.image_list.filter_duplicates_button
-        if not visible and button.isChecked():
-            # The filter is not functional in the new storage mode: clear
-            # it so the image list shows all images again.
-            button.blockSignals(True)
-            button.setChecked(False)
-            button.blockSignals(False)
-            self.proxy_image_list_model.filter_duplicates = False
-            self.proxy_image_list_model.invalidateFilter()
-        button.setVisible(visible)
 
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):

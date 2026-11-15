@@ -18,7 +18,8 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.filter: list | None = None
         # Set by the "Duplicates" toggle button below the filter line edit:
         # when true, only images with at least one other loaded file with
-        # the same content are shown (content-based, so database mode only).
+        # the same content are shown (content-based, so it works in both
+        # storage modes).
         self.filter_duplicates: bool = False
 
     def does_image_match_filter(self, image: Image,

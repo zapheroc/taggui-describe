@@ -21,8 +21,10 @@ does not):
   format) or in a **local SQLite database keyed by the image's content hash**
   (the default). The two are switchable in Settings, with migration in both
   directions. See "Storage backends and the database" below.
-- **Duplicate-content awareness**: images with identical bytes share one
-  database record and are kept in sync, and a "Duplicates" filter lists them.
+- **Duplicate-content awareness**: images with identical bytes are detected
+  in both storage modes (`n/k` indicator, "Duplicates" filter,
+  Select/Delete Duplicates); in database mode they additionally share one
+  database record and are kept in sync.
 - The **PixAI Tagger** (`pixai-labs/pixai-tagger-v1.0`) alongside the WD Tagger
   as the fast "tagger" models (both vectorized — see "Performance notes").
 - A **multi-image grid preview** in the image viewer (variant grid).
@@ -141,8 +143,9 @@ dev_local/                               Gitignored local dev notes (if present)
   `path: Path`, `dimensions`, `tags: list[str]`, `description: str`,
   `thumbnail`, plus the fork's `content_hash: str | None` (the stable
   xxh3-128 hash of the file's content — the key of the image's database
-  record, set by the storage backend when it loads the image; `None` in
-  text-file mode),
+  record, set by the storage backend when it loads the image; in text-file
+  mode it still keys the on-disk thumbnail cache and drives the duplicate
+  detection; `None` only when the hash could not be resolved),
   `duplicate_count: int` (how many of the loaded images share this image's
   content, itself included; set when the directory loads), and
   `duplicate_position: int` (this copy's 1-based position among them).
@@ -169,11 +172,21 @@ Fork addition: tags and descriptions do not have to live in `.txt` files.
 `taggui/models/image_storage.py` is the pluggable storage layer:
 
 - `ImageStorage` (ABC): `load_image(image_path) -> (tags, description,
-  content_hash | None)` and `save_image(image)`.
+  content_hash | None)` and `save_image(image)`; the class attribute
+  `shared_content_records` (True only on `SqliteStorage`) tells the model
+  whether duplicate copies share a storage record.
 - `TextFileStorage` — the historical format: a `<stem>.txt` caption file next
   to the image containing `tags joined by the tag separator` + `"\n\n"` +
   `description`. Read/write use `errors='replace'`; a failed read must never
-  hide an image (return empty tags/description instead).
+  hide an image (return empty tags/description instead). It also resolves
+  each image's content hash on load through the database's `hash_cache`
+  machinery (`_connect_reusable` + `_resolve_content_hash`, buffered and
+  written by `flush_hash_cache`), so the thumbnail cache and duplicate
+  detection work in text-file mode — but it **never reads or writes the
+  `images`/`tags`/`image_tags` record tables** (see the D1 gotcha below).
+  `database_path` therefore matters in text-file mode too; an unusable
+  database degrades to "cache skipped" (`content_hash=None`), never to
+  "image hidden".
 - `SqliteStorage` (the **default**) — one SQLite database keyed by the image's
   **content hash** (`compute_content_hash`, xxh3-128 over 1 MiB chunks —
   switched from blake2b for speed, `dev_local/perf_hash_thumbnails_report.md`),
@@ -273,18 +286,23 @@ appended to `_MIGRATIONS`, each step in its own transaction, all DDL
   `$XDG_DATA_HOME` or `~/.local/share`) with file name
   `taggui-describe.sqlite3`.
 
-**Duplicate-content handling** (database mode): loaded images that share a
-content hash share one record; `ImageListModel._duplicate_index` maps each
-hash to its rows, and `_sync_duplicate_images` (called after every successful
-save via `write_image_tags_to_disk`) copies the saved tags/description to the
-other in-memory copies and emits `dataChanged` for them (suppressed while an
+**Duplicate-content handling** (both storage modes): loaded images that share
+a content hash form a duplicate group; `ImageListModel._duplicate_index` maps
+each hash to its rows. The image list shows an amber `n/k` indicator on
+duplicates, the proxy model has a `filter_duplicates` toggle (always visible;
+it keeps images with `duplicate_count >= 2`), and the context menu offers
+"Select Duplicates" and "Delete Duplicates…".
+In database mode the copies share one record, so
+`_sync_duplicate_images` (called after every successful save via
+`write_image_tags_to_disk`) copies the saved tags/description to the other
+in-memory copies and emits `dataChanged` for them (suppressed while an
 undo/redo restore is in progress; deferred into the batch's combined
 `dataChanged` while a batch operation runs — see
-`_begin_batch_sync`/`_finish_batch_rows`). The image list shows an amber
-`n/k` indicator on duplicates, and the proxy model has a `filter_duplicates`
-toggle (shown only in database mode) that keeps images with
-`duplicate_count >= 2`; the context menu offers "Select Duplicates" and
-"Delete Duplicates…".
+`_begin_batch_sync`/`_finish_batch_rows`). In text-file mode the copies each
+have their own caption file, so that sync is skipped by the
+`shared_content_records` guard at the top of `_sync_duplicate_images` —
+"tag all copies" is done via "Select Duplicates" + a batch operation on the
+selection.
 
 ### Undo/redo and batch operations
 
@@ -674,6 +692,14 @@ count** — the GUI side can no longer outrun the model.
 - **`_upsert_image` never deletes tag rows.** When an image loses a tag, the
   `image_tags` row goes away but the `tags` name stays — by design, so every
   tag ever stored remains a suggestion. Don't "clean up" the `tags` table.
+- **D1 — text-file mode must never create record rows.** `TextFileStorage`
+  may only read the `hash_cache` table and buffer/flush `hash_cache` rows
+  (derived data); it must never touch `images`/`tags`/`image_tags`.
+  `SqliteStorage.load_image` imports caption files *additively only* — an
+  existing record is never re-imported — so any record created in text mode
+  (even an empty one) would silently block the caption import on a later
+  switch to database mode, dropping the `.txt` tags from the database view.
+  Guarded by the regression suite (`test_text_mode_cache.py` T2/T3/T9/T10).
 - **The pending-delta flags are consumed exactly once.**
   `MainWindow.on_image_data_changed` is the only `dataChanged` handler and
   reads/clears `_pending_tag_delta` / `_pending_description_only`; adding a

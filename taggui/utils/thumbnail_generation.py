@@ -59,10 +59,11 @@ class ThumbnailGenerationTask(QRunnable):
         self.generation = generation
         self.worker = worker
         self.registry = registry
-        # The image's content hash (database mode only): the key of its
-        # on-disk thumbnail cache entry. None in text-file mode, where the
-        # cache is skipped (the cache is keyed by content, which text-file
-        # mode does not compute).
+        # The image's content hash: the key of its on-disk thumbnail cache
+        # entry. Both storage modes resolve it on load (in text-file mode
+        # from the database's hash cache), so the cache works in both; None
+        # only when it could not be resolved, in which case the cache is
+        # skipped.
         self.content_hash = content_hash
         registry.add(self)
 

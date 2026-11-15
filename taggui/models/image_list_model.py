@@ -194,11 +194,12 @@ class ImageListModel(QAbstractListModel):
         self.storage = get_image_storage()
         self.images: list[Image] = []
         # Content hash -> the rows of the loaded images sharing it, for groups
-        # of two or more images only. In database mode the storage record is
-        # keyed by the image's content, so such a group is a set of duplicates
-        # sharing one record: a save to one must be reflected in the in-memory
-        # copies of the others (see `_sync_duplicate_images`). Rebuilt on
-        # every directory load.
+        # of two or more images only. Both storage modes detect duplicates this
+        # way (by content). In database mode the storage record is keyed by the
+        # image's content, so a save to one copy must be reflected in the
+        # in-memory copies of the others (see `_sync_duplicate_images`); in
+        # text-file mode each copy has its own caption file, so the copies are
+        # never synced. Rebuilt on every directory load.
         self._duplicate_index: dict[str, list[int]] = {}
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
@@ -318,7 +319,8 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{self.tag_separator.join(image.tags)}'
             if image.duplicate_count > 1:
                 text += (f'\nDuplicate: {image.duplicate_position} of '
-                         f'{image.duplicate_count} files share these tags')
+                         f'{image.duplicate_count} files have '
+                         f'identical content')
             return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail, if it has been generated yet. Thumbnails are
@@ -548,7 +550,18 @@ class ImageListModel(QAbstractListModel):
         while an undo/redo restore is in progress: the restore's own final
         `dataChanged` covers the refreshed copies, and an intermediate
         refresh would disturb the grouped tag panel's order bookkeeping.
+
+        In text-file mode the copies each have their own caption file and do
+        not share a record, so a save to one must not change the in-memory
+        values of the others — they would then disagree with their file on
+        disk. To apply a tag change to all copies, select the duplicates and
+        run a batch operation on the selection.
         """
+        if not self.storage.shared_content_records:
+            # Text-file mode: the copies do not share a storage record (each
+            # has its own caption file), so skip the sync (see the
+            # `shared_content_records` attribute on the storage backends).
+            return
         rows = self._duplicate_index.get(image.content_hash)
         if not rows:
             return

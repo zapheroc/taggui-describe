@@ -151,6 +151,10 @@ class SettingsDialog(QDialog):
                 update_grid_overlay_sub_settings_enabled(
                     show_grid_overlay_check_box.isChecked()),
                 self.variant_grid_overlay_settings_changed.emit()))
+        # In text-file mode the tags and descriptions stay in the caption
+        # files, but the same database is still used for the content hashes
+        # that key the thumbnail cache and drive the duplicate detection
+        # (see `TextFileStorage`).
         self.storage_backend_combo = QComboBox()
         self.storage_backend_combo.addItem('SQLite database', 'sqlite')
         self.storage_backend_combo.addItem('Text files next to images', 'text')
