@@ -23,7 +23,9 @@ from models.image_storage import (ImageStorage,
                                    import_images)
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
-from utils.thumbnail_generation import (ThumbnailGenerationTask,
+from utils.thumbnail_cache import get_max_cache_bytes
+from utils.thumbnail_generation import (ThumbnailCacheEvictionTask,
+                                        ThumbnailGenerationTask,
                                         ThumbnailGenerationWorker)
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
@@ -266,6 +268,12 @@ class ImageListModel(QAbstractListModel):
         # Strong references to running tasks so that they are not garbage
         # collected while the thread pools still reference them.
         self._running_tasks: set = set()
+        # The on-disk thumbnail cache may hold entries from earlier sessions
+        # (see `thumbnail_cache.py`); evict the least recently used ones
+        # past the configured size limit, on a background thread so the
+        # startup does not block on it.
+        self.thumbnail_thread_pool.start(ThumbnailCacheEvictionTask(
+            get_max_cache_bytes(), self._running_tasks))
         # When the application is about to quit, give the background tasks a
         # bounded chance to finish so that the thread pools are not destroyed
         # while worker threads are still running tasks (which makes Qt report
@@ -439,7 +447,8 @@ class ImageListModel(QAbstractListModel):
         for row, image in enumerate(self.images):
             task = ThumbnailGenerationTask(
                 row, image.path, self.image_list_image_width, generation,
-                self.thumbnail_worker, self._running_tasks)
+                self.thumbnail_worker, self._running_tasks,
+                image.content_hash)
             self.thumbnail_thread_pool.start(task)
 
     @Slot(int, QImage, int)

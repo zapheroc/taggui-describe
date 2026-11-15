@@ -139,9 +139,10 @@ dev_local/                               Gitignored local dev notes (if present)
 
 - `Image` (in `taggui/utils/image.py`) is a plain dataclass:
   `path: Path`, `dimensions`, `tags: list[str]`, `description: str`,
-  `thumbnail`, plus the fork's `content_hash: str | None` (the stable blake2b
-  hash of the file's content — the key of the image's database record, set by
-  the storage backend when it loads the image; `None` in text-file mode),
+  `thumbnail`, plus the fork's `content_hash: str | None` (the stable
+  xxh3-128 hash of the file's content — the key of the image's database
+  record, set by the storage backend when it loads the image; `None` in
+  text-file mode),
   `duplicate_count: int` (how many of the loaded images share this image's
   content, itself included; set when the directory loads), and
   `duplicate_position: int` (this copy's 1-based position among them).
@@ -174,9 +175,10 @@ Fork addition: tags and descriptions do not have to live in `.txt` files.
   `description`. Read/write use `errors='replace'`; a failed read must never
   hide an image (return empty tags/description instead).
 - `SqliteStorage` (the **default**) — one SQLite database keyed by the image's
-  **content hash** (`compute_content_hash`, blake2b over 1 MiB chunks), so
-  identical images in different folders share one record and always show the
-  same tags. Computed hashes are cached in the database (schema v3
+  **content hash** (`compute_content_hash`, xxh3-128 over 1 MiB chunks —
+  switched from blake2b for speed, `dev_local/perf_hash_thumbnails_report.md`),
+  so identical images in different folders share one record and always show
+  the same tags. Computed hashes are cached in the database (schema v3
   `hash_cache`, keyed by path + size + mtime_ns + ctime_ns + inode — see
   "Schema"), so re-opening a folder whose files are unchanged does not
   re-hash them. The directory-load path reuses one connection per worker

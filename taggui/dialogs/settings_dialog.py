@@ -11,7 +11,8 @@ from models.image_storage import (clear_database, get_database_path,
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox)
-from utils.utils import pluralize
+from utils.thumbnail_cache import clear_cache, get_cache_size_bytes
+from utils.utils import get_confirmation_dialog_reply, pluralize
 
 
 class SettingsDialog(QDialog):
@@ -194,6 +195,15 @@ class SettingsDialog(QDialog):
         clear_database_button.setFixedWidth(
             int(clear_database_button.sizeHint().width() * 1.3))
         clear_database_button.clicked.connect(self.handle_clear_database)
+        thumbnail_cache_max_size_spin_box = SettingsSpinBox(
+            key='thumbnail_cache_max_size_mb',
+            default=DEFAULT_SETTINGS['thumbnail_cache_max_size_mb'],
+            minimum=64, maximum=1024 * 1024)
+        clear_thumbnail_cache_button = QPushButton('Clear Thumbnail Cache...')
+        clear_thumbnail_cache_button.setFixedWidth(
+            int(clear_thumbnail_cache_button.sizeHint().width() * 1.3))
+        clear_thumbnail_cache_button.clicked.connect(
+            self.handle_clear_thumbnail_cache)
         self._update_storage_rows_enabled()
         # The database location that is currently active. Used so that the
         # same location is not migrated again on repeated commits.
@@ -263,6 +273,13 @@ class SettingsDialog(QDialog):
         grid_layout.addLayout(location_buttons, 17, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(clear_database_button, 18, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(
+            QLabel('Thumbnail cache max size (MB)'), 19, 0,
+            Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(thumbnail_cache_max_size_spin_box, 19, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(clear_thumbnail_cache_button, 20, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 
@@ -524,3 +541,26 @@ class SettingsDialog(QDialog):
         # (now deleted) tags and descriptions. Ask the main window to reload
         # the directory so they are cleared from the display too.
         self.database_changed_requested.emit()
+
+    @Slot()
+    def handle_clear_thumbnail_cache(self):
+        """
+        Delete all cached thumbnails. The cache is derived data — every
+        entry is regenerated from its image when next shown — so only the
+        cache files are touched, and the running image list keeps the
+        thumbnails it has already displayed.
+        """
+        if get_cache_size_bytes() == 0:
+            QMessageBox.information(
+                self, 'Clear Thumbnail Cache', 'The thumbnail cache is empty.')
+            return
+        reply = get_confirmation_dialog_reply(
+            'Clear Thumbnail Cache',
+            'Delete all cached thumbnails? They will be regenerated as '
+            'needed the next time their images are shown.')
+        if reply == QMessageBox.StandardButton.Yes:
+            cleared_count = clear_cache()
+            QMessageBox.information(
+                self, 'Clear Thumbnail Cache',
+                f'Deleted {cleared_count} '
+                f'{pluralize("thumbnail", cleared_count)} from the cache.')

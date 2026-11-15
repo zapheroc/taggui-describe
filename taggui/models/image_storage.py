@@ -1,4 +1,3 @@
-import hashlib
 import os
 import platform
 import shutil
@@ -7,6 +6,8 @@ import sys
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+import xxhash
 
 from utils.image import Image
 from utils.settings import (DEFAULT_SETTINGS, get_settings,
@@ -82,13 +83,19 @@ _MIGRATIONS = [
 
 def compute_content_hash(image_path: Path) -> str:
     """
-    Compute a stable blake2b hash of the image file's content.
+    Compute a stable xxh3-128 hash of the image file's content.
 
     The same bytes always produce the same hash, regardless of the file's
     name or location, so the database can identify an image by its content
     rather than its path.
+
+    xxh3-128 replaced the original blake2b because it is several times
+    faster to compute (measured ~3.5x on cold reads and ~7x on warm reads of
+    real images; `dev_local/perf_hash_thumbnails_report.md`). The hash
+    identifies file content for tag storage — it is not a security boundary —
+    and a 128-bit digest has no practical collision risk at dataset sizes.
     """
-    hash_object = hashlib.blake2b()
+    hash_object = xxhash.xxh3_128()
     with open(image_path, 'rb') as image_file:
         while chunk := image_file.read(HASH_CHUNK_SIZE):
             hash_object.update(chunk)
@@ -375,9 +382,9 @@ def _resolve_content_hash(connection: sqlite3.Connection, image_path: Path,
                           file_stat: os.stat_result) -> str:
     """
     The content hash of `image_path`, from the `hash_cache` table when the
-    file's identity (path, size, mtime_ns, ctime_ns, inode) matches a
-    cached row, and from a fresh hash computation otherwise (in which case
-    the cache row is queued to be written in a batch — see
+    file's identity (path, size, mtime_ns, ctime_ns, inode) matches a cached
+    row, and from a fresh hash computation otherwise (in which case the
+    cache row is queued to be written in a batch — see
     `_buffer_hash_cache_row`).
 
     All five stat fields must match: the cache trusts them together, and in
@@ -474,8 +481,8 @@ class SqliteStorage(ImageStorage):
         content_hash: str | None = None
         try:
             connection = _connect_reusable(self.db_path)
-            content_hash = _resolve_content_hash(connection, image_path,
-                                                 file_stat)
+            content_hash = _resolve_content_hash(
+                connection, image_path, file_stat)
             record = connection.execute(
                 'SELECT description FROM images WHERE hash = ?',
                 (content_hash,)).fetchone()

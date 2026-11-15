@@ -2,6 +2,9 @@ accelerate==1.15.0
 bitsandbytes==0.50.2
 ExifRead==3.5.1
 imagesize==2.0.1
+# Fast content hashing (xxh3-128) for the image identity used by the
+# database and the thumbnail cache.
+xxhash==4.1.0
 pillow==13.0.0
 pyparsing==3.3.3
 PySide6==6.12.0
