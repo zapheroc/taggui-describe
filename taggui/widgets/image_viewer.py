@@ -33,7 +33,7 @@ SMOOTH_RENDER_DELAY_MS = 80
 # enough to be noticeable, so the already-decoded list thumbnail is shown
 # upscaled as an instant placeholder until the sharp decode arrives. Smaller
 # images decode fast enough that a placeholder would only cause a blur flash.
-PLACEHOLDER_MIN_PIXELS = 8_000_000
+PLACEHOLDER_MIN_PIXELS = 2_500_000
 # Synchronized grid preview (shown when multiple images are selected).
 # Each selected image is composited into one large pixmap that the normal
 # zoom/pan machinery then scales, so zooming into a cell shows real detail
