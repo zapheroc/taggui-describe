@@ -176,19 +176,41 @@ Fork addition: tags and descriptions do not have to live in `.txt` files.
 - `SqliteStorage` (the **default**) — one SQLite database keyed by the image's
   **content hash** (`compute_content_hash`, blake2b over 1 MiB chunks), so
   identical images in different folders share one record and always show the
-  same tags. A fresh connection is opened per operation (the GUI thread and the
-  directory-load worker threads never share one); `PRAGMA foreign_keys = ON`
-  and `busy_timeout = 5000`; schema migrations run on connect, serialized by a
-  module-level lock (fresh first loads race on the DDL without it).
+  same tags. Computed hashes are cached in the database (schema v3
+  `hash_cache`, keyed by path + size + mtime_ns + ctime_ns + inode — see
+  "Schema"), so re-opening a folder whose files are unchanged does not
+  re-hash them. The directory-load path reuses one connection per worker
+  thread (`_connect_reusable`, validated per call by file device/inode and a
+  `SELECT 1`; the calling thread is the sole owner — callers never close it).
+  The cache is a **dict keyed by `threading.get_ident()`** guarded by a lock,
+  deliberately *not* `threading.local()`: that state is intermittently lost
+  on Qt's QThreadPool native worker threads (measured 16/101 reads lost on
+  a heavily-reused thread), which silently defeats the reuse. `save_image`
+  and the one-shot helpers keep a fresh `_connect`, so a writer never shares
+  a connection with a directory-load worker thread. Computed cache rows are
+  **buffered and written in batches** (see the `hash_cache` schema note and
+  `SqliteStorage.flush_hash_cache()`), because one commit per image makes
+  every worker thread contend for the single write lock.
+  `PRAGMA foreign_keys = ON` and `busy_timeout = 5000`; schema migrations run
+  on connect, serialized by a module-level lock (fresh first loads race on
+  the DDL without it).
 - `get_storage_backend()` reads the `storage_backend` setting (`'sqlite'` |
   `'text'`, default `'sqlite'`); `get_image_storage()` constructs the active
   backend; `ImageListModel.set_storage()` switches it (called by
   `MainWindow._apply_storage_backend` after a confirmed switch, which also
   reloads the directory so the in-memory data comes from the new storage).
 
-**Schema** (v1; version tracked in `PRAGMA user_version`, future changes
+**Schema** (v3; version tracked in `PRAGMA user_version`, future changes
 appended to `_MIGRATIONS`, each step in its own transaction, all DDL
 `IF NOT EXISTS` so concurrent first connections don't fail):
+
+- **Never reuse a schema version number with different content.** An earlier
+  build of this app used version 2 for a `path_index` table, so real
+  databases exist at `user_version` 2 without `hash_cache`. The current
+  `_MIGRATIONS` therefore has a deliberately empty v2 step and creates
+  `hash_cache` at v3. Databases from the earlier build keep their
+  `path_index` table (the current code never reads it; it is left for
+  rollback safety).
 
 - `images(hash TEXT PRIMARY KEY, description TEXT)` — one row per distinct
   image content.
@@ -199,12 +221,32 @@ appended to `_MIGRATIONS`, each step in its own transaction, all DDL
   tag_id REFERENCES tags(id), position INTEGER, PRIMARY KEY (image_hash,
   position))` — which tags an image has, in order; index
   `image_tags_tag_id` for tag → images lookups.
+- `hash_cache(path TEXT PRIMARY KEY, size, mtime_ns, ctime_ns, inode, hash)`
+  (v3) — file identity → content hash, so an unchanged file is re-identified
+  in one indexed lookup instead of being re-read and re-hashed. Trusted only
+  when **all five** stat fields match together: `ctime` cannot be restored
+  from userspace, so a byte-swap with a restored mtime still re-hashes (the
+  same class of trust as git's index stat cache). On a miss the file is
+  hashed and the row is **queued** (`_buffer_hash_cache_row`) rather than
+  committed per image: a per-image commit makes every load worker thread
+  contend for the database's single write lock (measured ~+0.5–2.8 ms/image
+  under 8 threads), which dominated the cold-load cost. The buffer (module
+  global, lock-guarded) flushes itself at `_HASH_CACHE_FLUSH_THRESHOLD` rows
+  (one `executemany` + one commit, best-effort — failed rows are re-queued
+  and never raised, since a load must never fail over an unwritten cache),
+  and the remainder is flushed by `SqliteStorage.flush_hash_cache()`, which
+  `ImageListModel.on_directory_loaded` calls on the GUI thread after all
+  worker tasks have finished (fresh connection). Losing the buffer (crash)
+  is safe: the rows are derived data and the files are simply re-hashed on
+  the next load.
 
 **Semantics to preserve:**
-- `SqliteStorage.load_image` hashes the file, looks up the record. **When no
-  record exists, it imports a caption file into the database** (additive only —
-  never overwrites an existing record). This is the text → database import
-  path that runs on first load of each image.
+- `SqliteStorage.load_image` stats the file, resolves its content hash from
+  `hash_cache` (or computes it and queues the cache row for a batched write
+  on a miss), then looks up the record. **When no record exists, it imports a caption file
+  into the database** (additive only — never overwrites an existing record).
+  This is the text → database import path that runs on first load of each
+  image.
 - `save_image` upserts via `_upsert_image`: update the description, replace
   the image's `image_tags` rows, `INSERT OR IGNORE` the tag names. **Old tag
   rows are never deleted** — every tag ever stored stays available as a tag
@@ -215,7 +257,9 @@ appended to `_MIGRATIONS`, each step in its own transaction, all DDL
   duplicate copies to unsaved values (see `write_image_tags_to_disk`).
 - Helpers: `get_database_tag_names(db_path)` (all tag names, alphabetical —
   feeds the tag suggestions), `clear_database(db_path)` (wipes records, keeps
-  the file and schema), `import_images(images, db_path)`,
+  the file, schema and the still-valid `hash_cache` — it is derived data and
+  clearing records does not change any file's content),
+  `import_images(images, db_path)`,
   `export_images_to_text_files(images, tag_separator)` (writes caption files
   next to the images; used by `ImageListModel.export_loaded_images_to_text_files`
   when switching to text-file storage), `migrate_database(old, new)` (moves

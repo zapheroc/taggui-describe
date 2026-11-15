@@ -395,6 +395,11 @@ class ImageListModel(QAbstractListModel):
         self.images = images
         self._build_duplicate_index()
         self.endResetModel()
+        # Persist the derived data the load computed (for example the
+        # SQLite storage's buffered hash-cache rows). Safe here: this runs
+        # on the GUI thread after every worker task of this load has
+        # finished, and the backends implement it best-effort.
+        self.storage.flush_hash_cache()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
 
