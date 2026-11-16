@@ -2,15 +2,15 @@ import operator
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
-from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
+from utils.clip_tokenizer import ClipTokenizer
 from utils.image import Image
 
 
 class ProxyImageListModel(QSortFilterProxyModel):
     def __init__(self, image_list_model: ImageListModel,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.setSourceModel(image_list_model)
         self.tokenizer = tokenizer

@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCompleter,
                                QDockWidget, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMessageBox, QPushButton, QSplitter,
                                QTextEdit, QVBoxLayout, QWidget)
-from transformers import PreTrainedTokenizerBase
+from utils.clip_tokenizer import ClipTokenizer
 
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -502,7 +502,7 @@ class ImageTagsEditor(QDockWidget):
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_suggestion_model: TagSuggestionModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.image_list_model: ImageListModel = \
             proxy_image_list_model.sourceModel()
