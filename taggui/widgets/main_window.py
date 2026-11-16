@@ -9,7 +9,7 @@ from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
                                QLabel, QMainWindow, QMenu, QMessageBox,
                                QStackedWidget, QVBoxLayout, QWidget)
-from transformers import AutoTokenizer
+from utils.clip_tokenizer import ClipTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.export_images_dialog import ExportImagesDialog
@@ -54,8 +54,13 @@ class MainWindow(QMainWindow):
         tag_separator = get_tag_separator()
         self.image_list_model = ImageListModel(image_list_image_width,
                                                tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(
-            get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        # A lightweight token counter (see `utils/clip_tokenizer.py`): it loads
+        # the CLIP `tokenizer.json` via the Rust `tokenizers` library instead of
+        # `transformers.AutoTokenizer`, so app startup does not import
+        # `transformers`/`torch`. It produces identical token IDs to
+        # `AutoTokenizer` and exposes the same `tokenizer(text).input_ids`
+        # interface the tag editor and `tokens:` filter rely on.
+        tokenizer = ClipTokenizer(get_resource_path(TOKENIZER_DIRECTORY_PATH))
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
         self.image_list_model.proxy_image_list_model = (

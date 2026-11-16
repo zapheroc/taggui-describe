@@ -5,7 +5,6 @@ import sys
 import traceback
 import warnings
 
-import transformers
 from PySide6.QtGui import QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -21,7 +20,11 @@ def suppress_warnings():
         return
     logging.basicConfig(level=logging.ERROR)
     warnings.simplefilter('ignore')
-    transformers.logging.set_verbosity_error()
+    # Note: `transformers.logging.set_verbosity_error()` is no longer called
+    # here (it would import `transformers`, and therefore `torch`, at startup).
+    # It is applied in the captioning worker subprocess instead (see
+    # `auto_captioning/model_worker.py`), only when a transformers-based model
+    # actually loads `transformers`.
     try:
         import auto_gptq
         auto_gptq_logger = logging.getLogger(auto_gptq.modeling._base.__name__)

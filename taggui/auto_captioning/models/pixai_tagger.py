@@ -9,7 +9,7 @@ from auto_captioning.transformers_captioning_model import (
     TransformersCaptioningModel)
 from auto_captioning.models.wd_tagger import (KAOMOJIS, get_tags_to_exclude,
                                                select_top_tags)
-from auto_captioning.settings_group import SettingGroup
+from auto_captioning.settings_group import PIXAI_TAGGER_GROUPS, SettingGroup
 from auto_captioning.worker_context import WorkerContext
 from utils.image import Image
 
@@ -54,8 +54,7 @@ class PixAiTagger(TransformersCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        return {SettingGroup.TAGGER, SettingGroup.PIXAI_TAGGER,
-                SettingGroup.DEVICE, SettingGroup.GPU_INDEX}
+        return PIXAI_TAGGER_GROUPS
 
     def get_error_message(self) -> str | None:
         return None

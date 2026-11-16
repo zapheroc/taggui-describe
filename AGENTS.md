@@ -541,6 +541,40 @@ AutoCaptioningModel (ABC; auto_captioning_model.py)
   `__init__`/`load_model`. This was the "Fix 1" perf work — see
   "Performance notes".
 
+### Lazy startup (per-captioner imports)
+
+The heavy ML libraries are never imported at app startup:
+
+- `models_list.py` (imported by `widgets/auto_captioner.py` to populate the
+  combo box) exposes only the string `MODELS` list. `get_model_class`
+  imports each model class inside its dispatch branch, and
+  `get_setting_groups(model_id)` returns the group-set constants from
+  `settings_group.py` **without importing any class** — it must mirror
+  `get_model_class`'s dispatch exactly (same precedence).
+- `transformers_captioning_model.py` keeps `torch`/`numpy` at module top but
+  defers `transformers` into the methods that use it, and resolves
+  `transformers_model_class` lazily via
+  `getattr(type(self), 'transformers_model_class', None)` — it must never be
+  defined (or imported) at class-definition time, or the whole transformers
+  stack leaks into the non-transformers backends that subclass this base.
+- The token counter does not use `transformers.AutoTokenizer`:
+  `utils/clip_tokenizer.py` (`ClipTokenizer`) tokenizes the bundled
+  `clip-vit-base-patch32/` vocab + merges with the Rust `tokenizers` library
+  (byte-identical ids).
+- `llama_captioning_model.py` imports `llama_cpp` at module top — acceptable
+  because the module is only imported when a llama model is selected (see
+  the `llama-cpp-python` RPATH gotcha below).
+
+Net effect: a browsing/tagging session loads none of `torch`/`transformers`/
+`onnxruntime`/`llama_cpp`, and each captioner loads only its own backend
+(WD Tagger: `onnxruntime`, not `transformers`; PixAi: `transformers`+`torch`;
+llama: `llama_cpp`). Launch went from 3.36 s to 0.22 s
+(`dev_local/perf_lazy_launch_report.md`).
+
+**If you add a model:** register the id in `MODELS`, add a branch to
+`get_model_class`, and mirror it in `get_setting_groups` — do not import
+model classes at module scope in `models_list.py` or `auto_captioner.py`.
+
 ### The caption_settings dict contract
 
 `CaptionSettingsForm.get_caption_settings()` in `auto_captioner.py` is the
@@ -676,12 +710,13 @@ count** — the GUI side can no longer outrun the model.
 
 ## Gotchas and known issues
 
-- **No in-repo tests.** Verify changes by running the GUI. The ML import
-  chain is loaded eagerly (`transformers`, `torch`, etc. are imported at
-  module import time in several files), so the GUI cannot run without the
-  heavy deps. The performance work was verified with a standalone suite
-  (`/tmp/opencode/taggui-bench/scripts/test_fixes.py`, not in the repo) —
-  re-run it after touching the taggers, the tag counter, or the
+- **No in-repo tests.** Verify changes by running the GUI. The heavy ML
+  libraries are imported lazily (see "Lazy startup" below): the GUI starts
+  without loading `torch`/`transformers`/`onnxruntime`/`llama_cpp`, and each
+  captioner loads only its own backend when selected. The performance work
+  was verified with standalone suites (e.g.
+  `/tmp/opencode/taggui-bench/scripts/test_fixes.py`, not in the repo) —
+  re-run them after touching the taggers, the tag counter, or the
   storage/suggestion paths.
 - **The database is keyed by content hash, not path.** Copying an image file
   into the folder (or a byte-identical file in another folder) shares the
@@ -718,6 +753,64 @@ count** — the GUI side can no longer outrun the model.
   `TransformersCaptioningModel.__init__` sets `self.device` (a `torch.device`);
   the llama-cpp backend has no such attribute. Never reference `self.device`
   from `AutoCaptioningModel` or code shared by both backends.
+- **`llama-cpp-python`'s CUDA wheels have no RPATH to the nvidia pip
+  packages.** `libllama.so` links against `libcudart.so.13` /
+  `libcublas.so.13`, which live in `<site-packages>/nvidia/cu13/lib/`
+  (they arrive as transitive dependencies of torch via `nvidia-cudnn-cu13`
+  — in CUDA 13 the core packages are the *unsuffixed* `nvidia-cuda-runtime`
+  and `nvidia-cublas`, versioned 13.x). PyTorch's own libs find them via a
+  baked-in RPATH, but `libllama.so` has none, so `import llama_cpp` fails
+  with `libcudart.so.13: cannot open shared object file` unless
+  `LD_LIBRARY_PATH` is set. `utils/cuda_preload.py`
+  (`preload_cuda_libs()`) therefore preloads the cudart/cublas/cublasLt
+  libs by absolute path (discovered from the `nvidia` namespace package;
+  best-effort, no-op when they're on the loader path already or absent),
+  and `llama_captioning_model.py` calls it before the `llama_cpp` import.
+  If you move the `llama_cpp` import elsewhere, keep that call (or an
+  equivalent env fix) before it. `CUDA_MAJOR` in that module must stay in
+  sync with the llama-cpp-python wheel in `requirements.txt` (currently
+  `cu132`) — the nvidia pins in `requirements.txt` (marked
+  `platform_system == "Linux"`, because `nvidia-cublas` ships **no Windows
+  wheel**; the `!= darwin` marker would break Windows installs) are the
+  other half of that sync. The load failure surfaces as a `RuntimeError`
+  from llama-cpp-python 0.3.x's ctypes loader (not `ImportError`), and
+  `models_list._import_llama_model` rewords it into an actionable message
+  for the GUI console — keep the catch tuple `(RuntimeError, OSError)` so
+  older/newer versions' `OSError`/`ImportError` forms still get reworded.
+  The Windows branch of `cuda_preload.py` is **unverified**: it is
+  reachable (the `cu132` index ships win_amd64 wheels) and needed
+  (llama-cpp-python's own loader only adds `CUDA_PATH/bin`+`lib` for a
+  *system* toolkit, not the pip-package `nvidia/cu13/bin`), but it has
+  never been exercised on a Windows machine.
+- **The llama.cpp kwargs are GPU-oriented; CPU testing is constrained.**
+  `type_v=8` (quantized V cache) is rejected without `flash_attn`
+  ("quantized V cache requires flash_attn to be enabled"); Gemma 4's
+  hybrid sliding-window layers fall back to a full-size SWA cache
+  (~25-30 GB) whenever FA is off, regardless of `n_ctx` (see `gemma_4.py`).
+  In the installed build (llama 0.5.0 / ggml 0.25.3, cu132 wheels) the
+  CUDA backend is hard-linked into the ggml base libraries (it cannot be
+  removed from the lib dir, and `GGML_CUDA_DEVICES=none` is ignored), so
+  even `n_gpu_layers=0` still allocates the compute-graph scratch buffer on
+  the GPU — on a busy 3090 that OOMs at context creation. CPU smoke tests
+  therefore need: `n_gpu_layers=0`, `flash_attn=False`, `type_k=type_v=0`,
+  a small `n_ctx`, and a model small enough that its graph buffers fit in
+  the free VRAM (`/tmp/opencode/perf/test_llama_small_cpu.py` uses a ~3B
+  multimodal model for exactly this reason).
+- **The vision (mmproj) model is pinned to the GPU by default — and a full
+  GPU aborts the process.** `MTMDChatHandler.__init__` (llama-cpp-python)
+  takes `use_gpu: bool = True`, and its `_init_mtmd_context` sets
+  `ctx_params.use_gpu` from it; the app's `LlamaVisionChatHandler` forwards
+  `**kwargs` to the base, so it is configurable, but
+  `LlamaCaptioningModel.get_chat_handler` never passes it (and
+  `get_llama_kwargs` hard-codes `n_gpu_layers=-1`), so the llama backend
+  always puts *everything* on the GPU — the UI's CPU/GPU device setting has
+  no effect on it. Worse, when the clip buffer allocation fails (GPU out of
+  memory), the C code hits `GGML_ASSERT(buffer)` in
+  `clip_model_loader::load_tensors` and the process dies with SIGABRT
+  (core dump) instead of raising a Python error. For CPU tests pass
+  `use_gpu=False` to the chat handler (see `test_llama_small_cpu.py`);
+  consider honoring the `device` captioning setting (and degrading to a
+  clean error on allocation failure) as a follow-up.
 - **Cancel semantics:** canceling sets the QThread's `is_canceled` flag and
   `ModelSubprocessManager.cancel()` terminates the worker process — that is
   what stops an in-flight generation, because a worker blocked inside a model

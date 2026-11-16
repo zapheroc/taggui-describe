@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from contextlib import nullcontext
 
@@ -5,15 +7,12 @@ import numpy as np
 import torch
 from PIL import Image as PilImage
 from PIL.ImageOps import exif_transpose
-from transformers import (AutoModelForImageTextToText, AutoProcessor,
-                          BatchFeature, BitsAndBytesConfig)
-from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 from utils.enums import CaptionDevice
 from utils.image import Image
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.worker_context import WorkerContext
-from auto_captioning.settings_group import SettingGroup
+from auto_captioning.settings_group import TRANSFORMERS_GROUPS, SettingGroup
 
 class TransformersCaptioningModel(AutoCaptioningModel):
     dtype = torch.float16
@@ -23,7 +22,13 @@ class TransformersCaptioningModel(AutoCaptioningModel):
     # safetensors version (e.g. Florence-2) override this with `None`.
     use_safetensors = True
     model_load_context_manager = nullcontext()
-    transformers_model_class = AutoModelForImageTextToText
+    # `transformers_model_class` is deliberately *not* defined here (it used to
+    # be `AutoModelForImageTextToText`). Defining it would require importing
+    # `transformers` at class-definition time, which would pull the whole
+    # transformers stack into the non-transformers backends that subclass this
+    # class (the WD Tagger, PixAI Tagger). Instead `load_model` resolves it
+    # lazily: a subclass that overrides `transformers_model_class` is found via
+    # `getattr`, and the generic default is imported on first use.
     image_mode = 'RGB'
 
     def __init__(self,
@@ -34,6 +39,10 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         self.device_setting: CaptionDevice = caption_settings['device']
         self.device: torch.device = self._get_device()
         if self.dtype == torch.bfloat16:
+            # Imported lazily (only reached when a model requests `bfloat16`)
+            # so that importing this module does not require `transformers`.
+            from transformers.utils.import_utils import \
+                is_torch_bf16_gpu_available
             if self.device.type != 'cuda' or not is_torch_bf16_gpu_available():
                 self.dtype = torch.float16
         self.dtype_argument = ({'dtype': self.dtype}
@@ -47,24 +56,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        return super().get_setting_groups() | {
-            SettingGroup.CAPTION_START,
-            SettingGroup.LOAD_IN_4_BIT,
-            SettingGroup.DEVICE,
-            SettingGroup.DISCOURAGED_WORDS,
-            SettingGroup.FORCED_WORDS,
-            SettingGroup.MIN_TOKENS,
-            SettingGroup.MAX_TOKENS,
-            SettingGroup.NUM_BEAMS,
-            SettingGroup.LENGTH_PENALTY,
-            SettingGroup.USE_SAMPLING,
-            SettingGroup.TEMPERATURE,
-            SettingGroup.TOP_K,
-            SettingGroup.TOP_P,
-            SettingGroup.REPETITION_PENALTY,
-            SettingGroup.NO_REPEAT_NGRAM,
-            SettingGroup.GPU_INDEX,
-        }
+        return TRANSFORMERS_GROUPS
 
     def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)
@@ -90,6 +82,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         return self.get_additional_error_message()
 
     def get_processor(self):
+        from transformers import AutoProcessor
         return AutoProcessor.from_pretrained(self.model_id,
                                              trust_remote_code=True)
 
@@ -97,6 +90,7 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         arguments = {'device_map': self.device, 'trust_remote_code': True,
                      'use_safetensors': self.use_safetensors}
         if self.load_in_4_bit:
+            from transformers import BitsAndBytesConfig
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type='nf4',
@@ -110,8 +104,15 @@ class TransformersCaptioningModel(AutoCaptioningModel):
         return arguments
 
     def load_model(self, model_load_arguments: dict):
+        # Resolve the model class lazily (see the class-body note about
+        # `transformers_model_class`). A subclass that overrides it is found
+        # here; the generic default is imported only when it is actually used.
+        model_class = getattr(type(self), 'transformers_model_class', None)
+        if model_class is None:
+            from transformers import AutoModelForImageTextToText
+            model_class = AutoModelForImageTextToText
         with self.model_load_context_manager:
-            model = self.transformers_model_class.from_pretrained(
+            model = model_class.from_pretrained(
                 self.model_id, **model_load_arguments)
         model.eval()
         return model

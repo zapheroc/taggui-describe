@@ -12,7 +12,7 @@ from onnxruntime import InferenceSession
 from auto_captioning.transformers_captioning_model import TransformersCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
-from auto_captioning.settings_group import SettingGroup
+from auto_captioning.settings_group import WD_TAGGER_GROUPS, SettingGroup
 
 KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
             '>_<', '3_3', '6_9', '>_o', '@_@', '^_^', 'o_o', 'u_u', 'x_x',
@@ -144,8 +144,7 @@ class WdTagger(TransformersCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        return {SettingGroup.TAGGER, SettingGroup.WD_TAGGER,
-                SettingGroup.DEVICE, SettingGroup.GPU_INDEX}
+        return WD_TAGGER_GROUPS
 
     def get_error_message(self) -> str | None:
         return None

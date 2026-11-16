@@ -37,3 +37,61 @@ class SettingGroup(Enum):
     # The PixAI Tagger's per-category thresholds.
     PIXAI_TAGGER = ("PIXAI_TAGGER", True)
 
+
+# The set of settings rows each captioning family shows. These are defined here
+# (rather than inline in the model classes) so that `widgets/auto_captioner.py`
+# can show/hide its rows at *widget construction* time via
+# `models_list.get_setting_groups(model_id)` — without importing a model class,
+# which would load that backend's heavy libraries (torch, transformers,
+# onnxruntime, ...) at app startup. The model classes' `get_setting_groups()`
+# return these same constants, so the *contents* of each set have a single
+# source of truth (only the id→family dispatch is shared with `models_list`).
+SHARED_GROUPS: set[SettingGroup] = {
+    SettingGroup.PROMPT,
+    SettingGroup.REMOVE_TAG_SEPARATORS,
+}
+
+WD_TAGGER_GROUPS: set[SettingGroup] = {
+    SettingGroup.TAGGER,
+    SettingGroup.WD_TAGGER,
+    SettingGroup.DEVICE,
+    SettingGroup.GPU_INDEX,
+}
+
+PIXAI_TAGGER_GROUPS: set[SettingGroup] = {
+    SettingGroup.TAGGER,
+    SettingGroup.PIXAI_TAGGER,
+    SettingGroup.DEVICE,
+    SettingGroup.GPU_INDEX,
+}
+
+# The Hugging Face (transformers) backend's rows.
+TRANSFORMERS_GROUPS: set[SettingGroup] = SHARED_GROUPS | {
+    SettingGroup.CAPTION_START,
+    SettingGroup.LOAD_IN_4_BIT,
+    SettingGroup.DEVICE,
+    SettingGroup.DISCOURAGED_WORDS,
+    SettingGroup.FORCED_WORDS,
+    SettingGroup.MIN_TOKENS,
+    SettingGroup.MAX_TOKENS,
+    SettingGroup.NUM_BEAMS,
+    SettingGroup.LENGTH_PENALTY,
+    SettingGroup.USE_SAMPLING,
+    SettingGroup.TEMPERATURE,
+    SettingGroup.TOP_K,
+    SettingGroup.TOP_P,
+    SettingGroup.REPETITION_PENALTY,
+    SettingGroup.NO_REPEAT_NGRAM,
+    SettingGroup.GPU_INDEX,
+}
+
+# The llama.cpp (GGUF) backend's rows.
+LLAMA_GROUPS: set[SettingGroup] = SHARED_GROUPS | {
+    SettingGroup.SEED,
+    SettingGroup.MAX_TOKENS,
+    SettingGroup.TEMPERATURE,
+    SettingGroup.TOP_K,
+    SettingGroup.TOP_P,
+    SettingGroup.REPETITION_PENALTY,
+}
+
