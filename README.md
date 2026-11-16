@@ -18,8 +18,11 @@ models.
 - Description box for free-form, natural language image descriptions
 - Tags and descriptions stored in a local SQLite database by default (or in
   classic `.txt` caption files), so tags follow each image across folders
-- Duplicate file handling: byte-identical copies share one set of tags, with
-  an `n/k` indicator, a `Duplicates` filter, and a cleanup action
+- Duplicate file handling: byte-identical copies are detected in both
+  storage modes, with an `n/k` indicator, a `Duplicates` filter, and a
+  cleanup action
+- Background-generated thumbnails with an on-disk cache, so re-opening a
+  folder is fast
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
 - Batch tag operations for renaming, deleting, and sorting tags
 - Tagging near-identical (variant) images together, with a synchronized grid preview
@@ -27,23 +30,70 @@ models.
 
 ## Installation
 
-The easiest way to use the application is to download the latest release from
-the [releases page](https://www.github.com/jhc13/taggui/releases).
-Choose the appropriate file for your operating system, extract it wherever you
-want, and run the executable file inside.
-You may have to install [7-Zip](https://www.7-zip.org/download.html) to
-extract the files if you don't have it on your system.
+This fork does not yet publish prebuilt releases, so you install it by running it
+from source.
 
-- macOS users: There is no macOS release because it requires a device running
-  the OS, and I do not have one. You can still install and run the program
-  manually (see below).
+### 1. Install Python
+
+Install **Python 3.12** (recommended; 3.11 also works) from
+[python.org](https://www.python.org/downloads/).
+On Windows, tick the box that says **"Add Python to PATH"** before clicking
+Install.
+
+### 2. Get the code
+
+Download this repository (the green **Code** button on the GitHub page, then
+**Download ZIP**) and extract it somewhere you want to keep the app, or
+`git clone` it if you prefer.
+
+### 3. Create a virtual environment and install the dependencies
+
+A virtual environment is a private folder that holds this app's Python
+libraries so they don't interfere with anything else on your computer.
+Open a terminal, go into the app folder, and run:
+
+**On Windows (PowerShell):**
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+> If the activate command fails with a message about scripts being disabled,
+> run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, answer `Y`,
+> then try the activate command again.
+
+**On macOS / Linux:**
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+The first install downloads several gigabytes, because it includes the
+runtimes for automatic captioning (PyTorch, Hugging Face transformers,
+llama.cpp, and ONNX Runtime).
+
+> If the Auto-Captioner cannot start a llama.cpp model (Gemma 4 / Qwen 3.8)
+> and its console says the CUDA runtime libraries could not be loaded, the
+> environment is missing the nvidia CUDA packages (for example because
+> torch resolved to a CPU build). Delete the virtual environment, create a
+> fresh one, and run `pip install -r requirements.txt` again.
+
+### 4. Run the app
+
+From the app folder, run:
+
+```
+python taggui/run_gui.py
+```
+
+(Run it this way, not as `python -m taggui.run_gui`.)
+
 - Linux users: You may need to install `libxcb-cursor0`.
   (See [this Stack Overflow answer](https://stackoverflow.com/a/75941575).)
-
-Alternatively, you can install manually by cloning this repository and
-installing the dependencies in `requirements.txt`.
-Run `taggui/run_gui.py` to start the program.
-Python 3.12 is recommended, but Python 3.11 should also work.
 
 ## Usage
 
@@ -66,9 +116,52 @@ You can also direct generated captions into the description by choosing one
 of the description options in the `Caption position` setting in the
 Auto-Captioner pane (for example, `Overwrite the description`).
 
+## Image caching
+
+When you load a directory, TagGUI generates the thumbnails for the image list
+in the background, so you can start tagging right away.
+Each thumbnail it generates is also saved to an on-disk **thumbnail cache**,
+so the next time you open the folder TagGUI reads the cached thumbnails
+instead of decoding the — often much larger — original images again.
+This is what makes re-opening a large folder fast: the first time you open
+it, the cache fills in quietly in the background, and every open after that
+is fast.
+
+A few details worth knowing:
+
+- The cache is keyed by the **content** of the image (the same hash that
+  identifies it for [tag storage](#tag-and-description-storage)).
+  That means identical images in different folders share one cached
+  thumbnail (see [Duplicate files](#duplicate-files)), and a cached
+  thumbnail can never be stale: as soon as an image file's bytes change, its
+  thumbnail is generated again.
+- The cache is a disposable optimization.
+  Every entry can always be regenerated from the original image, so clearing
+  the cache is always safe.
+- The cache works in **both storage modes**. In text-file mode the database
+  is used only for the content hashes that key the cache (never for the tags
+  or description, which stay in the caption files) — so the database
+  location matters in text-file mode, too.
+
+The cache is stored in your platform's cache directory:
+
+- Windows: `%LOCALAPPDATA%\taggui-describe\thumbnails`
+- macOS: `~/Library/Caches/taggui-describe/thumbnails`
+- Linux: `~/.cache/taggui-describe/thumbnails`
+
+You can adjust its size and clear it in `File` -> `Settings`:
+
+- **`Thumbnail cache max size (MB)`** — the maximum size of the cache
+  (default `4096` MB, i.e. 4 GiB, which holds the 200-px thumbnails of tens
+  of thousands of images).
+  Once the cache grows past the limit, the least recently used thumbnails are
+  removed at the next startup.
+- **`Clear Thumbnail Cache...`** — deletes all cached thumbnails right away.
+  They are regenerated as needed the next time their images are shown.
+
 ## Tagging variant images
 
-<img src='images/screenshot-variant-tagging.png' alt='Variant tagger workflow' with='100%'>
+<img src='images/screenshot-variant-tagging.png' alt='Variant tagger workflow' width='100%'>
 
 Many datasets contain **sets of near-identical images** — the same base picture
 with small differences (a changed expression, color, or accessory).
@@ -385,7 +478,7 @@ You can nest parentheses and operators to create arbitrarily complex filters.
 
 - Add a tag: Type the tag into the `Add Tag` box and press `Enter`
 - ⭐ Add the first tag suggested by autocomplete: `Ctrl`+`Enter`
-- Add a tag to multiple images: Select the images in the image list add
+- Add a tag to multiple images: Select the images in the image list and add
   the tag
 - Delete a tag: Select the tag and press `Delete`
 - Rename a tag: Double-click the tag, or select the tag and press `F2`
@@ -415,8 +508,15 @@ described in [Tagging variant images](#tagging-variant-images):
 - Rename all instances of a tag: Double-click the tag, or select the tag and
   press `F2`
 
-The `Edit` menu contains additional features for batch tag operations, such as
-`Find and Replace` (`Ctrl`+`R`) and `Batch Reorder Tags` (`Ctrl`+`B`).
+The `Edit` menu contains additional features for batch tag operations:
+`Find and Replace` (`Ctrl`+`R`), `Batch Reorder Tags` (`Ctrl`+`B`),
+`Remove Duplicate Tags` (`Ctrl`+`D`), and `Remove Empty Tags` (`Ctrl`+`E`).
+All of these can be undone and redone (`Ctrl`+`Z` / `Ctrl`+`Y`).
+The `File` menu contains `Load Directory` (`Ctrl`+`L`), `Reload Directory`
+(`F5` or `Ctrl`+`Shift`+`L`), `Settings` (`Ctrl`+`Alt`+`S`), and `Exit`
+(`Ctrl`+`W`).
+The `Tools` menu contains `Export Images...` (see
+[Export Images](#export-images)).
 
 ## Tag and description storage
 
@@ -453,6 +553,10 @@ The storage mode and the database location can be changed in
   the currently loaded images into the database — or writes them to caption
   files, when switching to text files — overwriting the existing data for
   those images.
+  Note that even in text-file mode the same database is still used: to cache
+  the content hashes of your images, which key the thumbnail cache and drive
+  [duplicate detection](#duplicate-files).
+  Your tags and description never touch it in that mode.
 - **`Database location`** — by default, the database is created at:
   - Linux: `~/.local/share/taggui-describe/taggui-describe.sqlite3`
   - Windows: `%LOCALAPPDATA%\TagGUI-Describe\taggui-describe.sqlite3`
@@ -469,19 +573,42 @@ The storage mode and the database location can be changed in
   caption files) are not affected.
   Deleting the database file directly has the same effect on the stored data.
 
+## Export Images
+
+Use **`Tools` -> `Export Images...`** to copy the images you are working on
+into an output folder, each with its tags and description written to a `.txt`
+file next to it.
+This is useful for sharing a dataset with someone who does not use TagGUI.
+
+- **Scope** — which images to export: `All images`, `Filtered images`, or
+  `Selected images`.
+- **Image files** — how the image files themselves are placed in the output
+  folder: `Copy` (the default), `Symlink`, or `Hard link`.
+- **Output folder** — where to export to (choose one with `Browse...`).
+
+If two images would land on the same file name, the later ones are renamed
+(`cat.jpg`, `cat_1.jpg`, ...) so that nothing is overwritten.
+Images with no tags and no description do not get a caption file.
+
 ## Duplicate files
 
-In database storage mode, an image's tags are tied to the **content** of the
-file (see [Tag and description storage](#tag-and-description-storage)).
-Among the loaded images, two or more files with **byte-for-byte identical
-content** are therefore duplicates of each other: they share one tag record,
-so they always show the same tags and description, and editing one copy
-updates the other copies automatically.
+TagGUI detects duplicates in **both storage modes**: among the loaded images,
+two or more files with **byte-for-byte identical content** are duplicates of
+each other.
 (This is separate from [variant images](#tagging-variant-images), which are
 *near*-identical files that keep their own tags.)
 
-In text-file storage mode there are no duplicates: every file has its own
-caption file.
+What duplicates do depends on the storage mode:
+
+- In **database storage mode** the copies share one tag record (tags are tied
+  to the **content** of the file — see [Tag and description
+  storage](#tag-and-description-storage)), so they always show the same tags
+  and description, and editing one copy updates the other copies
+  automatically.
+- In **text-file storage mode** each copy keeps its own caption file, so the
+  copies do not follow each other automatically.
+  To apply a tag change to all copies, use `Select Duplicates` and then any
+  batch operation on the selection.
 
 TagGUI makes duplicates easy to spot and clean up:
 
@@ -489,12 +616,12 @@ TagGUI makes duplicates easy to spot and clean up:
   the right of its file name, where `n` is the position of that copy among
   the duplicates and `k` is the total number of duplicate files (for example,
   `2/3`). Hovering an image shows the same information, for example
-  "Duplicate: 2 of 3 files share these tags".
+  "Duplicate: 2 of 3 files have identical content".
 - **`Duplicates` button** — an icon of two overlapping images, in the
   `Images` pane, on the `Selection mode` row. Click it to show only images
   that have at least one other loaded file with identical content, and click
   it again to show everything.
-- **`Select Duplicates`** — right-click a duplicate image to select every 
+- **`Select Duplicates`** — right-click a duplicate image to select every
   visible copy of it at once.
 - **`Delete Duplicates...`** — right-click one copy of a set of
   duplicates to keep it: every other loaded copy of the same file — along

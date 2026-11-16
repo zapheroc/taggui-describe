@@ -2,15 +2,15 @@ import operator
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
-from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
+from utils.clip_tokenizer import ClipTokenizer
 from utils.image import Image
 
 
 class ProxyImageListModel(QSortFilterProxyModel):
     def __init__(self, image_list_model: ImageListModel,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.setSourceModel(image_list_model)
         self.tokenizer = tokenizer
@@ -18,7 +18,8 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.filter: list | None = None
         # Set by the "Duplicates" toggle button below the filter line edit:
         # when true, only images with at least one other loaded file with
-        # the same content are shown (content-based, so database mode only).
+        # the same content are shown (content-based, so it works in both
+        # storage modes).
         self.filter_duplicates: bool = False
 
     def does_image_match_filter(self, image: Image,

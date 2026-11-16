@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.model_subprocess_manager import ModelSubprocessManager
-from auto_captioning.models_list import MODELS, get_model_class
+from auto_captioning.models_list import MODELS, get_setting_groups
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
@@ -401,10 +401,11 @@ class CaptionSettingsForm(QVBoxLayout):
         model_id = self.model_combo_box.currentText()
         if not model_id:
             return None
-        model_class = get_model_class(model_id)
-        if model_class is None:
-            return None
-        return model_class.get_setting_groups()
+        # `get_setting_groups` mirrors `get_model_class`'s dispatch but returns
+        # the group set without importing the model class, so constructing this
+        # widget (at app startup) does not load the selected backend's heavy
+        # libraries (torch, transformers, onnxruntime, ...).
+        return get_setting_groups(model_id)
 
     def get_local_model_paths(self) -> list[str]:
         models_directory_path = self.settings.value(

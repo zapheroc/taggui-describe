@@ -2,6 +2,9 @@ accelerate==1.15.0
 bitsandbytes==0.50.2
 ExifRead==3.5.1
 imagesize==2.0.1
+# Fast content hashing (xxh3-128) for the image identity used by the
+# database and the thumbnail cache.
+xxhash==4.1.0
 pillow==13.0.0
 pyparsing==3.3.3
 PySide6==6.12.0
@@ -34,4 +37,16 @@ torchvision==0.29.2
 
 # Install CUDA accelerated llama-cpp-python
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu132
-llama-cpp-python==0.3.36
+llama-cpp-python==0.3.37
+# CUDA runtime libraries that the CUDA build of llama-cpp-python links
+# against (libcudart.so.13, libcublas.so.13, libcublasLt.so.13). They
+# normally arrive as transitive dependencies of torch, but are pinned
+# explicitly so a CPU torch build cannot leave them out of the environment:
+# taggui/utils/cuda_preload.py loads them by absolute path before
+# `import llama_cpp` (see the RPATH note in AGENTS.md). Linux only:
+# `nvidia-cublas` ships no Windows wheel (the Windows torch build provides
+# its own CUDA dependencies), and there is no CUDA build for macOS. The 13.x
+# range must stay in sync with CUDA_MAJOR in taggui/utils/cuda_preload.py
+# and the `cu132` extra-index-url above.
+nvidia-cuda-runtime>=13,<14; platform_system == "Linux"
+nvidia-cublas>=13,<14; platform_system == "Linux"

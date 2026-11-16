@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCompleter,
                                QDockWidget, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMessageBox, QPushButton, QSplitter,
                                QTextEdit, QVBoxLayout, QWidget)
-from transformers import PreTrainedTokenizerBase
+from utils.clip_tokenizer import ClipTokenizer
 
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -502,7 +502,7 @@ class ImageTagsEditor(QDockWidget):
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_suggestion_model: TagSuggestionModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.image_list_model: ImageListModel = \
             proxy_image_list_model.sourceModel()
@@ -699,9 +699,13 @@ class ImageTagsEditor(QDockWidget):
         # On image load save the image reference for later use
         self.image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
-        # The image is None when the index is invalid (for example, when the
-        # model is reset while a directory is loading).
+        # The image is None when the index is invalid or out of range (for
+        # example, when the model is reset while a directory is loading).
+        # Drop the stale image index too, so a later `dataChanged` (which
+        # compares against `self.image_index.row()`) does not treat a row
+        # that no longer exists as the current image.
         if self.image is None:
+            self.image_index = None
             return
         self.set_image_tags()
         self.set_image_description()

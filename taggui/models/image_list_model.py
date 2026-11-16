@@ -23,7 +23,9 @@ from models.image_storage import (ImageStorage,
                                    import_images)
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
-from utils.thumbnail_generation import (ThumbnailGenerationTask,
+from utils.thumbnail_cache import get_max_cache_bytes
+from utils.thumbnail_generation import (ThumbnailCacheEvictionTask,
+                                        ThumbnailGenerationTask,
                                         ThumbnailGenerationWorker)
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
@@ -192,11 +194,12 @@ class ImageListModel(QAbstractListModel):
         self.storage = get_image_storage()
         self.images: list[Image] = []
         # Content hash -> the rows of the loaded images sharing it, for groups
-        # of two or more images only. In database mode the storage record is
-        # keyed by the image's content, so such a group is a set of duplicates
-        # sharing one record: a save to one must be reflected in the in-memory
-        # copies of the others (see `_sync_duplicate_images`). Rebuilt on
-        # every directory load.
+        # of two or more images only. Both storage modes detect duplicates this
+        # way (by content). In database mode the storage record is keyed by the
+        # image's content, so a save to one copy must be reflected in the
+        # in-memory copies of the others (see `_sync_duplicate_images`); in
+        # text-file mode each copy has its own caption file, so the copies are
+        # never synced. Rebuilt on every directory load.
         self._duplicate_index: dict[str, list[int]] = {}
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
@@ -205,6 +208,19 @@ class ImageListModel(QAbstractListModel):
         # a bulk operation that ends up changing nothing can be fully undone
         # from the history. None when there is nothing to restore.
         self._last_undo_push = None
+        # (old_tags, new_tags) for the image most recently updated through
+        # `update_image_tags`, so the tag counter can apply that one image's
+        # change incrementally instead of recounting every image (see
+        # `MainWindow.on_image_data_changed`). Set right before the
+        # `dataChanged` is emitted and consumed (and cleared) by that slot;
+        # None when the most recent change did not come from
+        # `update_image_tags`.
+        self._pending_tag_delta: tuple[list[str], list[str]] | None = None
+        # True when the most recent change came from
+        # `update_image_description` (a description-only change, for which
+        # the tag counter needs no update at all). Same lifecycle as
+        # `_pending_tag_delta`.
+        self._pending_description_only = False
         # True only while restoring tags from the undo/redo history. Consumers
         # (e.g. the Common/Differences panel) use this to distinguish a genuine
         # new edit from a history restore, so an undone/redone tag returns to
@@ -253,6 +269,12 @@ class ImageListModel(QAbstractListModel):
         # Strong references to running tasks so that they are not garbage
         # collected while the thread pools still reference them.
         self._running_tasks: set = set()
+        # The on-disk thumbnail cache may hold entries from earlier sessions
+        # (see `thumbnail_cache.py`); evict the least recently used ones
+        # past the configured size limit, on a background thread so the
+        # startup does not block on it.
+        self.thumbnail_thread_pool.start(ThumbnailCacheEvictionTask(
+            get_max_cache_bytes(), self._running_tasks))
         # When the application is about to quit, give the background tasks a
         # bounded chance to finish so that the thread pools are not destroyed
         # while worker threads are still running tasks (which makes Qt report
@@ -265,7 +287,21 @@ class ImageListModel(QAbstractListModel):
         return len(self.images)
 
     def data(self, index, role=None) -> Image | str | QIcon | QSize:
-        image = self.images[index.row()]
+        # The index may be invalid or point past the end of `self.images`:
+        # the selection model and the proxy can briefly hold an index that
+        # was valid before a directory load reset the list (the load runs on
+        # background threads, so the reset and the deferred view re-syncs
+        # interleave). `data()` is a virtual called from C++, so it must
+        # never raise -- a Python exception escaping it aborts the process
+        # (a segfault). Callers already treat a `None` result as "no image"
+        # (e.g. `ImageTagsEditor.load_image_tags`), so return `None` for a
+        # bad index instead of indexing the list.
+        if index is None or not index.isValid():
+            return None
+        row = index.row()
+        if row < 0 or row >= len(self.images):
+            return None
+        image = self.images[row]
         if role == Qt.ItemDataRole.UserRole:
             return image
         if role == Qt.ItemDataRole.DisplayRole:
@@ -283,7 +319,8 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{self.tag_separator.join(image.tags)}'
             if image.duplicate_count > 1:
                 text += (f'\nDuplicate: {image.duplicate_position} of '
-                         f'{image.duplicate_count} files share these tags')
+                         f'{image.duplicate_count} files have '
+                         f'identical content')
             return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail, if it has been generated yet. Thumbnails are
@@ -368,6 +405,11 @@ class ImageListModel(QAbstractListModel):
         self.images = images
         self._build_duplicate_index()
         self.endResetModel()
+        # Persist the derived data the load computed (for example the
+        # SQLite storage's buffered hash-cache rows). Safe here: this runs
+        # on the GUI thread after every worker task of this load has
+        # finished, and the backends implement it best-effort.
+        self.storage.flush_hash_cache()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
 
@@ -407,7 +449,8 @@ class ImageListModel(QAbstractListModel):
         for row, image in enumerate(self.images):
             task = ThumbnailGenerationTask(
                 row, image.path, self.image_list_image_width, generation,
-                self.thumbnail_worker, self._running_tasks)
+                self.thumbnail_worker, self._running_tasks,
+                image.content_hash)
             self.thumbnail_thread_pool.start(task)
 
     @Slot(int, QImage, int)
@@ -507,7 +550,18 @@ class ImageListModel(QAbstractListModel):
         while an undo/redo restore is in progress: the restore's own final
         `dataChanged` covers the refreshed copies, and an intermediate
         refresh would disturb the grouped tag panel's order bookkeeping.
+
+        In text-file mode the copies each have their own caption file and do
+        not share a record, so a save to one must not change the in-memory
+        values of the others — they would then disagree with their file on
+        disk. To apply a tag change to all copies, select the duplicates and
+        run a batch operation on the selection.
         """
+        if not self.storage.shared_content_records:
+            # Text-file mode: the copies do not share a storage record (each
+            # has its own caption file), so skip the sync (see the
+            # `shared_content_records` attribute on the storage backends).
+            return
         rows = self._duplicate_index.get(image.content_hash)
         if not rows:
             return
@@ -938,6 +992,12 @@ class ImageListModel(QAbstractListModel):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.tags == tags:
             return
+        # Remember the old and new tag lists so the tag counter can apply
+        # this image's change incrementally (see
+        # `MainWindow.on_image_data_changed`) instead of recounting every
+        # image for each caption.
+        self._pending_tag_delta = (list(image.tags), list(tags))
+        self._pending_description_only = False
         image.tags = tags
         # Save before emitting `dataChanged`: listeners (e.g. the tag
         # suggestions) may read the storage, so it must already reflect the
@@ -954,6 +1014,10 @@ class ImageListModel(QAbstractListModel):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.description == description:
             return
+        # Description-only change: the tag counter needs no update (see
+        # `MainWindow.on_image_data_changed`).
+        self._pending_tag_delta = None
+        self._pending_description_only = True
         image.description = description
         # Save before emitting `dataChanged` (see `update_image_tags`).
         self._begin_batch_sync()

@@ -9,7 +9,7 @@ from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
                                QLabel, QMainWindow, QMenu, QMessageBox,
                                QStackedWidget, QVBoxLayout, QWidget)
-from transformers import AutoTokenizer
+from utils.clip_tokenizer import ClipTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.export_images_dialog import ExportImagesDialog
@@ -54,8 +54,13 @@ class MainWindow(QMainWindow):
         tag_separator = get_tag_separator()
         self.image_list_model = ImageListModel(image_list_image_width,
                                                tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(
-            get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        # A lightweight token counter (see `utils/clip_tokenizer.py`): it loads
+        # the CLIP `tokenizer.json` via the Rust `tokenizers` library instead of
+        # `transformers.AutoTokenizer`, so app startup does not import
+        # `transformers`/`torch`. It produces identical token IDs to
+        # `AutoTokenizer` and exposes the same `tokenizer(text).input_ids`
+        # interface the tag editor and `tokens:` filter rely on.
+        tokenizer = ClipTokenizer(get_resource_path(TOKENIZER_DIRECTORY_PATH))
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
         self.image_list_model.proxy_image_list_model = (
@@ -64,6 +69,12 @@ class MainWindow(QMainWindow):
         # The suggestions offered in the Add Tag box (database-wide when the
         # database is the active storage backend).
         self.tag_suggestion_model = TagSuggestionModel()
+        # Cache of the tag names stored in the database (a list, in
+        # alphabetical order), used by `update_tag_suggestions` so that the
+        # per-caption suggestion refresh does not scan the entire database
+        # every time. None when the cache is empty or known to be stale
+        # (see `_database_tag_names`).
+        self._cached_database_tag_names: list[str] | None = None
         self.image_tag_list_model = ImageTagListModel()
 
         self.setWindowIcon(QIcon(QPixmap(get_resource_path(ICON_PATH))))
@@ -466,8 +477,6 @@ class MainWindow(QMainWindow):
         """
         self.settings.setValue('storage_backend', new_mode)
         self.image_list_model.set_storage(get_image_storage())
-        # The Duplicates filter only works with the database backend.
-        self._set_duplicates_filter_visible(new_mode == 'sqlite')
         # Reload the directory (if one is loaded) so that the in-memory
         # tags and descriptions come from the new storage. Without this, the
         # data that was loaded from the old storage would keep being
@@ -477,6 +486,9 @@ class MainWindow(QMainWindow):
         # of the old storage.)
         if self.directory_path is not None and self.directory_path.is_dir():
             self.reload_directory()
+        # The active storage (and therefore the database behind the tag
+        # suggestions) has changed: drop the cached database tag names.
+        self._cached_database_tag_names = None
         self.update_tag_suggestions()
         if migrated_count:
             if new_mode == 'sqlite':
@@ -508,6 +520,9 @@ class MainWindow(QMainWindow):
         self.image_list_model.set_storage(get_image_storage())
         if self.directory_path is not None and self.directory_path.is_dir():
             self.reload_directory()
+        # A different database (or none) is now in use: drop the cached
+        # database tag names.
+        self._cached_database_tag_names = None
         self.update_tag_suggestions()
 
     def update_tag_suggestions(self):
@@ -521,19 +536,13 @@ class MainWindow(QMainWindow):
         only in the database sort last (alphabetically), ready to be added.
         When the database cannot be read, the suggestions are the tags of the
         loaded images only.
+
+        The database's tag names are cached (`_cached_database_tag_names`,
+        see `_database_tag_names`) rather than re-scanned on every call:
+        this runs for every caption, and the scan is O(database tag count).
         """
         local_tag_counts = self.tag_counter_model.tag_counter
-        database_tag_names = None
-        if get_storage_backend() == 'sqlite':
-            try:
-                database_tag_names = get_database_tag_names(
-                    get_database_path())
-            except (OSError, sqlite3.Error) as exception:
-                # The database is unavailable (for example, it is corrupted).
-                # Suggest the loaded images' tags only, so the completer
-                # keeps working.
-                print(f'Failed to load tag suggestions from the database: '
-                      f'{exception}', file=sys.stderr)
+        database_tag_names = self._database_tag_names()
         if database_tag_names is None:
             suggestions = list(local_tag_counts.most_common())
         else:
@@ -544,6 +553,39 @@ class MainWindow(QMainWindow):
                                  key=lambda tag_and_count: (
                                      -tag_and_count[1], tag_and_count[0]))
         self.tag_suggestion_model.update_suggestions(suggestions)
+
+    def _database_tag_names(self) -> list[str] | None:
+        """
+        The names of the tags stored in the database, from the cache when
+        it is valid (see `_cached_database_tag_names`), so that the
+        per-caption suggestion refresh does not re-scan the entire database.
+
+        The cache is a plain list (in the alphabetical order the query
+        returns it), not a set: the per-caption merge below iterates over
+        it, and iterating a list is much faster than iterating a set of the
+        same size. Tags the loaded images currently use never need to be in
+        the cache: `update_tag_suggestions` starts from the tag counter,
+        which holds them all.
+
+        Return None when the database is not the active storage backend or
+        cannot be read, in which case `update_tag_suggestions` offers the
+        loaded images' tags only (the completer keeps working).
+        """
+        if get_storage_backend() != 'sqlite':
+            return None
+        cached = self._cached_database_tag_names
+        if cached is None:
+            try:
+                cached = get_database_tag_names(get_database_path())
+            except (OSError, sqlite3.Error) as exception:
+                # The database is unavailable (for example, it is corrupted).
+                # Suggest the loaded images' tags only, so the completer
+                # keeps working. Do not cache the failure: retry next time.
+                print(f'Failed to load tag suggestions from the database: '
+                      f'{exception}', file=sys.stderr)
+                return None
+            self._cached_database_tag_names = cached
+        return cached
 
     @Slot()
     def reset_to_defaults(self):
@@ -761,24 +803,6 @@ class MainWindow(QMainWindow):
                 self.proxy_image_list_model.index(0, 0))
         self.image_list.update_image_index_label(
             self.image_list.list_view.currentIndex())
-
-    def _set_duplicates_filter_visible(self, visible: bool):
-        """
-        Show or hide the Duplicates filter button. It only works in database
-        storage mode, where duplicates are detected by content hash, so it
-        is hidden in text-file storage mode; the filter is cleared first if
-        it was on.
-        """
-        button = self.image_list.filter_duplicates_button
-        if not visible and button.isChecked():
-            # The filter is not functional in the new storage mode: clear
-            # it so the image list shows all images again.
-            button.blockSignals(True)
-            button.setChecked(False)
-            button.blockSignals(False)
-            self.proxy_image_list_model.filter_duplicates = False
-            self.proxy_image_list_model.invalidateFilter()
-        button.setVisible(visible)
 
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
@@ -1055,11 +1079,43 @@ class MainWindow(QMainWindow):
         image tags editor. This matters because a thumbnail is generated for
         every image, which would otherwise recount the tags of every image
         thousands of times.
+
+        When the change came from a single-image update
+        (`update_image_tags` / `update_image_description`, the per-caption
+        path), the model set `_pending_tag_delta` / `_pending_description_only`
+        before emitting `dataChanged`, so the tag counter can be adjusted for
+        just that image (or not at all) instead of recounting every image.
+        This slot is the only `dataChanged` handler, and the connection is
+        direct (same thread), so the flags are always consumed here.
         """
         if roles == [Qt.ItemDataRole.DecorationRole]:
             return
-        self.tag_counter_model.count_tags(self.image_list_model.images)
-        self.update_tag_suggestions()
+        image_list_model = self.image_list_model
+        tag_delta = image_list_model._pending_tag_delta
+        description_only = image_list_model._pending_description_only
+        image_list_model._pending_tag_delta = None
+        image_list_model._pending_description_only = False
+        if description_only:
+            # The description changed only: the tag counts are unchanged, so
+            # neither the tag counter nor the tag suggestions need a refresh.
+            pass
+        elif (tag_delta is not None
+              and first_changed_index.row() == last_changed_index.row()):
+            # Exactly one image changed (no duplicate copies were synced with
+            # it -- that would span several rows), so adjust the tag counter
+            # for that image instead of recounting every image.
+            self.tag_counter_model.apply_tag_delta(*tag_delta)
+            self.update_tag_suggestions()
+        else:
+            # Several images changed (the edited image plus its duplicate
+            # copies, or a batch operation / undo-redo), or the change did
+            # not come from a single-image update: recount everything. The
+            # tag set of the loaded images may also have changed (a tag
+            # renamed or deleted), so drop the cached database tag names --
+            # the refresh below re-queries them once.
+            self.tag_counter_model.count_tags(image_list_model.images)
+            self._cached_database_tag_names = None
+            self.update_tag_suggestions()
         self.image_tags_editor.reload_image_tags_if_changed(
             first_changed_index, last_changed_index)
 

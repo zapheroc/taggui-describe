@@ -37,7 +37,12 @@ DEFAULT_SETTINGS = {
     'storage_backend': 'sqlite',
     # Location of the database file. Empty means the platform-appropriate
     # default location.
-    'database_path': ''
+    'database_path': '',
+    # Maximum size of the on-disk thumbnail cache (see
+    # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
+    # images when evicted, so this only bounds disk usage. 4 GiB holds the
+    # 200-px thumbnails of tens of thousands of images at once.
+    'thumbnail_cache_max_size_mb': 4096
 }
 
 
