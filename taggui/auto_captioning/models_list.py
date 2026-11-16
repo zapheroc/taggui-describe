@@ -1,3 +1,5 @@
+import importlib
+
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.settings_group import (LLAMA_GROUPS, PIXAI_TAGGER_GROUPS,
                                             SettingGroup, TRANSFORMERS_GROUPS,
@@ -57,6 +59,35 @@ MODELS = [
 ]
 
 
+def _import_llama_model(module_name: str,
+                        class_name: str) -> type[AutoCaptioningModel]:
+    """Import a llama.cpp-based model class.
+
+    If the import fails because a shared library could not be loaded (the
+    missing/unloadable CUDA runtime libraries that
+    `utils/cuda_preload.py` guards against — llama-cpp-python 0.3.x raises
+    this as a `RuntimeError`), reword it into an actionable message. Any
+    other error is re-raised unchanged, so real import bugs still surface
+    with their original traceback.
+    """
+    try:
+        module = importlib.import_module(module_name)
+    except (RuntimeError, OSError) as error:
+        message = str(error)
+        if ('shared library' in message
+                or 'libcudart' in message
+                or 'libcublas' in message):
+            raise RuntimeError(
+                'Could not load the llama.cpp captioning backend: '
+                f'{message}\n'
+                'The CUDA runtime libraries are missing or cannot be loaded '
+                'in this environment. Reinstall the dependencies '
+                '(`pip install -r requirements.txt`) and restart the app; '
+                'see the README for installation instructions.') from error
+        raise
+    return getattr(module, class_name)
+
+
 def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
     """Return the captioning model class for `model_id`.
 
@@ -108,11 +139,9 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         from auto_captioning.models.wd_tagger import WdTagger
         return WdTagger
     if 'gemma-4-31b' in lowercase_model_id:
-        from auto_captioning.models.gemma_4 import Gemma4
-        return Gemma4
+        return _import_llama_model('auto_captioning.models.gemma_4', 'Gemma4')
     if 'qwen3.8' in lowercase_model_id:
-        from auto_captioning.models.qwen_3_8 import Qwen38
-        return Qwen38
+        return _import_llama_model('auto_captioning.models.qwen_3_8', 'Qwen38')
     # Unknown models default to the generic transformers backend, which can
     # load any Hugging Face repo or local model directory.
     from auto_captioning.transformers_captioning_model import (

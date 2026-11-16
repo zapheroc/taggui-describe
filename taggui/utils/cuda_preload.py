@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 # Must match the CUDA major version of the llama-cpp-python wheel pinned in
-# requirements.txt.
+# requirements.txt (the `cu132` extra-index-url, and the 13.x range of the
+# `nvidia-cuda-runtime` / `nvidia-cublas` pins below it). If the wheel moves
+# to another CUDA major, change this and those pins together.
 CUDA_MAJOR = 13
 
 # Dependency order: cublasLt must be loaded before cublas.

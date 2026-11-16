@@ -76,6 +76,12 @@ The first install downloads several gigabytes, because it includes the
 runtimes for automatic captioning (PyTorch, Hugging Face transformers,
 llama.cpp, and ONNX Runtime).
 
+> If the Auto-Captioner cannot start a llama.cpp model (Gemma 4 / Qwen 3.8)
+> and its console says the CUDA runtime libraries could not be loaded, the
+> environment is missing the nvidia CUDA packages (for example because
+> torch resolved to a CPU build). Delete the virtual environment, create a
+> fresh one, and run `pip install -r requirements.txt` again.
+
 ### 4. Run the app
 
 From the app folder, run:

@@ -756,18 +756,32 @@ count** — the GUI side can no longer outrun the model.
 - **`llama-cpp-python`'s CUDA wheels have no RPATH to the nvidia pip
   packages.** `libllama.so` links against `libcudart.so.13` /
   `libcublas.so.13`, which live in `<site-packages>/nvidia/cu13/lib/`
-  (a PyTorch dependency). PyTorch's own libs find them via a baked-in
-  RPATH, but `libllama.so` has none, so `import llama_cpp` fails with
-  `libcudart.so.13: cannot open shared object file` unless
-  `LD_LIBRARY_PATH` is set. `utils/cuda_preload.py` (`preload_cuda_libs()`)
-  therefore preloads the cudart/cublas/cublasLt libs by absolute path
-  (discovered from the `nvidia` namespace package; best-effort, no-op when
-  they're on the loader path already or absent), and
-  `llama_captioning_model.py` calls it before the `llama_cpp` import. If
-  you move the `llama_cpp` import elsewhere, keep that call (or an
+  (they arrive as transitive dependencies of torch via `nvidia-cudnn-cu13`
+  — in CUDA 13 the core packages are the *unsuffixed* `nvidia-cuda-runtime`
+  and `nvidia-cublas`, versioned 13.x). PyTorch's own libs find them via a
+  baked-in RPATH, but `libllama.so` has none, so `import llama_cpp` fails
+  with `libcudart.so.13: cannot open shared object file` unless
+  `LD_LIBRARY_PATH` is set. `utils/cuda_preload.py`
+  (`preload_cuda_libs()`) therefore preloads the cudart/cublas/cublasLt
+  libs by absolute path (discovered from the `nvidia` namespace package;
+  best-effort, no-op when they're on the loader path already or absent),
+  and `llama_captioning_model.py` calls it before the `llama_cpp` import.
+  If you move the `llama_cpp` import elsewhere, keep that call (or an
   equivalent env fix) before it. `CUDA_MAJOR` in that module must stay in
   sync with the llama-cpp-python wheel in `requirements.txt` (currently
-  `cu132`).
+  `cu132`) — the nvidia pins in `requirements.txt` (marked
+  `platform_system == "Linux"`, because `nvidia-cublas` ships **no Windows
+  wheel**; the `!= darwin` marker would break Windows installs) are the
+  other half of that sync. The load failure surfaces as a `RuntimeError`
+  from llama-cpp-python 0.3.x's ctypes loader (not `ImportError`), and
+  `models_list._import_llama_model` rewords it into an actionable message
+  for the GUI console — keep the catch tuple `(RuntimeError, OSError)` so
+  older/newer versions' `OSError`/`ImportError` forms still get reworded.
+  The Windows branch of `cuda_preload.py` is **unverified**: it is
+  reachable (the `cu132` index ships win_amd64 wheels) and needed
+  (llama-cpp-python's own loader only adds `CUDA_PATH/bin`+`lib` for a
+  *system* toolkit, not the pip-package `nvidia/cu13/bin`), but it has
+  never been exercised on a Windows machine.
 - **The llama.cpp kwargs are GPU-oriented; CPU testing is constrained.**
   `type_v=8` (quantized V cache) is rejected without `flash_attn`
   ("quantized V cache requires flash_attn to be enabled"); Gemma 4's
