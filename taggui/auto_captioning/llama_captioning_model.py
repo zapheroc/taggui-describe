@@ -1,10 +1,17 @@
 import base64
 import io
 from pathlib import Path
+
 import numpy as np
 from PIL import Image as PILImage
-from llama_cpp import Llama
-from llama_cpp.llama_chat_format import MTMDChatHandler
+
+from utils.cuda_preload import preload_cuda_libs
+
+# Must run before llama_cpp is imported; see utils/cuda_preload.py.
+preload_cuda_libs()
+
+from llama_cpp import Llama  # noqa: E402
+from llama_cpp.llama_chat_format import MTMDChatHandler  # noqa: E402
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
