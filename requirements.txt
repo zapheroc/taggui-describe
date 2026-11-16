@@ -37,7 +37,7 @@ torchvision==0.29.2
 
 # Install CUDA accelerated llama-cpp-python
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu132
-llama-cpp-python==0.3.36
+llama-cpp-python==0.3.37
 # CUDA runtime libraries that the CUDA build of llama-cpp-python links
 # against (libcudart.so.13, libcublas.so.13, libcublasLt.so.13). They
 # normally arrive as transitive dependencies of torch, but are pinned
