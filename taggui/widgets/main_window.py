@@ -813,6 +813,7 @@ class MainWindow(QMainWindow):
 
         tools_menu = menu_bar.addMenu('Tools')
         export_images_action = QAction('Export Images...', parent=self)
+        export_images_action.setShortcut(QKeySequence('Ctrl+Shift+E'))
         export_images_action.triggered.connect(self.show_export_images_dialog)
         tools_menu.addAction(export_images_action)
 

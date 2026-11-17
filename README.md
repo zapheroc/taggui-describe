@@ -576,8 +576,7 @@ The storage mode and the database location can be changed in
 ## Export Images
 
 Use **`Tools` -> `Export Images...`** to copy the images you are working on
-into an output folder, each with its tags and description written to a `.txt`
-file next to it.
+into an output folder.
 This is useful for sharing a dataset with someone who does not use TagGUI.
 
 - **Scope** — which images to export: `All images`, `Filtered images`, or
@@ -585,6 +584,9 @@ This is useful for sharing a dataset with someone who does not use TagGUI.
 - **Image files** — how the image files themselves are placed in the output
   folder: `Copy` (the default), `Symlink`, or `Hard link`.
 - **Output folder** — where to export to (choose one with `Browse...`).
+- **Write tags to text files** — checked by default: each exported image gets
+  its tags and description written to a `.txt` file next to it.
+  Uncheck it to export the image files only.
 
 If two images would land on the same file name, the later ones are renamed
 (`cat.jpg`, `cat_1.jpg`, ...) so that nothing is overwritten.
