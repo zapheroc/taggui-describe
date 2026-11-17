@@ -112,10 +112,9 @@ def _export_image_file(source: Path, destination: Path,
     if mode == ExportMode.COPY:
         shutil.copy(source, destination)
     elif mode == ExportMode.SYMLINK:
-        # A relative link stays valid if the export folder is moved along
-        # with the source folder.
-        destination.symlink_to(
-            os.path.relpath(source, destination.parent))
+        # Always write an absolute link so the link works regardless of
+        # where the export folder (or the source) is later moved.
+        destination.symlink_to(source.resolve())
     elif mode == ExportMode.HARDLINK:
         os.link(source, destination)
     else:
