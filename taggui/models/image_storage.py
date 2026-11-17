@@ -12,6 +12,7 @@ import xxhash
 from utils.image import Image
 from utils.settings import (DEFAULT_SETTINGS, get_settings,
                             get_tag_separator)
+from utils.utils import pluralize
 
 # The version of the database schema currently in use. A database that was
 # created (or last upgraded) at version N has `PRAGMA user_version` set to N.
@@ -397,6 +398,34 @@ def _flush_hash_cache(db_path: Path) -> None:
         connection.close()
 
 
+def _prune_hash_cache(db_path: Path, paths) -> None:
+    """
+    Drop the `hash_cache` rows of the given file paths (their files were
+    removed).
+
+    Best-effort: the cache is derived data, and a stale row is harmless
+    (a file re-created at the same path has a new ctime, so it would not
+    match a cached row), so a failure is reported but never raised.
+    """
+    paths = [str(path) for path in paths]
+    if not paths:
+        return
+    connection = _connect(db_path)
+    try:
+        with connection:
+            # `executemany` with one parameter per path avoids the limit on
+            # the number of bound parameters of a single `IN (...)` clause.
+            connection.executemany(
+                'DELETE FROM hash_cache WHERE path = ?',
+                [(path,) for path in paths])
+    except (OSError, sqlite3.Error) as exception:
+        print(f'Failed to prune the hash cache rows of '
+              f'{len(paths)} {pluralize("path", len(paths))} '
+              f'(first: {paths[0]}): {exception}', file=sys.stderr)
+    finally:
+        connection.close()
+
+
 def _resolve_content_hash(connection: sqlite3.Connection, image_path: Path,
                           file_stat: os.stat_result) -> str:
     """
@@ -457,6 +486,17 @@ class ImageStorage(ABC):
         when a directory load completes, on the GUI thread.
         """
 
+    def prune_hash_cache(self, paths) -> None:
+        """
+        Drop the derived cache entries of the given file paths (their files
+        were removed).
+
+        Best-effort and a no-op for backends without such a cache (or when
+        there is nothing to prune): the cache is derived data, so failing to
+        prune it must never matter. Called by the model after a directory
+        refresh removed files, on the GUI thread.
+        """
+
 
 class TextFileStorage(ImageStorage):
     """
@@ -507,6 +547,10 @@ class TextFileStorage(ImageStorage):
         (see `_flush_hash_cache`).
         """
         _flush_hash_cache(self.db_path)
+
+    def prune_hash_cache(self, paths) -> None:
+        """Drop the `hash_cache` rows of the given (removed) files."""
+        _prune_hash_cache(self.db_path, paths)
 
 
 class SqliteStorage(ImageStorage):
@@ -603,6 +647,10 @@ class SqliteStorage(ImageStorage):
         (see `_flush_hash_cache`).
         """
         _flush_hash_cache(self.db_path)
+
+    def prune_hash_cache(self, paths) -> None:
+        """Drop the `hash_cache` rows of the given (removed) files."""
+        _prune_hash_cache(self.db_path, paths)
 
 
 def clear_database(db_path: Path) -> int:

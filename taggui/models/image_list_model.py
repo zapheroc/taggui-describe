@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QMessageBox
 from models.image_storage import (ImageStorage,
                                    export_images_to_text_files,
                                    get_database_path, get_image_storage,
-                                   import_images)
+                                   import_images, read_caption_file)
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.thumbnail_cache import get_max_cache_bytes
@@ -51,6 +51,54 @@ def get_file_paths(directory_path: Path) -> set[Path]:
         elif path.is_dir():
             file_paths.update(get_file_paths(path))
     return file_paths
+
+
+def get_image_dimensions(image_path: Path) -> tuple[int, int] | None:
+    """
+    The (width, height) of an image file, accounting for its Exif
+    orientation. None when the dimensions could not be determined (the
+    image still loads).
+    """
+    dimensions = None
+    try:
+        dimensions = imagesize.get(image_path)
+        # Check the Exif orientation tag and rotate the dimensions if
+        # necessary.
+        with open(image_path, 'rb') as image_file:
+            try:
+                exif_tags = exifread.process_file(
+                    image_file, details=False,
+                    stop_tag='Image Orientation')
+                if 'Image Orientation' in exif_tags:
+                    orientations = (exif_tags['Image Orientation']
+                                    .values)
+                    if any(value in orientations
+                           for value in (5, 6, 7, 8)):
+                        dimensions = (dimensions[1], dimensions[0])
+            except Exception as exception:
+                print(f'Failed to get Exif tags for {image_path}: '
+                      f'{exception}', file=sys.stderr)
+    except (ValueError, OSError) as exception:
+        print(f'Failed to get dimensions for {image_path}: '
+              f'{exception}', file=sys.stderr)
+        dimensions = None
+    return dimensions
+
+
+def get_image_suffixes() -> list:
+    """The image file suffixes (with a leading dot, lower-cased) from the
+    settings."""
+    settings = get_settings()
+    image_suffixes_string = settings.value(
+        'image_list_file_formats',
+        defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+    image_suffixes = []
+    for suffix in image_suffixes_string.split(','):
+        suffix = suffix.strip().lower()
+        if not suffix.startswith('.'):
+            suffix = '.' + suffix
+        image_suffixes.append(suffix)
+    return image_suffixes
 
 
 @dataclass
@@ -136,29 +184,7 @@ class DirectoryLoadTask(QRunnable):
     def run(self):
         image = None
         try:
-            dimensions = None
-            try:
-                dimensions = imagesize.get(self.image_path)
-                # Check the Exif orientation tag and rotate the dimensions if
-                # necessary.
-                with open(self.image_path, 'rb') as image_file:
-                    try:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        print(f'Failed to get Exif tags for {self.image_path}: '
-                              f'{exception}', file=sys.stderr)
-            except (ValueError, OSError) as exception:
-                print(f'Failed to get dimensions for {self.image_path}: '
-                      f'{exception}', file=sys.stderr)
-                dimensions = None
+            dimensions = get_image_dimensions(self.image_path)
             tags, description, content_hash = (
                 self.storage.load_image(self.image_path))
             image = Image(self.image_path, dimensions, tags, description,
@@ -176,6 +202,158 @@ class DirectoryLoadTask(QRunnable):
             # The worker (and therefore the image list model) has been
             # destroyed, so there is no one to notify.
             pass
+
+
+@dataclass
+class RefreshResult:
+    """The outcome of a background directory refresh (see RefreshScanner)."""
+    directory_path: Path
+    added_images: list
+    removed_paths: set
+    # path -> {'file': (snapshot_mtime, new_mtime, dimensions,
+    #              content_hash, tags, description),
+    #          'caption': (snapshot_mtime, new_mtime, tags, description)}
+    updates: dict
+
+
+class RefreshScanner(QObject, QRunnable):
+    """
+    Re-scans the current directory off the main thread to detect the files
+    that were added, removed or changed since the model was loaded (or last
+    refreshed), then reports a diff.
+
+    All disk I/O (directory walk, stats, resolving the tags and description
+    of the changed images) happens here, in a worker thread, so refreshing
+    never freezes the UI. The resulting diff is applied on the main thread by
+    `ImageListModel.apply_refresh_result`, which does only fast in-memory
+    work.
+
+    The task is added to a `registry` set and removed from it when it is
+    done. The set keeps a strong reference to the task so that it is not
+    garbage collected while the thread pool still references it.
+    """
+
+    refresh_complete = Signal(object)
+
+    def __init__(self, directory_path: Path, image_suffixes: list,
+                 storage: ImageStorage, snapshot: dict, registry: set):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        self.directory_path = directory_path
+        self.image_suffixes = image_suffixes
+        self.storage = storage
+        # path -> (image mtime_ns, caption mtime_ns or None) for every image
+        # currently loaded, captured on the main thread before the scan.
+        self.snapshot = snapshot
+        self.registry = registry
+        registry.add(self)
+
+    @Slot()
+    def run(self):
+        try:
+            result = self._scan()
+        except Exception as exception:
+            # The directory may have been removed or become unreadable while
+            # scanning. Report an empty (no-op) diff so the UI simply skips
+            # this refresh; the next refresh will try again. (Any other error
+            # is handled the same way, so refreshing never stops working.)
+            if not isinstance(exception, OSError):
+                print(f'Failed to refresh {self.directory_path}: '
+                      f'{exception}', file=sys.stderr)
+            result = RefreshResult(self.directory_path, [], set(), {})
+        self._notify(result)
+        self.registry.discard(self)
+
+    def _notify(self, result: 'RefreshResult'):
+        try:
+            self.refresh_complete.emit(result)
+        except RuntimeError:
+            # The receiver (and therefore the image list model) has been
+            # destroyed, so there is no one to notify.
+            pass
+
+    def _scan(self) -> 'RefreshResult':
+        file_paths = get_file_paths(self.directory_path)
+        image_paths = {path for path in file_paths
+                       if path.suffix.lower() in self.image_suffixes}
+        existing_paths = set(self.snapshot.keys())
+        removed_paths = existing_paths - image_paths
+        added_paths = sorted(image_paths - existing_paths)
+
+        # Build full Image objects for the newly added files (read-only
+        # work). `load_image` resolves the content hash (and, in database
+        # mode, the stored record for it) and the tags and description.
+        added_images = []
+        for image_path in added_paths:
+            dimensions = get_image_dimensions(image_path)
+            try:
+                image_path.stat()
+            except OSError:
+                # The file is gone or unreadable (it was deleted or moved
+                # after the directory was scanned). Skip it; the next
+                # refresh will pick it up if it reappears.
+                continue
+            tags, description, content_hash = (
+                self.storage.load_image(image_path))
+            added_images.append(Image(image_path, dimensions, tags,
+                                      description,
+                                      content_hash=content_hash))
+        added_images.sort(key=lambda image: image.path)
+
+        # Detect changes to images that already existed at snapshot time.
+        updates: dict = {}
+        # The database is the source of truth for the tags and description
+        # in database mode, so only the image file's own time matters (and
+        # stat'ing the caption file as well would double the per-image cost
+        # of the snapshot). In text-file mode the caption file holds them.
+        text_file_mode = not self.storage.shared_content_records
+        for image_path, (snapshot_mtime, snapshot_caption_mtime) \
+                in self.snapshot.items():
+            if image_path in removed_paths:
+                continue
+            entry: dict = {}
+
+            try:
+                new_mtime = image_path.stat().st_mtime_ns
+            except OSError:
+                # Unreadable (it was deleted after the scan started): the
+                # removal is reported above (or was already, if the file was
+                # gone at the walk), so skip the change check.
+                continue
+            if new_mtime != snapshot_mtime:
+                dimensions = get_image_dimensions(image_path)
+                tags, description, content_hash = (
+                    self.storage.load_image(image_path))
+                entry['file'] = (snapshot_mtime, new_mtime, dimensions,
+                                 content_hash, tags, description)
+
+            if text_file_mode:
+                text_file_path = image_path.with_suffix('.txt')
+                try:
+                    new_caption_mtime = text_file_path.stat().st_mtime_ns
+                except OSError:
+                    new_caption_mtime = None
+                # Also catches a caption file that appeared since the
+                # snapshot (its mtime was then None).
+                if new_caption_mtime != snapshot_caption_mtime:
+                    if new_caption_mtime is None:
+                        # The caption file is gone (or unreadable).
+                        tags, description = [], ''
+                    else:
+                        tags, description = read_caption_file(
+                            text_file_path, self.storage.tag_separator)
+                    entry['caption'] = (snapshot_caption_mtime,
+                                        new_caption_mtime, tags,
+                                        description)
+
+            if entry:
+                updates[image_path] = entry
+
+        return RefreshResult(self.directory_path, added_images,
+                             removed_paths, updates)
 
 
 class ImageListModel(QAbstractListModel):
@@ -361,17 +539,13 @@ class ImageListModel(QAbstractListModel):
         self.thumbnail_generation += 1
         self.directory_load_generation += 1
         generation = self.directory_load_generation
+        # This load supersedes any previous one (whose result will be
+        # discarded by the generation check): refreshes may start again as
+        # soon as it begins, once this load has finished (or, if there are
+        # no images to load, immediately).
+        self.directory_load_worker = None
         file_paths = get_file_paths(directory_path)
-        settings = get_settings()
-        image_suffixes_string = settings.value(
-            'image_list_file_formats',
-            defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-        image_suffixes = []
-        for suffix in image_suffixes_string.split(','):
-            suffix = suffix.strip().lower()
-            if not suffix.startswith('.'):
-                suffix = '.' + suffix
-            image_suffixes.append(suffix)
+        image_suffixes = get_image_suffixes()
         image_paths = {path for path in file_paths
                        if path.suffix.lower() in image_suffixes}
         if not image_paths:
@@ -400,6 +574,9 @@ class ImageListModel(QAbstractListModel):
         # The load has been superseded by a newer load.
         if generation != self.directory_load_generation:
             return
+        # The load is over: a directory refresh is allowed to start again
+        # (it is blocked while `directory_load_worker` is set).
+        self.directory_load_worker = None
         images.sort(key=lambda image_: image_.path)
         self.beginResetModel()
         self.images = images
@@ -412,6 +589,36 @@ class ImageListModel(QAbstractListModel):
         self.storage.flush_hash_cache()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
+
+    def snapshot_file_times(self) -> dict:
+        """
+        For every loaded image, `(image mtime_ns, caption mtime_ns)`,
+        captured now (on the GUI thread) as the baseline a `RefreshScanner`
+        compares against after re-scanning the directory.
+
+        The caption file's time is only recorded in text-file mode: in
+        database mode the database is the source of truth for the tags and
+        description, so the caption file is irrelevant (and stat'ing it
+        would double the per-image cost). None when the file (or caption)
+        could not be stat'ed.
+        """
+        snapshot: dict = {}
+        text_file_mode = not self.storage.shared_content_records
+        for image in self.images:
+            try:
+                image_mtime = image.path.stat().st_mtime_ns
+            except OSError:
+                image_mtime = None
+            if text_file_mode:
+                try:
+                    caption_mtime = (image.path.with_suffix('.txt')
+                                     .stat().st_mtime_ns)
+                except OSError:
+                    caption_mtime = None
+            else:
+                caption_mtime = None
+            snapshot[image.path] = (image_mtime, caption_mtime)
+        return snapshot
 
     def _build_duplicate_index(self):
         """
@@ -442,11 +649,210 @@ class ImageListModel(QAbstractListModel):
                 image.duplicate_count = len(rows)
                 image.duplicate_position = position
 
+    def apply_refresh_result(self, result: 'RefreshResult') -> tuple[bool, list]:
+        """
+        Apply a `RefreshResult` (see `RefreshScanner`) to the loaded images.
+        Runs on the GUI thread; it does only in-memory work (the disk I/O was
+        done by the scanner on a worker thread).
+
+        The diff is applied with the model's row-removal and row-insertion
+        signals so that the proxy model (and the view) stays in sync.
+
+        Returns `(structure_changed, changed_rows)`: whether rows were added
+        or removed or an image's content changed (so the tag counter must be
+        recounted and the undo history cleared), and the rows of the images
+        whose data changed.
+        """
+        structure_changed = False
+        content_changed = False
+        changed_rows = []
+
+        # Removals: files that are gone from disk.
+        if result.removed_paths:
+            rows_to_remove = [row for row, image in enumerate(self.images)
+                              if image.path in result.removed_paths]
+            for row in sorted(rows_to_remove, reverse=True):
+                self.beginRemoveRows(QModelIndex(), row, row)
+                del self.images[row]
+                self.endRemoveRows()
+            if rows_to_remove:
+                structure_changed = True
+            # The removed files' hash-cache rows are stale (the files are
+            # gone): drop them. A file re-created at the same path has a new
+            # ctime, so it would miss the cache and be re-hashed anyway; this
+            # is for tidiness.
+            self.storage.prune_hash_cache(result.removed_paths)
+
+        # Additions: files that newly appeared. Insert them at their
+        # sorted-by-path position so the list stays sorted by path (as a
+        # directory load produces it).
+        if result.added_images:
+            existing_paths = {image.path for image in self.images}
+            new_images = [image for image in result.added_images
+                          if image.path not in existing_paths]
+            if new_images:
+                structure_changed = True
+                new_index = 0
+                row = 0
+                while new_index < len(new_images) and row < len(self.images):
+                    if new_images[new_index].path < self.images[row].path:
+                        self.beginInsertRows(QModelIndex(), row, row)
+                        self.images.insert(row, new_images[new_index])
+                        self.endInsertRows()
+                        new_index += 1
+                        row += 1
+                    else:
+                        row += 1
+                while new_index < len(new_images):
+                    row = len(self.images)
+                    self.beginInsertRows(QModelIndex(), row, row)
+                    self.images.insert(row, new_images[new_index])
+                    self.endInsertRows()
+                    new_index += 1
+
+        # Updates: files whose content (and, in text-file mode, whose
+        # caption file) changed on disk.
+        if result.updates:
+            path_to_row = {image.path: row
+                           for row, image in enumerate(self.images)}
+            for image_path, entry in result.updates.items():
+                row = path_to_row.get(image_path)
+                if row is None:
+                    continue
+                image = self.images[row]
+                if 'file' in entry:
+                    (_, new_mtime, dimensions, content_hash, tags,
+                     description) = entry['file']
+                    if dimensions is not None:
+                        image.dimensions = dimensions
+                    if (content_hash is not None
+                            and content_hash != image.content_hash):
+                        # The file's content changed (it now has a different
+                        # hash), so the in-memory tags and description belong
+                        # to the old content: adopt the record the storage
+                        # read for the new content (in database mode, the
+                        # record stored for that content, or the caption file
+                        # imported for it). When the hash is the same, the
+                        # in-memory values are kept -- they are at least as
+                        # fresh (a save that failed to reach the storage must
+                        # not be reverted by a storage read).
+                        image.tags = tags
+                        image.description = description
+                        image.content_hash = content_hash
+                        # The old thumbnail is for the old content.
+                        image.thumbnail = None
+                        content_changed = True
+                    changed_rows.append(row)
+                if 'caption' in entry:
+                    (snapshot_caption_mtime, new_caption_mtime, tags,
+                     description) = entry['caption']
+                    if new_caption_mtime is not None:
+                        try:
+                            current_caption_mtime = (
+                                image.path.with_suffix('.txt')
+                                .stat().st_mtime_ns)
+                        except OSError:
+                            current_caption_mtime = None
+                        if (current_caption_mtime is not None
+                                and current_caption_mtime
+                                != new_caption_mtime):
+                            # The caption changed again between the scan (on
+                            # a worker thread) and now (e.g. an edit saved
+                            # while the scan was running): the scan's read is
+                            # stale, so re-read the current content.
+                            tags, description = read_caption_file(
+                                image.path, self.tag_separator)
+                    if (not tags and not description
+                            and (image.tags or image.description)):
+                        # The scan read this caption as empty (the file may
+                        # have been deleted, or it may have been in the
+                        # instant it is rewritten). Before letting an empty
+                        # read replace a caption that currently has content,
+                        # re-read the file synchronously here (on the GUI
+                        # thread) to confirm it is really empty. This never
+                        # blocks a genuinely emptied or deleted file (an
+                        # intentional clear still applies); it only rejects
+                        # the transient empty read that would otherwise wipe
+                        # a saved caption.
+                        reread_tags, reread_description = read_caption_file(
+                            image.path, self.tag_separator)
+                        if reread_tags or reread_description:
+                            tags = reread_tags
+                            description = reread_description
+                    image.tags = tags
+                    image.description = description
+                    changed_rows.append(row)
+
+        if structure_changed or content_changed:
+            # The duplicate groups may have changed (files removed, added, or
+            # content replaced): rebuild the index and record the rows whose
+            # (duplicate_count, duplicate_position) changed.
+            previous_flags = {id(image): (image.duplicate_count,
+                                          image.duplicate_position)
+                              for image in self.images}
+            self._build_duplicate_index()
+            for row, image in enumerate(self.images):
+                if (image.duplicate_count, image.duplicate_position) \
+                        != previous_flags[id(image)]:
+                    changed_rows.append(row)
+            # The list's structure (or the content of a file) changed, so
+            # the position-based undo/redo history no longer refers to the
+            # same images and contents: clear it, exactly as a directory
+            # load does.
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            self._last_undo_push = None
+            self.newest_history_item = None
+            self.update_undo_and_redo_actions_requested.emit()
+
+        if changed_rows:
+            # One combined `dataChanged` over all changed rows. The
+            # `on_image_data_changed` handler sees no pending flags (this did
+            # not come from a single-image update) and recounts the tags of
+            # all images and drops the cached database tag names.
+            first_row = min(changed_rows)
+            last_row = max(changed_rows)
+            self.dataChanged.emit(self.index(first_row),
+                                  self.index(last_row))
+        # Write the hash-cache rows the scanner's `load_image` calls queued
+        # (and any rows a still-running load queued): the buffer is drained
+        # best-effort, and this is a no-op when it is empty.
+        self.storage.flush_hash_cache()
+
+        if structure_changed or content_changed:
+            # Rows were added or removed, or a file's content was replaced,
+            # so the in-flight thumbnail tasks may reference stale rows (or
+            # stale content): discard them and (re)generate the thumbnails
+            # that are missing.
+            self.start_thumbnail_generation()
+        elif changed_rows:
+            # Only tags and descriptions changed: the existing thumbnails are
+            # still valid, so generate only the ones that are missing.
+            self.start_thumbnail_generation_for_rows(changed_rows)
+        return structure_changed, changed_rows
+
     def start_thumbnail_generation(self):
-        """Start generating thumbnails on background threads."""
+        """Start generating thumbnails for every loaded image, on background
+        threads."""
+        # Discard the results of any in-flight generation pass: its tasks may
+        # reference rows that no longer exist (or stale content) after a
+        # structural change or a content replacement.
         self.thumbnail_generation += 1
+        self.start_thumbnail_generation_for_rows(range(len(self.images)))
+
+    def start_thumbnail_generation_for_rows(self, rows):
+        """Start generating thumbnails for the given rows, on background
+        threads, using the current generation (it does not bump it: in-flight
+        tasks keep their results valid). Rows that already have a thumbnail
+        (or no longer exist) are skipped."""
         generation = self.thumbnail_generation
-        for row, image in enumerate(self.images):
+        count = len(self.images)
+        for row in rows:
+            if row < 0 or row >= count:
+                continue
+            image = self.images[row]
+            if image.thumbnail is not None:
+                continue
             task = ThumbnailGenerationTask(
                 row, image.path, self.image_list_image_width, generation,
                 self.thumbnail_worker, self._running_tasks,

@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
-                            QModelIndex, QPoint, QUrl, Qt, Slot, QTimer)
+                            QModelIndex, QPoint, QUrl, Qt, QThreadPool,
+                            Slot, QTimer)
 from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
                            QKeySequence, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
@@ -15,7 +16,8 @@ from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
-from models.image_list_model import ImageListModel
+from models.image_list_model import (ImageListModel, RefreshScanner,
+                                     get_image_suffixes)
 from models.image_storage import (get_database_path, get_database_tag_names,
                                   get_image_storage, get_storage_backend)
 from models.image_tag_list_model import ImageTagListModel
@@ -48,6 +50,9 @@ class MainWindow(QMainWindow):
         # The path of the currently loaded directory. This is set later when a
         # directory is loaded.
         self.directory_path = None
+        # The `RefreshScanner` currently running (a directory refresh), or
+        # None when no refresh is in flight (see `refresh_changed_image_files`).
+        self._refresh_scanner = None
         image_list_image_width = self.settings.value(
             'image_list_image_width',
             defaultValue=DEFAULT_SETTINGS['image_list_image_width'], type=int)
@@ -323,6 +328,15 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def reload_directory(self):
+        # F5 / Ctrl+Shift+L, and the "reload after delete/move" requests, use
+        # the fast path: re-scan the directory and apply only the diff, so
+        # the list, the selection and the undo history are preserved.
+        self.refresh_changed_image_files()
+
+    @Slot()
+    def _reload_directory_full(self):
+        """Reload the whole directory from scratch (no diffing), preserving
+        the filter text and the selected image's index."""
         # Save the filter text and the index of the selected image to restore
         # them after reloading the directory.
         filter_text = self.image_list.filter_line_edit.text()
@@ -336,6 +350,66 @@ class MainWindow(QMainWindow):
         # the images are loaded on background threads.
         self.load_directory(self.directory_path, select_index=select_index)
         self.image_list.filter_line_edit.setText(filter_text)
+
+    @Slot()
+    def refresh_changed_image_files(self):
+        """
+        Refresh the loaded images after files were changed on disk (an
+        in-app delete or move, or F5 / Ctrl+Shift+L).
+
+        Instead of reloading the whole directory, this re-scans it on a
+        background thread (`RefreshScanner`) and applies only the diff (see
+        `ImageListModel.apply_refresh_result`), so the images that were not
+        touched are not re-hashed or re-read.
+        """
+        if self.directory_path is None or not self.directory_path.exists():
+            return
+        if self._refresh_scanner is not None:
+            # A refresh is already running; it scans the current state of the
+            # directory, so it will pick up any further changes made before
+            # it finished.
+            return
+        if self.image_list_model.directory_load_worker is not None:
+            # A full directory load is in flight (it replaces the whole
+            # list); refreshing against it would race with the load. The
+            # load's `directory_loaded` will show the current state anyway.
+            return
+        scanner = RefreshScanner(
+            self.directory_path, get_image_suffixes(),
+            self.image_list_model.storage,
+            self.image_list_model.snapshot_file_times(),
+            self.image_list_model._running_tasks)
+        scanner.refresh_complete.connect(self.on_refresh_complete)
+        self._refresh_scanner = scanner
+        QThreadPool.globalInstance().start(scanner)
+
+    @Slot(object)
+    def on_refresh_complete(self, result):
+        """Apply a finished directory refresh. Runs on the GUI thread."""
+        self._refresh_scanner = None
+        # The directory was changed (or reloaded) while the scan was running.
+        if result.directory_path != self.directory_path:
+            return
+        structure_changed, changed_rows = (
+            self.image_list_model.apply_refresh_result(result))
+        if structure_changed and not changed_rows:
+            # Only rows were added or removed (no image's content changed),
+            # so no `dataChanged` was emitted and the tag counter and the
+            # tag suggestions still include (or exclude) the images whose
+            # rows were removed (or added). Refresh them here, exactly as
+            # the full-recount branch of `on_image_data_changed` does.
+            self.tag_counter_model.count_tags(self.image_list_model.images)
+            self._cached_database_tag_names = None
+            self.update_tag_suggestions()
+        # If the image shown in the full-resolution viewer changed on disk,
+        # reload it (its list thumbnail is refreshed by the model).
+        current_index = self.image_list_selection_model.currentIndex()
+        current_image = (current_index.data(Qt.ItemDataRole.UserRole)
+                         if current_index.isValid() else None)
+        if (current_image is not None
+                and current_image.path in result.updates
+                and 'file' in result.updates[current_image.path]):
+            self.image_viewer.load_image(current_index)
 
     @Slot()
     def show_settings_dialog(self):
@@ -483,9 +557,10 @@ class MainWindow(QMainWindow):
         # displayed — and, the next time an image is edited, written into
         # the new storage — even though the switch moved no data. (The
         # reload also clears the undo/redo history, which captured states
-        # of the old storage.)
+        # of the old storage.) A full reload: the data must come from the
+        # new storage for every image, not just the ones that changed.
         if self.directory_path is not None and self.directory_path.is_dir():
-            self.reload_directory()
+            self._reload_directory_full()
         # The active storage (and therefore the database behind the tag
         # suggestions) has changed: drop the cached database tag names.
         self._cached_database_tag_names = None
@@ -518,8 +593,10 @@ class MainWindow(QMainWindow):
         rather than from the stale state loaded from the previous one.
         """
         self.image_list_model.set_storage(get_image_storage())
+        # A full reload: the data must come from the new database for every
+        # image, not just the ones that changed.
         if self.directory_path is not None and self.directory_path.is_dir():
-            self.reload_directory()
+            self._reload_directory_full()
         # A different database (or none) is now in use: drop the cached
         # database tag names.
         self._cached_database_tag_names = None
@@ -871,8 +948,11 @@ class MainWindow(QMainWindow):
         self.proxy_image_list_model.rowsRemoved.connect(
             lambda: self.image_list.update_image_index_label(
                 self.image_list.list_view.currentIndex()))
+        # After a delete/move the files have changed on disk: use the fast
+        # refresh path (re-scan and apply the diff) rather than a full
+        # directory reload.
         self.image_list.list_view.directory_reload_requested.connect(
-            self.reload_directory)
+            self.refresh_changed_image_files)
         self.image_list.list_view.tags_paste_requested.connect(
             self.image_list_model.add_tags)
         # Connecting the signal directly without `isVisible()` causes the menu

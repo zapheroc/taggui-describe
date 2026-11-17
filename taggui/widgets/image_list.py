@@ -1,4 +1,6 @@
+import os
 import shutil
+from collections import Counter
 from enum import Enum
 from functools import reduce
 from operator import or_
@@ -42,6 +44,66 @@ def replace_filter_wildcards(filter_: str | list) -> str | list:
         replaced_element = replace_filter_wildcards(element)
         replaced_filter.append(replaced_element)
     return replaced_filter
+
+
+def format_error_summary(errors: list[str], max_shown: int = 10) -> str:
+    """The lines of a list of error messages, for a single error dialog."""
+    lines = errors[:max_shown]
+    if len(errors) > max_shown:
+        lines.append(f'...and {len(errors) - max_shown} more.')
+    return '\n'.join(lines)
+
+
+def trash_images(parent, image_paths: list[Path],
+                 all_image_paths: list[Path]) -> list[Path]:
+    """Move the images (and their caption files) to the Recycle Bin, without
+    confirmation. A caption file that another loaded image still uses
+    (`a.png` and `a.jpg` sharing `a.txt`) is kept. Any errors are shown in a
+    single dialog. `all_image_paths` are all the loaded images' paths.
+    Returns the paths of the images that were moved to the Recycle Bin."""
+
+    def caption_key(image_path: Path) -> str:
+        # The image's caption file, as a comparison key: ignoring upper/lower
+        # case makes `a.TXT` and `a.txt` the same caption on every platform.
+        return os.path.normcase(str(image_path.with_suffix('.txt')))
+
+    # How many of the loaded images use each caption file. A caption file is
+    # trashed only once no remaining loaded image uses it (an image that
+    # could not be deleted, or `a.jpg` sharing `a.txt` with `a.png`).
+    caption_users = Counter(caption_key(image_path)
+                            for image_path in all_image_paths)
+    errors = []
+    deleted = []
+    # Caption key -> caption file of a successfully deleted image.
+    orphaned_captions: dict[str, Path] = {}
+    for image_path in image_paths:
+        if not QFile(image_path).moveToTrash():
+            errors.append(f'{image_path.name} could not be moved to the '
+                          f'Recycle Bin.')
+            continue
+        deleted.append(image_path)
+        caption_file_path = image_path.with_suffix('.txt')
+        if caption_file_path.exists():
+            key = caption_key(image_path)
+            orphaned_captions[key] = caption_file_path
+            caption_users[key] -= 1
+    for key, caption_file_path in orphaned_captions.items():
+        if caption_users[key] > 0:
+            continue
+        caption_file = QFile(caption_file_path)
+        if caption_file.exists() and not caption_file.moveToTrash():
+            errors.append(f'Caption file {caption_file_path.name} could '
+                          f'not be moved to the Recycle Bin.')
+    if errors:
+        image_count = len(image_paths)
+        failed_count = image_count - len(deleted)
+        heading = (f'{failed_count} of {image_count} '
+                   f'{pluralize("image", image_count)} could not '
+                   f'be deleted:' if failed_count
+                   else 'Some caption files could not be deleted:')
+        QMessageBox.critical(
+            parent, 'Error', f'{heading}\n\n{format_error_summary(errors)}')
+    return deleted
 
 
 class FilterLineEdit(QLineEdit):
@@ -711,6 +773,10 @@ class ImageListView(QListView):
     def delete_selected_images(self):
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
+        if not selected_image_count:
+            # Nothing is selected (e.g. the shortcut was used with no
+            # selection): do nothing rather than deleting everything.
+            return
         title = f'Delete {pluralize("Image", selected_image_count)}'
         question = (f'Delete {selected_image_count} selected '
                     f'{pluralize("image", selected_image_count)} and '
@@ -719,18 +785,9 @@ class ImageListView(QListView):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
-        for image in selected_images:
-            image_file = QFile(image.path)
-            if not image_file.moveToTrash():
-                QMessageBox.critical(self, 'Error',
-                                     f'Failed to delete {image.path}.')
-            caption_file_path = image.path.with_suffix('.txt')
-            caption_file = QFile(caption_file_path)
-            if caption_file.exists():
-                if not caption_file.moveToTrash():
-                    QMessageBox.critical(self, 'Error',
-                                         f'Failed to delete '
-                                         f'{caption_file_path}.')
+        source_model = self.proxy_image_list_model.sourceModel()
+        trash_images(self, [image.path for image in selected_images],
+                     [image.path for image in source_model.images])
         self.directory_reload_requested.emit()
 
     @Slot()
@@ -797,18 +854,8 @@ class ImageListView(QListView):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
-        for image_path in deleted_paths:
-            image_file = QFile(image_path)
-            if not image_file.moveToTrash():
-                QMessageBox.critical(self, 'Error',
-                                     f'Failed to delete {image_path}.')
-            caption_file_path = image_path.with_suffix('.txt')
-            caption_file = QFile(caption_file_path)
-            if caption_file.exists():
-                if not caption_file.moveToTrash():
-                    QMessageBox.critical(self, 'Error',
-                                         f'Failed to delete '
-                                         f'{caption_file_path}.')
+        trash_images(self, deleted_paths,
+                     [image.path for image in source_model.images])
         self.directory_reload_requested.emit()
 
     @Slot()
