@@ -1,21 +1,27 @@
+import sqlite3
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
                             QModelIndex, QPoint, QUrl, Qt, Slot, QTimer)
-from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon,
+from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
                            QKeySequence, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu,
-                               QMessageBox, QStackedWidget, QVBoxLayout,
-                               QWidget)
-from transformers import AutoTokenizer
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
+                               QLabel, QMainWindow, QMenu, QMessageBox,
+                               QStackedWidget, QVBoxLayout, QWidget)
+from utils.clip_tokenizer import ClipTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
+from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
+from models.image_storage import (get_database_path, get_database_tag_names,
+                                  get_image_storage, get_storage_backend)
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
+from models.tag_suggestion_model import TagSuggestionModel
 from utils.big_widgets import BigPushButton
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
@@ -48,13 +54,27 @@ class MainWindow(QMainWindow):
         tag_separator = get_tag_separator()
         self.image_list_model = ImageListModel(image_list_image_width,
                                                tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(
-            get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        # A lightweight token counter (see `utils/clip_tokenizer.py`): it loads
+        # the CLIP `tokenizer.json` via the Rust `tokenizers` library instead of
+        # `transformers.AutoTokenizer`, so app startup does not import
+        # `transformers`/`torch`. It produces identical token IDs to
+        # `AutoTokenizer` and exposes the same `tokenizer(text).input_ids`
+        # interface the tag editor and `tokens:` filter rely on.
+        tokenizer = ClipTokenizer(get_resource_path(TOKENIZER_DIRECTORY_PATH))
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
         self.image_list_model.proxy_image_list_model = (
             self.proxy_image_list_model)
         self.tag_counter_model = TagCounterModel()
+        # The suggestions offered in the Add Tag box (database-wide when the
+        # database is the active storage backend).
+        self.tag_suggestion_model = TagSuggestionModel()
+        # Cache of the tag names stored in the database (a list, in
+        # alphabetical order), used by `update_tag_suggestions` so that the
+        # per-caption suggestion refresh does not scan the entire database
+        # every time. None when the cache is empty or known to be stale
+        # (see `_database_tag_names`).
+        self._cached_database_tag_names: list[str] | None = None
         self.image_tag_list_model = ImageTagListModel()
 
         self.setWindowIcon(QIcon(QPixmap(get_resource_path(ICON_PATH))))
@@ -70,7 +90,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.image_list)
         self.image_tags_editor = ImageTagsEditor(
-            self.proxy_image_list_model, self.tag_counter_model,
+            self.proxy_image_list_model, self.tag_suggestion_model,
             self.image_tag_list_model, self.image_list, tokenizer,
             tag_separator)
         # The thumbnails need the editor to redirect typing to the Add Tag
@@ -307,7 +327,9 @@ class MainWindow(QMainWindow):
         # them after reloading the directory.
         filter_text = self.image_list.filter_line_edit.text()
         select_index_key = ('image_index'
-                            if self.proxy_image_list_model.filter is None
+                            if (self.proxy_image_list_model.filter is None
+                                and not self.proxy_image_list_model
+                                .filter_duplicates)
                             else 'filtered_image_index')
         select_index = self.settings.value(select_index_key, type=int) or 0
         # Selecting the image is deferred to `on_directory_loaded` because
@@ -320,7 +342,250 @@ class MainWindow(QMainWindow):
         settings_dialog = SettingsDialog(parent=self)
         settings_dialog.variant_grid_overlay_settings_changed.connect(
             self.image_viewer.refresh_grid_overlay_style)
+        settings_dialog.storage_backend_change_requested.connect(
+            lambda new_mode: self.handle_storage_backend_change(
+                settings_dialog, new_mode))
+        settings_dialog.database_changed_requested.connect(
+            self.on_database_changed)
         settings_dialog.exec()
+
+    @Slot(object, str)
+    def handle_storage_backend_change(self, settings_dialog, new_mode: str):
+        """
+        Switch the tags/descriptions storage mode (from the Settings dialog).
+        Switching moves no data unless the user checks the override box:
+        then the tags and descriptions of the loaded images are written to
+        caption files (when switching to text files) or imported into the
+        database (when switching to the database).
+        """
+        old_mode = self.settings.value(
+            'storage_backend',
+            defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
+        if new_mode == old_mode:
+            return
+        if not self.image_list_model.images:
+            # There are no loaded images, so there is no data to move.
+            self._apply_storage_backend(new_mode)
+            return
+        is_to_sqlite = new_mode == 'sqlite'
+        image_count = len(self.image_list_model.images)
+        message_box = QMessageBox()
+        message_box.setIcon(QMessageBox.Icon.Question)
+        if is_to_sqlite:
+            message_box.setWindowTitle('Switch to Database Storage')
+            message_box.setText('TagGUI will store tags and descriptions in '
+                                'the SQLite database from now on.')
+            override_text = 'Migrate and override database values'
+            override_note = (
+                f'If enabled, the tags and descriptions of the {image_count} '
+                'currently loaded images will be imported from their caption '
+                'files into the database, overwriting existing database '
+                'records for those images. Images without tags or a '
+                'description are skipped.')
+        else:
+            message_box.setWindowTitle('Switch to Text File Storage')
+            message_box.setText('TagGUI will store tags and descriptions in '
+                                'caption files (.txt) next to the images '
+                                'from now on.')
+            override_text = 'Migrate and override text files'
+            override_note = (
+                f'If enabled, the tags and descriptions of the {image_count} '
+                'currently loaded images will be written to caption files, '
+                'overwriting existing caption files. Images without tags or '
+                'a description are skipped.')
+        # The check box must be a child of the message box.
+        override_check_box = QCheckBox(override_text, message_box)
+        message_box.setCheckBox(override_check_box)
+        # Nest the check box together with a description of what it does, so
+        # that the description is clearly associated with the option.
+        # (QMessageBox places the check box at row 2, column 2 of its grid
+        # layout.)
+        grid = message_box.layout()
+        grid.removeWidget(override_check_box)
+        override_group = QWidget(message_box)
+        group_layout = QVBoxLayout(override_group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.addWidget(override_check_box)
+        override_note_label = QLabel(override_note, override_group)
+        override_note_label.setWordWrap(True)
+        override_note_label.setIndent(20)
+        # Use the application font (i.e. the configured font size) three
+        # point sizes smaller, clamped to a minimum of 1 so that the note
+        # never ends up with a zero or negative size.
+        override_note_font = QFont(QApplication.instance().font())
+        override_note_font.setPointSize(
+            max(1, override_note_font.pointSize() - 3))
+        override_note_font.setItalic(True)
+        override_note_label.setFont(override_note_font)
+        group_layout.addWidget(override_note_label)
+        grid.addWidget(override_group, 2, 2)
+        message_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        # The default action moves no data.
+        message_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if message_box.exec() != QMessageBox.StandardButton.Yes:
+            # The user canceled. Keep the current mode, and restore the
+            # combo to it (nothing was written).
+            settings_dialog.revert_storage_backend(old_mode)
+            return
+        if not override_check_box.isChecked():
+            # Switch without moving any data.
+            self._apply_storage_backend(new_mode)
+            return
+        # Move the loaded images' data to the new storage, then switch.
+        if is_to_sqlite:
+            try:
+                imported_count = (self.image_list_model
+                                  .import_loaded_images_to_database())
+            except (OSError, sqlite3.Error) as exception:
+                self._report_storage_switch_failure(
+                    settings_dialog,
+                    f'Failed to import the loaded images into the database: '
+                    f'{exception}.')
+                return
+            self._apply_storage_backend(new_mode,
+                                       migrated_count=imported_count)
+        else:
+            written_count, failed_paths = (
+                self.image_list_model.export_loaded_images_to_text_files())
+            if failed_paths:
+                self._report_storage_switch_failure(
+                    settings_dialog,
+                    f'Failed to write caption files for {len(failed_paths)} '
+                    f'{pluralize("image", len(failed_paths))} '
+                    f'(first: {failed_paths[0]}).')
+                return
+            self._apply_storage_backend(new_mode,
+                                       migrated_count=written_count)
+
+    def _report_storage_switch_failure(self, settings_dialog, message: str):
+        """
+        Report a failed storage mode switch and keep the current mode (the
+        Settings dialog's combo is restored to it; the setting itself was
+        not yet changed).
+        """
+        current_mode = self.settings.value(
+            'storage_backend',
+            defaultValue=DEFAULT_SETTINGS['storage_backend'], type=str)
+        settings_dialog.revert_storage_backend(current_mode)
+        QMessageBox.critical(self, 'Error', message)
+
+    def _apply_storage_backend(self, new_mode: str, migrated_count: int = 0):
+        """
+        Persist a successful storage mode switch, switch the active storage,
+        and report the result.
+        """
+        self.settings.setValue('storage_backend', new_mode)
+        self.image_list_model.set_storage(get_image_storage())
+        # Reload the directory (if one is loaded) so that the in-memory
+        # tags and descriptions come from the new storage. Without this, the
+        # data that was loaded from the old storage would keep being
+        # displayed — and, the next time an image is edited, written into
+        # the new storage — even though the switch moved no data. (The
+        # reload also clears the undo/redo history, which captured states
+        # of the old storage.)
+        if self.directory_path is not None and self.directory_path.is_dir():
+            self.reload_directory()
+        # The active storage (and therefore the database behind the tag
+        # suggestions) has changed: drop the cached database tag names.
+        self._cached_database_tag_names = None
+        self.update_tag_suggestions()
+        if migrated_count:
+            if new_mode == 'sqlite':
+                count_text = (f'{migrated_count} '
+                              f'{pluralize("image", migrated_count)}')
+                message = (f'Switched to database storage — imported '
+                           f'{count_text} into the database.')
+            else:
+                count_text = (f'{migrated_count} '
+                              f'{pluralize("caption file", migrated_count)}')
+                message = (f'Switched to text-file storage — wrote {count_text}.')
+        else:
+            if new_mode == 'sqlite':
+                message = 'Switched to database storage. No data was moved.'
+            else:
+                message = 'Switched to text-file storage. No data was moved.'
+        QMessageBox.information(self, 'Storage', message)
+
+    @Slot()
+    def on_database_changed(self):
+        """
+        React to the active database having changed from the Settings dialog
+        (it was cleared, or a database at a new location was adopted instead
+        of the one in use). Re-point the active storage to the database that
+        is now configured, then reload the directory (if one is loaded) so
+        that the in-memory tags and descriptions come from that database
+        rather than from the stale state loaded from the previous one.
+        """
+        self.image_list_model.set_storage(get_image_storage())
+        if self.directory_path is not None and self.directory_path.is_dir():
+            self.reload_directory()
+        # A different database (or none) is now in use: drop the cached
+        # database tag names.
+        self._cached_database_tag_names = None
+        self.update_tag_suggestions()
+
+    def update_tag_suggestions(self):
+        """
+        Refresh the tag suggestions offered in the Add Tag box. They are the
+        tags of the loaded images, and (when the SQLite database is the
+        active storage backend) all the tags stored in it too, so that every
+        tag ever used is offered no matter which folder is open. The count of
+        a tag is always how many of the loaded images use it, so the tags the
+        user is using most in the current folder sort first and tags that are
+        only in the database sort last (alphabetically), ready to be added.
+        When the database cannot be read, the suggestions are the tags of the
+        loaded images only.
+
+        The database's tag names are cached (`_cached_database_tag_names`,
+        see `_database_tag_names`) rather than re-scanned on every call:
+        this runs for every caption, and the scan is O(database tag count).
+        """
+        local_tag_counts = self.tag_counter_model.tag_counter
+        database_tag_names = self._database_tag_names()
+        if database_tag_names is None:
+            suggestions = list(local_tag_counts.most_common())
+        else:
+            tag_counts = dict(local_tag_counts)
+            for tag_name in database_tag_names:
+                tag_counts.setdefault(tag_name, 0)
+            suggestions = sorted(tag_counts.items(),
+                                 key=lambda tag_and_count: (
+                                     -tag_and_count[1], tag_and_count[0]))
+        self.tag_suggestion_model.update_suggestions(suggestions)
+
+    def _database_tag_names(self) -> list[str] | None:
+        """
+        The names of the tags stored in the database, from the cache when
+        it is valid (see `_cached_database_tag_names`), so that the
+        per-caption suggestion refresh does not re-scan the entire database.
+
+        The cache is a plain list (in the alphabetical order the query
+        returns it), not a set: the per-caption merge below iterates over
+        it, and iterating a list is much faster than iterating a set of the
+        same size. Tags the loaded images currently use never need to be in
+        the cache: `update_tag_suggestions` starts from the tag counter,
+        which holds them all.
+
+        Return None when the database is not the active storage backend or
+        cannot be read, in which case `update_tag_suggestions` offers the
+        loaded images' tags only (the completer keeps working).
+        """
+        if get_storage_backend() != 'sqlite':
+            return None
+        cached = self._cached_database_tag_names
+        if cached is None:
+            try:
+                cached = get_database_tag_names(get_database_path())
+            except (OSError, sqlite3.Error) as exception:
+                # The database is unavailable (for example, it is corrupted).
+                # Suggest the loaded images' tags only, so the completer
+                # keeps working. Do not cache the failure: retry next time.
+                print(f'Failed to load tag suggestions from the database: '
+                      f'{exception}', file=sys.stderr)
+                return None
+            self._cached_database_tag_names = cached
+        return cached
 
     @Slot()
     def reset_to_defaults(self):
@@ -351,6 +616,12 @@ class MainWindow(QMainWindow):
         find_and_replace_dialog = FindAndReplaceDialog(
             parent=self, image_list_model=self.image_list_model)
         find_and_replace_dialog.exec()
+
+    @Slot()
+    def show_export_images_dialog(self):
+        export_images_dialog = ExportImagesDialog(
+            parent=self, image_list_model=self.image_list_model)
+        export_images_dialog.exec()
 
     @Slot()
     def show_batch_reorder_tags_dialog(self):
@@ -463,6 +734,11 @@ class MainWindow(QMainWindow):
         reset_to_defaults_action.triggered.connect(self.reset_to_defaults)
         view_menu.addAction(reset_to_defaults_action)
 
+        tools_menu = menu_bar.addMenu('Tools')
+        export_images_action = QAction('Export Images...', parent=self)
+        export_images_action.triggered.connect(self.show_export_images_dialog)
+        tools_menu.addAction(export_images_action)
+
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
         open_github_repository_action.triggered.connect(
@@ -492,7 +768,8 @@ class MainWindow(QMainWindow):
         self.proxy_image_list_model.filter = filter_
         # Apply the new filter.
         self.proxy_image_list_model.invalidateFilter()
-        if filter_ is None:
+        if (filter_ is None
+                and not self.proxy_image_list_model.filter_duplicates):
             all_tags_list_selection_model = (self.all_tags_editor
                                              .all_tags_list.selectionModel())
             all_tags_list_selection_model.clearSelection()
@@ -508,6 +785,25 @@ class MainWindow(QMainWindow):
             self.image_list.list_view.set_current_image_index(
                 self.proxy_image_list_model.index(0, 0))
 
+    @Slot(bool)
+    def set_image_list_filter_duplicates(self, filter_duplicates: bool):
+        self.proxy_image_list_model.filter_duplicates = filter_duplicates
+        # Apply the new filter.
+        self.proxy_image_list_model.invalidateFilter()
+        if (self.proxy_image_list_model.filter is None
+                and not filter_duplicates):
+            # All images are shown again: select the previously selected
+            # image in the unfiltered image list.
+            select_index = self.settings.value('image_index', type=int) or 0
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(select_index, 0))
+        else:
+            # Select the first image.
+            self.image_list.list_view.set_current_image_index(
+                self.proxy_image_list_model.index(0, 0))
+        self.image_list.update_image_index_label(
+            self.image_list.list_view.currentIndex())
+
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index of the currently selected image."""
@@ -516,13 +812,17 @@ class MainWindow(QMainWindow):
         if not proxy_image_index.isValid():
             return
         settings_key = ('image_index'
-                        if self.proxy_image_list_model.filter is None
+                        if (self.proxy_image_list_model.filter is None
+                            and not self.proxy_image_list_model
+                            .filter_duplicates)
                         else 'filtered_image_index')
         self.settings.setValue(settings_key, proxy_image_index.row())
 
     def connect_image_list_signals(self):
         self.image_list.filter_line_edit.textChanged.connect(
             self.set_image_list_filter)
+        self.image_list.filter_duplicates_button.toggled.connect(
+            self.set_image_list_filter_duplicates)
         self.image_list_selection_model.currentChanged.connect(
             self.save_image_index)
         self.image_list_selection_model.currentChanged.connect(
@@ -555,6 +855,8 @@ class MainWindow(QMainWindow):
         self.image_list_model.modelReset.connect(
             lambda: self.tag_counter_model.count_tags(
                 self.image_list_model.images))
+        self.image_list_model.modelReset.connect(
+            self.update_tag_suggestions)
         self.image_list_model.dataChanged.connect(
             self.on_image_data_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(
@@ -777,10 +1079,43 @@ class MainWindow(QMainWindow):
         image tags editor. This matters because a thumbnail is generated for
         every image, which would otherwise recount the tags of every image
         thousands of times.
+
+        When the change came from a single-image update
+        (`update_image_tags` / `update_image_description`, the per-caption
+        path), the model set `_pending_tag_delta` / `_pending_description_only`
+        before emitting `dataChanged`, so the tag counter can be adjusted for
+        just that image (or not at all) instead of recounting every image.
+        This slot is the only `dataChanged` handler, and the connection is
+        direct (same thread), so the flags are always consumed here.
         """
         if roles == [Qt.ItemDataRole.DecorationRole]:
             return
-        self.tag_counter_model.count_tags(self.image_list_model.images)
+        image_list_model = self.image_list_model
+        tag_delta = image_list_model._pending_tag_delta
+        description_only = image_list_model._pending_description_only
+        image_list_model._pending_tag_delta = None
+        image_list_model._pending_description_only = False
+        if description_only:
+            # The description changed only: the tag counts are unchanged, so
+            # neither the tag counter nor the tag suggestions need a refresh.
+            pass
+        elif (tag_delta is not None
+              and first_changed_index.row() == last_changed_index.row()):
+            # Exactly one image changed (no duplicate copies were synced with
+            # it -- that would span several rows), so adjust the tag counter
+            # for that image instead of recounting every image.
+            self.tag_counter_model.apply_tag_delta(*tag_delta)
+            self.update_tag_suggestions()
+        else:
+            # Several images changed (the edited image plus its duplicate
+            # copies, or a batch operation / undo-redo), or the change did
+            # not come from a single-image update: recount everything. The
+            # tag set of the loaded images may also have changed (a tag
+            # renamed or deleted), so drop the cached database tag names --
+            # the refresh below re-queries them once.
+            self.tag_counter_model.count_tags(image_list_model.images)
+            self._cached_database_tag_names = None
+            self.update_tag_suggestions()
         self.image_tags_editor.reload_image_tags_if_changed(
             first_changed_index, last_changed_index)
 

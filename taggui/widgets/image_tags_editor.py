@@ -8,11 +8,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCompleter,
                                QDockWidget, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMessageBox, QPushButton, QSplitter,
                                QTextEdit, QVBoxLayout, QWidget)
-from transformers import PreTrainedTokenizerBase
+from utils.clip_tokenizer import ClipTokenizer
 
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
-from models.tag_counter_model import TagCounterModel
+from models.tag_suggestion_model import TagSuggestionModel
 from utils.image import Image
 from utils.settings import (DEFAULT_SETTINGS, get_settings,
                             get_tag_separator)
@@ -57,8 +57,8 @@ class TagInputBox(QLineEdit):
     tags_addition_requested = Signal(list, list)
 
     def __init__(self, image_tag_list_model: QStringListModel,
-                 tag_counter_model: TagCounterModel, image_list: ImageList,
-                 tag_separator: str):
+                 tag_suggestion_model: TagSuggestionModel,
+                 image_list: ImageList, tag_separator: str):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
         self.image_list = image_list
@@ -71,7 +71,7 @@ class TagInputBox(QLineEdit):
             'autocomplete_tags',
             defaultValue=DEFAULT_SETTINGS['autocomplete_tags'], type=bool)
         if autocomplete_tags:
-            self.completer = QCompleter(tag_counter_model)
+            self.completer = QCompleter(tag_suggestion_model)
             self.setCompleter(self.completer)
 
             def add_completed_tag(text: str):
@@ -500,9 +500,9 @@ class ImageTagsEditor(QDockWidget):
                                    if ref is not None]
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
-                 tag_counter_model: TagCounterModel,
+                 tag_suggestion_model: TagSuggestionModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.image_list_model: ImageListModel = \
             proxy_image_list_model.sourceModel()
@@ -519,7 +519,7 @@ class ImageTagsEditor(QDockWidget):
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
-                                         tag_counter_model, image_list,
+                                         tag_suggestion_model, image_list,
                                          tag_separator)
         # Grouped-view scope toggle: when checked, the Add Tag box adds only
         # to the current (highlighted) image; unchecked adds to all selected.
@@ -699,9 +699,13 @@ class ImageTagsEditor(QDockWidget):
         # On image load save the image reference for later use
         self.image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
-        # The image is None when the index is invalid (for example, when the
-        # model is reset while a directory is loading).
+        # The image is None when the index is invalid or out of range (for
+        # example, when the model is reset while a directory is loading).
+        # Drop the stale image index too, so a later `dataChanged` (which
+        # compares against `self.image_index.row()`) does not treat a row
+        # that no longer exists as the current image.
         if self.image is None:
+            self.image_index = None
             return
         self.set_image_tags()
         self.set_image_description()
@@ -732,6 +736,14 @@ class ImageTagsEditor(QDockWidget):
         if self.image is None:
             return
         current_description = self.description_editor.toPlainText()
+        # Populate the editor programmatically (e.g. loading a different image,
+        # or a storage-mode switch followed by a directory reload) sets the text
+        # to exactly the image's current description. Do not treat that as an
+        # edit and schedule a save; only react when the text actually differs
+        # from the image's description. This mirrors the equality guard in
+        # MainWindow.update_image_tags for the tag list.
+        if current_description == self.image.description:
+            return
         self.image.description = current_description
         self.description_save_timer.start()
 

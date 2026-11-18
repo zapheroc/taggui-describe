@@ -11,3 +11,19 @@ class Image:
     tags: list[str] = field(default_factory=list)
     description: str = ""
     thumbnail: QIcon | None = None
+    # The stable xxh3-128 content hash of the image file, set by the storage
+    # backend when the image is loaded. In database mode it is the key of the
+    # image's record; in text-file mode it still keys the on-disk thumbnail
+    # cache and drives the duplicate detection (the tags stay in the caption
+    # file). None only when the hash could not be resolved.
+    content_hash: str | None = None
+    # How many of the loaded images have the same content as this one
+    # (itself included): 2 or more when the image has duplicate file(s), 0
+    # when it has no content hash (hash resolution failed) or no other loaded
+    # image shares its content. Set by the image list model when a directory
+    # loads. In database mode the duplicates share one record, so they always
+    # show the same tags.
+    duplicate_count: int = 0
+    # This copy's 1-based position among the loaded files with the same
+    # content (0 when it is not part of a duplicate group).
+    duplicate_position: int = 0

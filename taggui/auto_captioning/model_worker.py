@@ -32,6 +32,14 @@ def run_worker(request_q, response_q, caption_settings,
 
         ctx = WorkerContext(models_directory_path, tag_separator, cancel_event)
         model_class = get_model_class(caption_settings['model_id'])
+        # Suppress noisy transformers logging, but only if `transformers` was
+        # actually imported by the model class. The non-transformers backends
+        # (e.g. the WD Tagger) must not pull in `transformers` at all, so the
+        # suppression is conditional rather than an unconditional import (it was
+        # previously done in `run_gui.py` at app startup).
+        if 'transformers' in sys.modules:
+            import transformers
+            transformers.logging.set_verbosity_error()
         model = model_class(worker_context=ctx,
                             caption_settings=caption_settings)
 

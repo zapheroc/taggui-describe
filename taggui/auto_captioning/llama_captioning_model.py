@@ -1,14 +1,21 @@
 import base64
 import io
 from pathlib import Path
+
 import numpy as np
 from PIL import Image as PILImage
-from llama_cpp import Llama
-from llama_cpp.llama_chat_format import MTMDChatHandler
+
+from utils.cuda_preload import preload_cuda_libs
+
+# Must run before llama_cpp is imported; see utils/cuda_preload.py.
+preload_cuda_libs()
+
+from llama_cpp import Llama  # noqa: E402
+from llama_cpp.llama_chat_format import MTMDChatHandler  # noqa: E402
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 from auto_captioning.worker_context import WorkerContext
-from auto_captioning.settings_group import SettingGroup
+from auto_captioning.settings_group import LLAMA_GROUPS, SettingGroup
 
 
 # TODO: This belong in gemma 4 or a utlity class
@@ -80,15 +87,8 @@ class LlamaCaptioningModel(AutoCaptioningModel):
 
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
-        # TODO configure these groups
-        return super().get_setting_groups() | {
-            SettingGroup.SEED,
-            SettingGroup.MAX_TOKENS,
-            SettingGroup.TEMPERATURE,
-            SettingGroup.TOP_K,
-            SettingGroup.TOP_P,
-            SettingGroup.REPETITION_PENALTY,
-        }
+        # TODO configure these groups.
+        return LLAMA_GROUPS
 
     def update_caption_settings(self, caption_settings: dict):
         super().update_caption_settings(caption_settings)

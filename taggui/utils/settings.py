@@ -30,7 +30,19 @@ DEFAULT_SETTINGS = {
     'variant_grid_overlay_show': True,
     'variant_grid_overlay_font_size': 10,
     'variant_grid_overlay_transparency': 55,
-    'models_directory_path': ''
+    'models_directory_path': '',
+    # How the tags and descriptions of the loaded images are stored:
+    # 'sqlite' (a local SQLite database, keyed by image content) or 'text'
+    # (a .txt caption file next to each image).
+    'storage_backend': 'sqlite',
+    # Location of the database file. Empty means the platform-appropriate
+    # default location.
+    'database_path': '',
+    # Maximum size of the on-disk thumbnail cache (see
+    # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
+    # images when evicted, so this only bounds disk usage. 4 GiB holds the
+    # 200-px thumbnails of tens of thousands of images at once.
+    'thumbnail_cache_max_size_mb': 4096
 }
 
 

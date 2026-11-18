@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 datas = [('clip-vit-base-patch32', 'clip-vit-base-patch32'),
-         ('images/icon.ico', 'images')]
+         ('images/icon.ico', 'images'),
+         ('images/duplicate-images.svg', 'images')]
 hiddenimports = [
     'timm.models.layers',
 ]

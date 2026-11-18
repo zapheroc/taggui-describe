@@ -2,20 +2,25 @@ import operator
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
-from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
+from utils.clip_tokenizer import ClipTokenizer
 from utils.image import Image
 
 
 class ProxyImageListModel(QSortFilterProxyModel):
     def __init__(self, image_list_model: ImageListModel,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: ClipTokenizer, tag_separator: str):
         super().__init__()
         self.setSourceModel(image_list_model)
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.filter: list | None = None
+        # Set by the "Duplicates" toggle button below the filter line edit:
+        # when true, only images with at least one other loaded file with
+        # the same content are shown (content-based, so it works in both
+        # storage modes).
+        self.filter_duplicates: bool = False
 
     def does_image_match_filter(self, image: Image,
                                 filter_: list | str) -> bool:
@@ -69,14 +74,22 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:
-        # Show all images if there is no filter.
-        if self.filter is None:
-            return True
         image_index = self.sourceModel().index(source_row, 0)
         image: Image = self.sourceModel().data(image_index,
                                                Qt.ItemDataRole.UserRole)
+        return self.is_image_visible(image)
+
+    def is_image_visible(self, image: Image) -> bool:
+        """
+        Whether the image is shown in the list: it passes the duplicates
+        toggle and the filter text (if any).
+        """
+        if self.filter_duplicates and image.duplicate_count < 2:
+            return False
+        # Show all images if there is no filter.
+        if self.filter is None:
+            return True
         return self.does_image_match_filter(image, self.filter)
 
     def is_image_in_filtered_images(self, image: Image) -> bool:
-        return (self.filter is None
-                or self.does_image_match_filter(image, self.filter))
+        return self.is_image_visible(image)

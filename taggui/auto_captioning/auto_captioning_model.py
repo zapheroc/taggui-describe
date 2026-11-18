@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 import re
 from abc import ABC, abstractmethod
 
-import numpy as np
 from auto_captioning.worker_context import WorkerContext
-from transformers import BatchFeature
 from utils.image import Image
-from auto_captioning.settings_group import SettingGroup
+from auto_captioning.settings_group import SHARED_GROUPS, SettingGroup
 
 
 def _replace_template_variable(match: re.Match, image: Image) -> str:
@@ -36,11 +36,8 @@ class AutoCaptioningModel(ABC):
     @classmethod
     def get_setting_groups(cls) -> set[SettingGroup]:
         # Backends declare their own. Default to the universally-shared rows.
-        return {
-            # TODO decide the group of config items that are shared by all
-            SettingGroup.PROMPT,
-            SettingGroup.REMOVE_TAG_SEPARATORS,
-        }
+        # TODO decide the group of config items that are shared by all.
+        return SHARED_GROUPS
 
     def update_caption_settings(self, caption_settings: dict):
         self.prompt = caption_settings['prompt']
