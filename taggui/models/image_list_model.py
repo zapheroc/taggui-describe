@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QMessageBox
 from models.image_storage import (ImageStorage,
                                    export_images_to_text_files,
                                    get_database_path, get_image_storage,
-                                   import_images)
+                                   import_images, read_caption_file)
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.thumbnail_cache import get_max_cache_bytes
@@ -51,6 +51,54 @@ def get_file_paths(directory_path: Path) -> set[Path]:
         elif path.is_dir():
             file_paths.update(get_file_paths(path))
     return file_paths
+
+
+def get_image_dimensions(image_path: Path) -> tuple[int, int] | None:
+    """
+    The (width, height) of an image file, accounting for its Exif
+    orientation. None when the dimensions could not be determined (the
+    image still loads).
+    """
+    dimensions = None
+    try:
+        dimensions = imagesize.get(image_path)
+        # Check the Exif orientation tag and rotate the dimensions if
+        # necessary.
+        with open(image_path, 'rb') as image_file:
+            try:
+                exif_tags = exifread.process_file(
+                    image_file, details=False,
+                    stop_tag='Image Orientation')
+                if 'Image Orientation' in exif_tags:
+                    orientations = (exif_tags['Image Orientation']
+                                    .values)
+                    if any(value in orientations
+                           for value in (5, 6, 7, 8)):
+                        dimensions = (dimensions[1], dimensions[0])
+            except Exception as exception:
+                print(f'Failed to get Exif tags for {image_path}: '
+                      f'{exception}', file=sys.stderr)
+    except (ValueError, OSError) as exception:
+        print(f'Failed to get dimensions for {image_path}: '
+              f'{exception}', file=sys.stderr)
+        dimensions = None
+    return dimensions
+
+
+def get_image_suffixes() -> list:
+    """The image file suffixes (with a leading dot, lower-cased) from the
+    settings."""
+    settings = get_settings()
+    image_suffixes_string = settings.value(
+        'image_list_file_formats',
+        defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+    image_suffixes = []
+    for suffix in image_suffixes_string.split(','):
+        suffix = suffix.strip().lower()
+        if not suffix.startswith('.'):
+            suffix = '.' + suffix
+        image_suffixes.append(suffix)
+    return image_suffixes
 
 
 @dataclass
@@ -136,29 +184,7 @@ class DirectoryLoadTask(QRunnable):
     def run(self):
         image = None
         try:
-            dimensions = None
-            try:
-                dimensions = imagesize.get(self.image_path)
-                # Check the Exif orientation tag and rotate the dimensions if
-                # necessary.
-                with open(self.image_path, 'rb') as image_file:
-                    try:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        print(f'Failed to get Exif tags for {self.image_path}: '
-                              f'{exception}', file=sys.stderr)
-            except (ValueError, OSError) as exception:
-                print(f'Failed to get dimensions for {self.image_path}: '
-                      f'{exception}', file=sys.stderr)
-                dimensions = None
+            dimensions = get_image_dimensions(self.image_path)
             tags, description, content_hash = (
                 self.storage.load_image(self.image_path))
             image = Image(self.image_path, dimensions, tags, description,
@@ -174,6 +200,221 @@ class DirectoryLoadTask(QRunnable):
             self.worker.task_finished(image)
         except RuntimeError:
             # The worker (and therefore the image list model) has been
+            # destroyed, so there is no one to notify.
+            pass
+
+
+@dataclass
+class RefreshResult:
+    """The outcome of a background directory refresh (see RefreshScanner)."""
+    directory_path: Path
+    added_images: list
+    removed_paths: set
+    # path -> {'file': (snapshot_mtime, new_mtime, dimensions,
+    #              content_hash, tags, description),
+    #          'caption': (snapshot_mtime, new_mtime, tags, description)}
+    updates: dict
+
+
+class RefreshScanner(QObject, QRunnable):
+    """
+    Re-scans the current directory off the main thread to detect the files
+    that were added, removed or changed since the model was loaded (or last
+    refreshed), then reports a diff.
+
+    All disk I/O (directory walk, stats, resolving the tags and description
+    of the changed images) happens here, in a worker thread, so refreshing
+    never freezes the UI. The resulting diff is applied on the main thread by
+    `ImageListModel.apply_refresh_result`, which does only fast in-memory
+    work.
+
+    The task is added to a `registry` set and removed from it when it is
+    done. The set keeps a strong reference to the task so that it is not
+    garbage collected while the thread pool still references it.
+    """
+
+    refresh_complete = Signal(object)
+
+    def __init__(self, directory_path: Path, image_suffixes: list,
+                 storage: ImageStorage, snapshot: dict, registry: set):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        self.directory_path = directory_path
+        self.image_suffixes = image_suffixes
+        self.storage = storage
+        # path -> (image mtime_ns, caption mtime_ns or None) for every image
+        # currently loaded, captured on the main thread before the scan.
+        self.snapshot = snapshot
+        self.registry = registry
+        registry.add(self)
+
+    @Slot()
+    def run(self):
+        try:
+            result = self._scan()
+        except Exception as exception:
+            # The directory may have been removed or become unreadable while
+            # scanning. Report an empty (no-op) diff so the UI simply skips
+            # this refresh; the next refresh will try again. (Any other error
+            # is handled the same way, so refreshing never stops working.)
+            if not isinstance(exception, OSError):
+                print(f'Failed to refresh {self.directory_path}: '
+                      f'{exception}', file=sys.stderr)
+            result = RefreshResult(self.directory_path, [], set(), {})
+        self._notify(result)
+        self.registry.discard(self)
+
+    def _notify(self, result: 'RefreshResult'):
+        try:
+            self.refresh_complete.emit(result)
+        except RuntimeError:
+            # The receiver (and therefore the image list model) has been
+            # destroyed, so there is no one to notify.
+            pass
+
+    def _scan(self) -> 'RefreshResult':
+        file_paths = get_file_paths(self.directory_path)
+        image_paths = {path for path in file_paths
+                       if path.suffix.lower() in self.image_suffixes}
+        existing_paths = set(self.snapshot.keys())
+        removed_paths = existing_paths - image_paths
+        added_paths = sorted(image_paths - existing_paths)
+
+        # Build full Image objects for the newly added files (read-only
+        # work). `load_image` resolves the content hash (and, in database
+        # mode, the stored record for it) and the tags and description.
+        added_images = []
+        for image_path in added_paths:
+            dimensions = get_image_dimensions(image_path)
+            try:
+                image_path.stat()
+            except OSError:
+                # The file is gone or unreadable (it was deleted or moved
+                # after the directory was scanned). Skip it; the next
+                # refresh will pick it up if it reappears.
+                continue
+            tags, description, content_hash = (
+                self.storage.load_image(image_path))
+            added_images.append(Image(image_path, dimensions, tags,
+                                      description,
+                                      content_hash=content_hash))
+        added_images.sort(key=lambda image: image.path)
+
+        # Detect changes to images that already existed at snapshot time.
+        updates: dict = {}
+        # The database is the source of truth for the tags and description
+        # in database mode, so only the image file's own time matters (and
+        # stat'ing the caption file as well would double the per-image cost
+        # of the snapshot). In text-file mode the caption file holds them.
+        text_file_mode = not self.storage.shared_content_records
+        for image_path, (snapshot_mtime, snapshot_caption_mtime) \
+                in self.snapshot.items():
+            if image_path in removed_paths:
+                continue
+            entry: dict = {}
+
+            try:
+                new_mtime = image_path.stat().st_mtime_ns
+            except OSError:
+                # Unreadable (it was deleted after the scan started): the
+                # removal is reported above (or was already, if the file was
+                # gone at the walk), so skip the change check.
+                continue
+            if new_mtime != snapshot_mtime:
+                dimensions = get_image_dimensions(image_path)
+                tags, description, content_hash = (
+                    self.storage.load_image(image_path))
+                entry['file'] = (snapshot_mtime, new_mtime, dimensions,
+                                 content_hash, tags, description)
+
+            if text_file_mode:
+                text_file_path = image_path.with_suffix('.txt')
+                try:
+                    new_caption_mtime = text_file_path.stat().st_mtime_ns
+                except OSError:
+                    new_caption_mtime = None
+                # Also catches a caption file that appeared since the
+                # snapshot (its mtime was then None).
+                if new_caption_mtime != snapshot_caption_mtime:
+                    if new_caption_mtime is None:
+                        # The caption file is gone (or unreadable).
+                        tags, description = [], ''
+                    else:
+                        tags, description = read_caption_file(
+                            text_file_path, self.storage.tag_separator)
+                    entry['caption'] = (snapshot_caption_mtime,
+                                        new_caption_mtime, tags,
+                                        description)
+
+            if entry:
+                updates[image_path] = entry
+
+        return RefreshResult(self.directory_path, added_images,
+                             removed_paths, updates)
+
+
+class BatchSaveTask(QObject, QRunnable):
+    """
+    Saves a batch operation's images (their tags and descriptions) off the
+    GUI thread.
+
+    `storage.save_images` (one atomic transaction in database mode, one
+    caption file per image in text-file mode) runs on the save pool — a
+    single thread, so the writes are serialized in schedule order and the
+    last-scheduled save for an image is also the last one written for it.
+
+    Follows the `RefreshScanner` pattern: the task is added to a
+    strong-reference `registry` set (so it is not garbage collected while
+    the thread pool still references it) and removed from it when it is
+    done. It reports by signal, which is delivered to the GUI thread; the
+    generation number lets the receiver discard the result for the images
+    a newer save has superseded (see
+    `ImageListModel.on_batch_save_finished`).
+
+    The storage backends read the `Image` objects' tags and description
+    when the save runs (as they do for a synchronous save); a newer edit
+    scheduled while this save was in flight is saved by its own, later
+    task, which runs after this one on the single save thread.
+    """
+
+    batch_save_finished = Signal(int, object, object)
+
+    def __init__(self, generation: int, storage: ImageStorage,
+                 images: list[Image], registry: set):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        self.generation = generation
+        self.storage = storage
+        self.images = images
+        self.registry = registry
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        registry.add(self)
+
+    @Slot()
+    def run(self):
+        try:
+            failed = self.storage.save_images(self.images)
+        except Exception as exception:
+            # A backend may raise instead of reporting per-image failures
+            # (see the default `ImageStorage.save_images`): in that case
+            # report every image as unsaved.
+            print(f'Failed to save tags for {len(self.images)} image(s): '
+                  f'{exception}', file=sys.stderr)
+            failed = list(self.images)
+        self._notify(failed)
+        self.registry.discard(self)
+
+    def _notify(self, failed: list[Image]):
+        try:
+            self.batch_save_finished.emit(self.generation, self.images,
+                                          failed)
+        except RuntimeError:
+            # The receiver (and therefore the image list model) has been
             # destroyed, so there is no one to notify.
             pass
 
@@ -221,6 +462,17 @@ class ImageListModel(QAbstractListModel):
         # the tag counter needs no update at all). Same lifecycle as
         # `_pending_tag_delta`.
         self._pending_description_only = False
+        # (old_tags, new_tags) for each duplicate copy a save synced (see
+        # `on_batch_save_finished` and `_sync_duplicate_images`; set for
+        # the copies a completed batch save synced and, by
+        # `update_image_tags`, for the copies a single-image save
+        # refreshed), so the tag counter can be adjusted per synced copy
+        # instead of recounting every image. Same lifecycle as
+        # `_pending_tag_delta`: set right before the sync's `dataChanged`
+        # is emitted and consumed (and cleared) by the slot; None when the
+        # most recent change did not sync duplicate copies.
+        self._pending_sync_deltas: (
+            list[tuple[list[str], list[str]]] | None) = None
         # True only while restoring tags from the undo/redo history. Consumers
         # (e.g. the Common/Differences panel) use this to distinguish a genuine
         # new edit from a history restore, so an undone/redone tag returns to
@@ -259,6 +511,29 @@ class ImageListModel(QAbstractListModel):
         self.directory_load_thread_pool = QThreadPool(self)
         self.directory_load_thread_pool.setMaxThreadCount(
             min(8, os.cpu_count() or 4))
+        # Batch saves (a batch operation's tags/description writes) run on
+        # a single-threaded pool, off the GUI thread: the writes are
+        # serialized (disk order = schedule order) and the GUI thread is
+        # never blocked by them (see `write_images_tags_to_disk`). Unlike
+        # the read-only pools above, a save that is dropped or left
+        # unfinished at exit leaves that image's tags stale on disk, so
+        # `wait_for_pending_work` handles it separately.
+        self.save_thread_pool = QThreadPool(self)
+        self.save_thread_pool.setMaxThreadCount(1)
+        # Strong references to running/queued save tasks (each task removes
+        # itself from the set when it is done); `wait_for_pending_work`
+        # reports the tasks still here at exit as unsaved.
+        self._save_tasks: set = set()
+        # Bumped for each scheduled batch save (see
+        # `_schedule_batch_save`).
+        self._save_generation = 0
+        # id(image) -> the generation of the newest save scheduled for that
+        # image (see `_schedule_batch_save` / `on_batch_save_finished`): a
+        # save that completes after a newer one was scheduled for the same
+        # image must not apply its result for that image. A save's stamps
+        # are dropped when that save completes, so the dict does not grow
+        # without bound over a session.
+        self._image_save_generation: dict[int, int] = {}
         self.directory_load_worker = None
         # Incremented for each directory load. Used to discard the results of
         # loads that are superseded by a newer load.
@@ -361,17 +636,13 @@ class ImageListModel(QAbstractListModel):
         self.thumbnail_generation += 1
         self.directory_load_generation += 1
         generation = self.directory_load_generation
+        # This load supersedes any previous one (whose result will be
+        # discarded by the generation check): refreshes may start again as
+        # soon as it begins, once this load has finished (or, if there are
+        # no images to load, immediately).
+        self.directory_load_worker = None
         file_paths = get_file_paths(directory_path)
-        settings = get_settings()
-        image_suffixes_string = settings.value(
-            'image_list_file_formats',
-            defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-        image_suffixes = []
-        for suffix in image_suffixes_string.split(','):
-            suffix = suffix.strip().lower()
-            if not suffix.startswith('.'):
-                suffix = '.' + suffix
-            image_suffixes.append(suffix)
+        image_suffixes = get_image_suffixes()
         image_paths = {path for path in file_paths
                        if path.suffix.lower() in image_suffixes}
         if not image_paths:
@@ -400,6 +671,9 @@ class ImageListModel(QAbstractListModel):
         # The load has been superseded by a newer load.
         if generation != self.directory_load_generation:
             return
+        # The load is over: a directory refresh is allowed to start again
+        # (it is blocked while `directory_load_worker` is set).
+        self.directory_load_worker = None
         images.sort(key=lambda image_: image_.path)
         self.beginResetModel()
         self.images = images
@@ -412,6 +686,36 @@ class ImageListModel(QAbstractListModel):
         self.storage.flush_hash_cache()
         self.directory_loaded.emit()
         self.start_thumbnail_generation()
+
+    def snapshot_file_times(self) -> dict:
+        """
+        For every loaded image, `(image mtime_ns, caption mtime_ns)`,
+        captured now (on the GUI thread) as the baseline a `RefreshScanner`
+        compares against after re-scanning the directory.
+
+        The caption file's time is only recorded in text-file mode: in
+        database mode the database is the source of truth for the tags and
+        description, so the caption file is irrelevant (and stat'ing it
+        would double the per-image cost). None when the file (or caption)
+        could not be stat'ed.
+        """
+        snapshot: dict = {}
+        text_file_mode = not self.storage.shared_content_records
+        for image in self.images:
+            try:
+                image_mtime = image.path.stat().st_mtime_ns
+            except OSError:
+                image_mtime = None
+            if text_file_mode:
+                try:
+                    caption_mtime = (image.path.with_suffix('.txt')
+                                     .stat().st_mtime_ns)
+                except OSError:
+                    caption_mtime = None
+            else:
+                caption_mtime = None
+            snapshot[image.path] = (image_mtime, caption_mtime)
+        return snapshot
 
     def _build_duplicate_index(self):
         """
@@ -442,11 +746,210 @@ class ImageListModel(QAbstractListModel):
                 image.duplicate_count = len(rows)
                 image.duplicate_position = position
 
+    def apply_refresh_result(self, result: 'RefreshResult') -> tuple[bool, list]:
+        """
+        Apply a `RefreshResult` (see `RefreshScanner`) to the loaded images.
+        Runs on the GUI thread; it does only in-memory work (the disk I/O was
+        done by the scanner on a worker thread).
+
+        The diff is applied with the model's row-removal and row-insertion
+        signals so that the proxy model (and the view) stays in sync.
+
+        Returns `(structure_changed, changed_rows)`: whether rows were added
+        or removed or an image's content changed (so the tag counter must be
+        recounted and the undo history cleared), and the rows of the images
+        whose data changed.
+        """
+        structure_changed = False
+        content_changed = False
+        changed_rows = []
+
+        # Removals: files that are gone from disk.
+        if result.removed_paths:
+            rows_to_remove = [row for row, image in enumerate(self.images)
+                              if image.path in result.removed_paths]
+            for row in sorted(rows_to_remove, reverse=True):
+                self.beginRemoveRows(QModelIndex(), row, row)
+                del self.images[row]
+                self.endRemoveRows()
+            if rows_to_remove:
+                structure_changed = True
+            # The removed files' hash-cache rows are stale (the files are
+            # gone): drop them. A file re-created at the same path has a new
+            # ctime, so it would miss the cache and be re-hashed anyway; this
+            # is for tidiness.
+            self.storage.prune_hash_cache(result.removed_paths)
+
+        # Additions: files that newly appeared. Insert them at their
+        # sorted-by-path position so the list stays sorted by path (as a
+        # directory load produces it).
+        if result.added_images:
+            existing_paths = {image.path for image in self.images}
+            new_images = [image for image in result.added_images
+                          if image.path not in existing_paths]
+            if new_images:
+                structure_changed = True
+                new_index = 0
+                row = 0
+                while new_index < len(new_images) and row < len(self.images):
+                    if new_images[new_index].path < self.images[row].path:
+                        self.beginInsertRows(QModelIndex(), row, row)
+                        self.images.insert(row, new_images[new_index])
+                        self.endInsertRows()
+                        new_index += 1
+                        row += 1
+                    else:
+                        row += 1
+                while new_index < len(new_images):
+                    row = len(self.images)
+                    self.beginInsertRows(QModelIndex(), row, row)
+                    self.images.insert(row, new_images[new_index])
+                    self.endInsertRows()
+                    new_index += 1
+
+        # Updates: files whose content (and, in text-file mode, whose
+        # caption file) changed on disk.
+        if result.updates:
+            path_to_row = {image.path: row
+                           for row, image in enumerate(self.images)}
+            for image_path, entry in result.updates.items():
+                row = path_to_row.get(image_path)
+                if row is None:
+                    continue
+                image = self.images[row]
+                if 'file' in entry:
+                    (_, new_mtime, dimensions, content_hash, tags,
+                     description) = entry['file']
+                    if dimensions is not None:
+                        image.dimensions = dimensions
+                    if (content_hash is not None
+                            and content_hash != image.content_hash):
+                        # The file's content changed (it now has a different
+                        # hash), so the in-memory tags and description belong
+                        # to the old content: adopt the record the storage
+                        # read for the new content (in database mode, the
+                        # record stored for that content, or the caption file
+                        # imported for it). When the hash is the same, the
+                        # in-memory values are kept -- they are at least as
+                        # fresh (a save that failed to reach the storage must
+                        # not be reverted by a storage read).
+                        image.tags = tags
+                        image.description = description
+                        image.content_hash = content_hash
+                        # The old thumbnail is for the old content.
+                        image.thumbnail = None
+                        content_changed = True
+                    changed_rows.append(row)
+                if 'caption' in entry:
+                    (snapshot_caption_mtime, new_caption_mtime, tags,
+                     description) = entry['caption']
+                    if new_caption_mtime is not None:
+                        try:
+                            current_caption_mtime = (
+                                image.path.with_suffix('.txt')
+                                .stat().st_mtime_ns)
+                        except OSError:
+                            current_caption_mtime = None
+                        if (current_caption_mtime is not None
+                                and current_caption_mtime
+                                != new_caption_mtime):
+                            # The caption changed again between the scan (on
+                            # a worker thread) and now (e.g. an edit saved
+                            # while the scan was running): the scan's read is
+                            # stale, so re-read the current content.
+                            tags, description = read_caption_file(
+                                image.path, self.tag_separator)
+                    if (not tags and not description
+                            and (image.tags or image.description)):
+                        # The scan read this caption as empty (the file may
+                        # have been deleted, or it may have been in the
+                        # instant it is rewritten). Before letting an empty
+                        # read replace a caption that currently has content,
+                        # re-read the file synchronously here (on the GUI
+                        # thread) to confirm it is really empty. This never
+                        # blocks a genuinely emptied or deleted file (an
+                        # intentional clear still applies); it only rejects
+                        # the transient empty read that would otherwise wipe
+                        # a saved caption.
+                        reread_tags, reread_description = read_caption_file(
+                            image.path, self.tag_separator)
+                        if reread_tags or reread_description:
+                            tags = reread_tags
+                            description = reread_description
+                    image.tags = tags
+                    image.description = description
+                    changed_rows.append(row)
+
+        if structure_changed or content_changed:
+            # The duplicate groups may have changed (files removed, added, or
+            # content replaced): rebuild the index and record the rows whose
+            # (duplicate_count, duplicate_position) changed.
+            previous_flags = {id(image): (image.duplicate_count,
+                                          image.duplicate_position)
+                              for image in self.images}
+            self._build_duplicate_index()
+            for row, image in enumerate(self.images):
+                if (image.duplicate_count, image.duplicate_position) \
+                        != previous_flags[id(image)]:
+                    changed_rows.append(row)
+            # The list's structure (or the content of a file) changed, so
+            # the position-based undo/redo history no longer refers to the
+            # same images and contents: clear it, exactly as a directory
+            # load does.
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            self._last_undo_push = None
+            self.newest_history_item = None
+            self.update_undo_and_redo_actions_requested.emit()
+
+        if changed_rows:
+            # One combined `dataChanged` over all changed rows. The
+            # `on_image_data_changed` handler sees no pending flags (this did
+            # not come from a single-image update) and recounts the tags of
+            # all images and drops the cached database tag names.
+            first_row = min(changed_rows)
+            last_row = max(changed_rows)
+            self.dataChanged.emit(self.index(first_row),
+                                  self.index(last_row))
+        # Write the hash-cache rows the scanner's `load_image` calls queued
+        # (and any rows a still-running load queued): the buffer is drained
+        # best-effort, and this is a no-op when it is empty.
+        self.storage.flush_hash_cache()
+
+        if structure_changed or content_changed:
+            # Rows were added or removed, or a file's content was replaced,
+            # so the in-flight thumbnail tasks may reference stale rows (or
+            # stale content): discard them and (re)generate the thumbnails
+            # that are missing.
+            self.start_thumbnail_generation()
+        elif changed_rows:
+            # Only tags and descriptions changed: the existing thumbnails are
+            # still valid, so generate only the ones that are missing.
+            self.start_thumbnail_generation_for_rows(changed_rows)
+        return structure_changed, changed_rows
+
     def start_thumbnail_generation(self):
-        """Start generating thumbnails on background threads."""
+        """Start generating thumbnails for every loaded image, on background
+        threads."""
+        # Discard the results of any in-flight generation pass: its tasks may
+        # reference rows that no longer exist (or stale content) after a
+        # structural change or a content replacement.
         self.thumbnail_generation += 1
+        self.start_thumbnail_generation_for_rows(range(len(self.images)))
+
+    def start_thumbnail_generation_for_rows(self, rows):
+        """Start generating thumbnails for the given rows, on background
+        threads, using the current generation (it does not bump it: in-flight
+        tasks keep their results valid). Rows that already have a thumbnail
+        (or no longer exist) are skipped."""
         generation = self.thumbnail_generation
-        for row, image in enumerate(self.images):
+        count = len(self.images)
+        for row in rows:
+            if row < 0 or row >= count:
+                continue
+            image = self.images[row]
+            if image.thumbnail is not None:
+                continue
             task = ThumbnailGenerationTask(
                 row, image.path, self.image_list_image_width, generation,
                 self.thumbnail_worker, self._running_tasks,
@@ -477,13 +980,33 @@ class ImageListModel(QAbstractListModel):
         given a bounded chance to finish, so that the pools are destroyed
         without worker threads still inside a task (which makes Qt report
         worker-thread exceptions, and can even abort the process). All of
-        the work is read-only and its results are no longer needed, so
-        discarding it is safe.
+        the read-only work (directory loads, thumbnails) is discardable:
+        its results are no longer needed.
+
+        The save pool is different: a save that is dropped or left
+        unfinished leaves that image's tags stale on disk. It gets the same
+        bounded chance to finish (only the one running — queued saves are
+        dropped), and the images of the saves that could not complete are
+        logged so the user knows what to re-run.
         """
         for pool in (self.directory_load_thread_pool,
-                     self.thumbnail_thread_pool):
+                     self.thumbnail_thread_pool,
+                     self.save_thread_pool):
             pool.clear()
             pool.waitForDone(SHUTDOWN_TIMEOUT_MS)
+        # The tasks still referenced here (queued and dropped, or still
+        # running after the timeout) have not saved their images.
+        unsaved = [image for task in list(self._save_tasks)
+                   for image in getattr(task, 'images', [])]
+        if unsaved:
+            print(f'Unsaved images ({len(unsaved)}): the save did not '
+                  f'finish before exit; re-run the operation to save them:',
+                  file=sys.stderr)
+            for image in unsaved[:100]:
+                print(f'  {image.path}', file=sys.stderr)
+            if len(unsaved) > 100:
+                print(f'  ... and {len(unsaved) - 100} more',
+                      file=sys.stderr)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
@@ -521,7 +1044,14 @@ class ImageListModel(QAbstractListModel):
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot(Image)
-    def write_image_tags_to_disk(self, image: Image):
+    def write_image_tags_to_disk(self, image: Image,
+                                 deltas: list | None = None):
+        # `deltas` (see `_sync_duplicate_images`): when given, the
+        # (old_tags, new_tags) pairs of the duplicate copies the save
+        # refreshes are appended to it, so the caller can hand them to the
+        # `dataChanged` handler via `_pending_sync_deltas` instead of
+        # triggering a full tag recount. Optional: this method is also
+        # connected directly to a signal that passes only the image.
         try:
             self.storage.save_image(image)
         except (OSError, sqlite3.Error) as exception:
@@ -535,9 +1065,134 @@ class ImageListModel(QAbstractListModel):
             # The save failed, so the storage still holds the old values; do
             # not sync the other in-memory copies to the unsaved ones.
             return
-        self._sync_duplicate_images(image)
+        self._sync_duplicate_images(image, deltas=deltas)
 
-    def _sync_duplicate_images(self, image: Image):
+    def write_images_tags_to_disk(self, images: list[Image]) -> bool:
+        """
+        Save several images' tags and descriptions (a single atomic
+        transaction in database mode; see `ImageStorage.save_images`) on
+        the save pool, off the GUI thread.
+
+        The caller has already updated the images' in-memory state and
+        emitted the `dataChanged` for the edited rows; this only persists
+        it. When the save finishes, `on_batch_save_finished` brings the
+        other in-memory copies of each saved image's content in line (a
+        small second `dataChanged`, only when duplicates exist and were
+        not already set by the operation itself) and shows one
+        consolidated error dialog when the save failed, instead of one
+        dialog per image. Return True when the save was scheduled (or
+        there was nothing to save).
+        """
+        if not images:
+            return True
+        self._schedule_batch_save(images)
+        return True
+
+    def _schedule_batch_save(self, images: list[Image]):
+        """
+        Schedule the images' save on the save pool (see
+        `write_images_tags_to_disk`): one `BatchSaveTask` per batch
+        operation, on a single save thread.
+
+        Each image is stamped with the save's generation (see
+        `on_batch_save_finished`), so a save that completes after a newer
+        save was scheduled for the same image neither refreshes that
+        image's duplicate copies nor reports its failure.
+        """
+        self._save_generation += 1
+        generation = self._save_generation
+        for image in images:
+            self._image_save_generation[id(image)] = generation
+        task = BatchSaveTask(generation, self.storage, list(images),
+                             self._save_tasks)
+        task.batch_save_finished.connect(self.on_batch_save_finished)
+        self.save_thread_pool.start(task)
+
+    @Slot(int, object, object)
+    def on_batch_save_finished(self, generation: int, images: object,
+                              failed: object):
+        """
+        A batch save finished on the save pool (the signal is queued, so
+        this runs on the GUI thread).
+
+        Bring the in-memory copies of the saved images' other duplicates
+        in line with what was saved (see `_sync_duplicate_images`), with
+        one combined `dataChanged` for all of them — or none at all, which
+        is the common case: a batch operation over the whole scope already
+        set every copy, so there is nothing to refresh. The synced copies'
+        (old, new) tag pairs are handed to the `dataChanged` handler via
+        `_pending_sync_deltas`, so the tag counter is adjusted per synced
+        copy instead of being recounted for every image. Show one
+        consolidated error dialog when the save failed (the storage still
+        holds the old values, so the copies must not be synced to the
+        unsaved ones, as for a failed single-image save).
+
+        An image stamped with a newer save generation while this one was
+        in flight is skipped for both: the newer save defines the final
+        state (with a single save thread it is also the last one written
+        to disk), so this older save must neither sync that image's copies
+        nor report its failure. The same applies to a sibling copy of a
+        saved image that a newer save owns: `_sync_duplicate_images` leaves
+        it alone (`newer_generation=generation`) so that the newer save's
+        completion — which runs after this one — syncs the group with the
+        final values.
+        """
+        failed_ids = {id(image) for image in failed}
+        newly_failed = []
+        sync_deltas = []
+        self._begin_batch_sync()
+        try:
+            for image in images:
+                if self._image_save_generation.get(id(image)) != generation:
+                    continue
+                if id(image) in failed_ids:
+                    newly_failed.append(image)
+                else:
+                    self._sync_duplicate_images(image,
+                                                newer_generation=generation,
+                                                deltas=sync_deltas)
+        finally:
+            rows = self._finish_batch_rows([])
+        if rows is not None:
+            # The synced copies' (old, new) tag pairs, so the only
+            # `dataChanged` handler can adjust the tag counter per synced
+            # copy instead of recounting every image (see
+            # `MainWindow.on_image_data_changed`).
+            self._pending_sync_deltas = sync_deltas
+            self.dataChanged.emit(self.index(rows[0]), self.index(rows[1]))
+        # This save's stamps are now dead: a stamp matters only while its
+        # save is pending (the guard above) and for the save's own
+        # completion (this call). No save with a generation this old can
+        # still be pending (the pool runs saves in schedule order), so
+        # dropping exactly this generation's entries never drops a pending
+        # save's stamp — and it keeps the dict from growing without bound
+        # over a session with repeated directory reloads.
+        self._image_save_generation = {
+            image_id: stamped_generation
+            for image_id, stamped_generation
+            in self._image_save_generation.items()
+            if stamped_generation != generation}
+        if newly_failed:
+            print(f'Failed to save tags for {len(newly_failed)} image(s):',
+                  file=sys.stderr)
+            for image in newly_failed:
+                print(f'  {image.path}', file=sys.stderr)
+            error_message_box = QMessageBox()
+            error_message_box.setWindowTitle('Error')
+            error_message_box.setIcon(QMessageBox.Icon.Critical)
+            error_message_box.setText(
+                f'Failed to save tags for {len(newly_failed)} '
+                f'{pluralize("image", len(newly_failed))}.')
+            shown_paths = newly_failed[:100]
+            error_message_box.setInformativeText(
+                '\n'.join(str(image.path) for image in shown_paths)
+                + (f'\n... and {len(newly_failed) - 100} more'
+                   if len(newly_failed) > 100 else ''))
+            error_message_box.exec()
+
+    def _sync_duplicate_images(self, image: Image,
+                               newer_generation: int | None = None,
+                               deltas: list | None = None):
         """
         Bring the in-memory copies of the other loaded images that share
         `image`'s content in line with the values that were just saved.
@@ -550,6 +1205,15 @@ class ImageListModel(QAbstractListModel):
         while an undo/redo restore is in progress: the restore's own final
         `dataChanged` covers the refreshed copies, and an intermediate
         refresh would disturb the grouped tag panel's order bookkeeping.
+
+        When `newer_generation` is given (a batch save is completing), a
+        sibling copy that has a save scheduled with a strictly newer
+        generation is left alone: that newer save defines the group's final
+        state (with the single save thread it is also the last one written
+        to disk) and its completion syncs the remaining copies. Overwriting
+        the sibling now would clobber the newer edit — in memory, and on
+        disk if the newer save has not run yet, since the storage backends
+        read the `Image` objects' current values when the save runs.
 
         In text-file mode the copies each have their own caption file and do
         not share a record, so a save to one must not change the in-memory
@@ -572,8 +1236,19 @@ class ImageListModel(QAbstractListModel):
             sibling = self.images[row]
             if sibling is image:
                 continue
+            if (newer_generation is not None
+                    and self._image_save_generation.get(id(sibling), 0)
+                    > newer_generation):
+                # A newer save is pending for this copy (see the docstring):
+                # its completion will sync the group, so leave its values
+                # alone instead of clobbering them with this older save's.
+                continue
             if (sibling.tags != image.tags
                     or sibling.description != image.description):
+                if deltas is not None and sibling.tags != image.tags:
+                    # The tag counter can be adjusted for this copy without
+                    # a full recount (see `_pending_sync_deltas`).
+                    deltas.append((list(sibling.tags), list(image.tags)))
                 sibling.tags = image.tags.copy()
                 sibling.description = image.description
                 changed_rows.append(row)
@@ -677,16 +1352,16 @@ class ImageListModel(QAbstractListModel):
             history_item.should_ask_for_confirmation)
         destination_stack.append(reverse_item)
         # The flag spans the whole restore (not just the final
-        # `dataChanged`): the per-image saves sync the duplicates' in-memory
-        # copies, and their `dataChanged` must not refresh the grouped tag
-        # panel mid-restore (see `_sync_duplicate_images`).
+        # `dataChanged`): the restore's duplicate sync (see
+        # `_sync_duplicate_images`) and the grouped tag panel's bookkeeping
+        # must not refresh the panel mid-restore.
         self.is_restoring_history = True
         try:
             # Compute the changed images from the *pre-restore* state: the
-            # saves below sync the in-memory copies of the other duplicates
-            # (see `_sync_duplicate_images`), so a sibling may already match
-            # the history value by the time the loop reaches it, and
-            # computing the list mid-loop would drop it from the
+            # batch save below syncs the in-memory copies of the other
+            # duplicates (see `_sync_duplicate_images`), so a sibling may
+            # already match the history value by the time the sync reaches
+            # it, and computing the list mid-loop would drop it from the
             # `dataChanged` range, leaving its row stale in the views.
             changed_image_indices = [
                 image_index
@@ -700,8 +1375,15 @@ class ImageListModel(QAbstractListModel):
                 image = self.images[image_index]
                 image.tags = history_item.tags[image_index].copy()
                 image.description = history_item.descriptions[image_index]
-                self.write_image_tags_to_disk(image)
             if changed_image_indices:
+                # One atomic transaction for the whole restore (and one
+                # consolidated error dialog on failure, instead of one per
+                # image). The save runs on the save pool (off the GUI
+                # thread); its duplicate sync finds every copy already
+                # matching the restored values (the restore set them all),
+                # so it emits nothing.
+                self.write_images_tags_to_disk(
+                    [self.images[i] for i in changed_image_indices])
                 # Lets the grouped tag panel restore the tag order saved with
                 # the item being restored, and save the current order with its
                 # reverse.
@@ -808,7 +1490,8 @@ class ImageListModel(QAbstractListModel):
                 image.description = text
             else:
                 image.tags = text.split(self.tag_separator)
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -832,7 +1515,8 @@ class ImageListModel(QAbstractListModel):
             new_caption = self.tag_separator.join(image.tags)
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -862,7 +1546,8 @@ class ImageListModel(QAbstractListModel):
             new_caption = self.tag_separator.join(image.tags)
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -882,7 +1567,8 @@ class ImageListModel(QAbstractListModel):
                 image.tags = [image.tags[0]] + list(reversed(image.tags[1:]))
             else:
                 image.tags = list(reversed(image.tags))
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -904,7 +1590,8 @@ class ImageListModel(QAbstractListModel):
                 image.tags = [first_tag] + remaining_tags
             else:
                 random.shuffle(image.tags)
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -931,7 +1618,8 @@ class ImageListModel(QAbstractListModel):
             new_caption = self.tag_separator.join(image.tags)
             if new_caption != old_caption:
                 changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -956,7 +1644,8 @@ class ImageListModel(QAbstractListModel):
             removed_tag_count += tag_count - unique_tag_count
             # Use a dictionary instead of a set to preserve the order.
             image.tags = list(dict.fromkeys(image.tags))
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -981,7 +1670,8 @@ class ImageListModel(QAbstractListModel):
                 continue
             changed_image_indices.append(image_index)
             removed_tag_count += old_tag_count - new_tag_count
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         rows = self._finish_batch_rows(changed_image_indices)
         if rows is not None:
             self.dataChanged.emit(self.index(rows[0]),
@@ -1003,11 +1693,18 @@ class ImageListModel(QAbstractListModel):
         # suggestions) may read the storage, so it must already reflect the
         # new tags and description. Batch mode defers the duplicate
         # copies' refresh so that one combined `dataChanged` covers the
-        # edited image and its updated copies.
+        # edited image and its updated copies. The copies' tag changes are
+        # recorded in `sync_deltas` and handed to the `dataChanged` handler
+        # via `_pending_sync_deltas`, so the tag counter is adjusted for
+        # them incrementally too: the combined change spans several rows,
+        # which the handler would otherwise treat as an unexplained batch
+        # and answer with a full recount of every image.
+        sync_deltas: list[tuple[list[str], list[str]]] = []
         self._begin_batch_sync()
-        self.write_image_tags_to_disk(image)
+        self.write_image_tags_to_disk(image, deltas=sync_deltas)
         rows = self._finish_batch_rows([image_index.row()])
         if rows is not None:
+            self._pending_sync_deltas = sync_deltas or None
             self.dataChanged.emit(self.index(rows[0]), self.index(rows[1]))
 
     def update_image_description(self, image_index: QModelIndex, description: str):
@@ -1067,8 +1764,10 @@ class ImageListModel(QAbstractListModel):
             if not new_tags:
                 continue
             image.tags.extend(new_tags)
-            self.write_image_tags_to_disk(image)
             changed_indices.append(image_index)
+        self.write_images_tags_to_disk(
+            [self.data(index, Qt.ItemDataRole.UserRole)
+             for index in changed_indices])
         if not changed_indices:
             self._finish_batch_rows([])
             self.discard_last_undo_entry()
@@ -1105,8 +1804,10 @@ class ImageListModel(QAbstractListModel):
                 continue
             image.tags = [tag for tag in image.tags
                           if tag not in tags_to_remove]
-            self.write_image_tags_to_disk(image)
             changed_indices.append(image_index)
+        self.write_images_tags_to_disk(
+            [self.data(index, Qt.ItemDataRole.UserRole)
+             for index in changed_indices])
         if not changed_indices:
             self._finish_batch_rows([])
             self.discard_last_undo_entry()
@@ -1151,7 +1852,8 @@ class ImageListModel(QAbstractListModel):
             for tag in image.tags:
                 renamed.extend(new_tags if tag == old_tag else [tag])
             image.tags = list(dict.fromkeys(renamed))
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.data(index, Qt.ItemDataRole.UserRole) for index in targets])
         rows = self._finish_batch_rows([index.row() for index in targets])
         if rows is not None:
             self._emit_renamed(self.index(rows[0]), self.index(rows[1]),
@@ -1203,7 +1905,8 @@ class ImageListModel(QAbstractListModel):
                 image.tags = [new_tag if image_tag in old_tags else image_tag
                               for image_tag in image.tags]
             changed_image_indices.append(image_index)
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         if not use_regex:
             for old_tag in old_tags:
                 self._note_rename(renames, old_tag, [new_tag])
@@ -1242,7 +1945,8 @@ class ImageListModel(QAbstractListModel):
                 image.tags = [image_tag for image_tag in image.tags
                               if image_tag not in tags]
             changed_image_indices.append(image_index)
-            self.write_image_tags_to_disk(image)
+        self.write_images_tags_to_disk(
+            [self.images[i] for i in changed_image_indices])
         if changed_image_indices:
             rows = self._finish_batch_rows(changed_image_indices)
             if rows is not None:

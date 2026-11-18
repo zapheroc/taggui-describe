@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
                                 QGridLayout, QHBoxLayout, QLabel, QMessageBox,
                                 QPushButton, QVBoxLayout)
 
@@ -25,8 +25,7 @@ class ExportImagesDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
         description_label = QLabel(
-            'Export the images in the chosen scope to the output folder, '
-            'each with its tags and description in a text file next to it. '
+            'Export the images in the chosen scope to the output folder. '
             'Images with the same file name are renamed (cat.jpg, cat_1.jpg, '
             '...) so that nothing is overwritten by the export itself.')
         description_label.setWordWrap(True)
@@ -56,6 +55,9 @@ class ExportImagesDialog(QDialog):
         folder_layout.addWidget(self.output_folder_line_edit)
         folder_layout.addWidget(self.browse_button)
         grid_layout.addLayout(folder_layout, 2, 1)
+        self.write_text_files_check_box = QCheckBox('Write tags to text files')
+        self.write_text_files_check_box.setChecked(True)
+        grid_layout.addWidget(self.write_text_files_check_box, 3, 1)
         layout.addLayout(grid_layout)
         self.export_button = QPushButton('Export')
         self.export_button.clicked.connect(self.export)
@@ -122,16 +124,17 @@ class ExportImagesDialog(QDialog):
 
     def show_export_summary(self, result: ExportResult):
         image_count = len(result.exported_images)
-        text_file_count = len(result.written_text_files)
         message = (f'Exported {image_count} {pluralize("image", image_count)} '
                    f'to {self.output_folder_line_edit.text()}.')
-        message += (f' Wrote {text_file_count} '
-                    f'{pluralize("text file", text_file_count)}.')
-        if result.skipped_text_files:
-            skipped = result.skipped_text_files
-            message += (f' {skipped} {pluralize("image", skipped)} had no '
-                        f'tags or description, so no text file was written '
-                        f'for {"it" if skipped == 1 else "them"}.')
+        if self.write_text_files_check_box.isChecked():
+            text_file_count = len(result.written_text_files)
+            message += (f' Wrote {text_file_count} '
+                        f'{pluralize("text file", text_file_count)}.')
+            if result.skipped_text_files:
+                skipped = result.skipped_text_files
+                message += (f' {skipped} {pluralize("image", skipped)} had no '
+                            f'tags or description, so no text file was '
+                            f'written for {"it" if skipped == 1 else "them"}.')
         if result.failed:
             message += '\n\nThe following images failed to export:'
             for image, error in result.failed[:MAX_LISTED_FILES]:
@@ -166,14 +169,17 @@ class ExportImagesDialog(QDialog):
                 self, 'Export Images',
                 f'There are no {scope_text} to export.')
             return
-        planned, overrides = plan_export_names(images, output_folder)
+        write_text_files = self.write_text_files_check_box.isChecked()
+        planned, overrides = plan_export_names(
+            images, output_folder, write_text_files)
         if overrides and not self.confirm_overrides(output_folder,
                                                     overrides):
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             result = export_images(images, self.image_list_model.tag_separator,
-                                   output_folder, self.get_image_mode())
+                                   output_folder, self.get_image_mode(),
+                                   write_text_files)
         except OSError as exception:
             QMessageBox.critical(self, 'Export Images', str(exception))
             return

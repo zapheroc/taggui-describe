@@ -49,6 +49,11 @@ class AllTagsList(QListView):
             self.handle_selection_change)
 
     def mousePressEvent(self, event: QMouseEvent):
+        # A captioning run defers the tag counter's view reset (see
+        # `TagCounterModel.defer_view_reset`): apply it first so the rows
+        # below map to the current tags, and so the selection this click
+        # changes still refers to the tags being displayed.
+        self.all_tags_editor.flush_counter_view()
         click_action = (self.all_tags_editor.click_action_combo_box
                         .currentText())
         if click_action == ClickAction.ADD_TO_SELECTED:
@@ -65,6 +70,9 @@ class AllTagsList(QListView):
         if event.key() not in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             super().keyPressEvent(event)
             return
+        # No mouse press precedes a delete key press, so apply the deferred
+        # view reset here (see `mousePressEvent`).
+        self.all_tags_editor.flush_counter_view()
         selected_indices = self.selectedIndexes()
         if not selected_indices:
             return
@@ -94,6 +102,9 @@ class AllTagsList(QListView):
             return
         if not selected.indexes():
             return
+        # Keyboard selection changes have no preceding mouse press, so
+        # apply the deferred view reset here (see `mousePressEvent`).
+        self.all_tags_editor.flush_counter_view()
         selected_tag = selected.indexes()[0].data(Qt.ItemDataRole.EditRole)
         self.image_list_filter_requested.emit(selected_tag)
 
@@ -104,6 +115,9 @@ class AllTagsList(QListView):
         copy was handled here instead of falling back to copying every tag of
         the selected image(s).
         """
+        # Called from the menu/shortcut, with no preceding view interaction,
+        # so apply the deferred view reset here (see `mousePressEvent`).
+        self.all_tags_editor.flush_counter_view()
         ordered_indices = sorted(self.selectedIndexes(),
                                  key=lambda index: index.row())
         selected_tags = [str(index.data(Qt.ItemDataRole.EditRole))
@@ -179,6 +193,17 @@ class AllTagsEditor(QDockWidget):
             self.set_selection_mode)
         self.set_selection_mode(self.click_action_combo_box.currentText())
         self.sort_tags()
+        # A double-click opens the inline tag editor, whose delegate reads
+        # the row's data: apply the deferred view reset first so the editor
+        # is pre-filled with the tag the row currently shows.
+        self.all_tags_list.doubleClicked.connect(self.flush_counter_view)
+
+    @Slot()
+    def flush_counter_view(self):
+        # Apply the tag counter's view reset if a captioning run deferred
+        # it, so the list and its selection map to the current tags (see
+        # `TagCounterModel.flush_view_reset`).
+        self.tag_counter_model.flush_view_reset()
 
     @Slot()
     def sort_tags(self):

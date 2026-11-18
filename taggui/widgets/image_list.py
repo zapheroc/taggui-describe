@@ -1,4 +1,6 @@
+import os
 import shutil
+from collections import Counter
 from enum import Enum
 from functools import reduce
 from operator import or_
@@ -42,6 +44,66 @@ def replace_filter_wildcards(filter_: str | list) -> str | list:
         replaced_element = replace_filter_wildcards(element)
         replaced_filter.append(replaced_element)
     return replaced_filter
+
+
+def format_error_summary(errors: list[str], max_shown: int = 10) -> str:
+    """The lines of a list of error messages, for a single error dialog."""
+    lines = errors[:max_shown]
+    if len(errors) > max_shown:
+        lines.append(f'...and {len(errors) - max_shown} more.')
+    return '\n'.join(lines)
+
+
+def trash_images(parent, image_paths: list[Path],
+                 all_image_paths: list[Path]) -> list[Path]:
+    """Move the images (and their caption files) to the Recycle Bin, without
+    confirmation. A caption file that another loaded image still uses
+    (`a.png` and `a.jpg` sharing `a.txt`) is kept. Any errors are shown in a
+    single dialog. `all_image_paths` are all the loaded images' paths.
+    Returns the paths of the images that were moved to the Recycle Bin."""
+
+    def caption_key(image_path: Path) -> str:
+        # The image's caption file, as a comparison key: ignoring upper/lower
+        # case makes `a.TXT` and `a.txt` the same caption on every platform.
+        return os.path.normcase(str(image_path.with_suffix('.txt')))
+
+    # How many of the loaded images use each caption file. A caption file is
+    # trashed only once no remaining loaded image uses it (an image that
+    # could not be deleted, or `a.jpg` sharing `a.txt` with `a.png`).
+    caption_users = Counter(caption_key(image_path)
+                            for image_path in all_image_paths)
+    errors = []
+    deleted = []
+    # Caption key -> caption file of a successfully deleted image.
+    orphaned_captions: dict[str, Path] = {}
+    for image_path in image_paths:
+        if not QFile(image_path).moveToTrash():
+            errors.append(f'{image_path.name} could not be moved to the '
+                          f'Recycle Bin.')
+            continue
+        deleted.append(image_path)
+        caption_file_path = image_path.with_suffix('.txt')
+        if caption_file_path.exists():
+            key = caption_key(image_path)
+            orphaned_captions[key] = caption_file_path
+            caption_users[key] -= 1
+    for key, caption_file_path in orphaned_captions.items():
+        if caption_users[key] > 0:
+            continue
+        caption_file = QFile(caption_file_path)
+        if caption_file.exists() and not caption_file.moveToTrash():
+            errors.append(f'Caption file {caption_file_path.name} could '
+                          f'not be moved to the Recycle Bin.')
+    if errors:
+        image_count = len(image_paths)
+        failed_count = image_count - len(deleted)
+        heading = (f'{failed_count} of {image_count} '
+                   f'{pluralize("image", image_count)} could not '
+                   f'be deleted:' if failed_count
+                   else 'Some caption files could not be deleted:')
+        QMessageBox.critical(
+            parent, 'Error', f'{heading}\n\n{format_error_summary(errors)}')
+    return deleted
 
 
 class FilterLineEdit(QLineEdit):
@@ -139,6 +201,12 @@ class ImageListItemDelegate(QStyledItemDelegate):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        # (file name line height, tag line height) per tag font.
+        # `sizeHint` is called once per row on every full re-layout of the
+        # items (Qt discards the cached item sizes), so the two
+        # `QFontMetrics` constructions are cached per font instead of being
+        # repeated thousands of times (see `sizeHint`).
+        self._text_heights_cache: dict[QFont, tuple[int, int]] = {}
 
     def _name_font(self, font: QFont) -> QFont:
         """The file name font: slightly smaller than the tag font."""
@@ -263,18 +331,47 @@ class ImageListItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem,
                  index: QModelIndex) -> QSize:
-        widget: QWidget | None = self.parent()
-        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        # The row height depends only on the thumbnail (which captioning
+        # never changes) and on whether the image has tags, so take both
+        # from the `Image` object (UserRole) instead of the DisplayRole:
+        # building the display text joins every tag of the image, and
+        # `sizeHint` is called once per row on every full re-layout of the
+        # items, which would make that join run thousands of times per
+        # caption. `image.thumbnail` is exactly what the DecorationRole
+        # holds (see `ImageListModel.data`), and `'\n' in display_text`
+        # was equivalent to `image.tags` for every realistic file name.
+        image: Image | None = index.data(Qt.ItemDataRole.UserRole)
+        icon = image.thumbnail if image is not None else None
         icon_height = 0
         if icon is not None and not icon.isNull():
-            icon_height = self._icon_size(widget, icon).height()
-        display_text = index.data(Qt.ItemDataRole.DisplayRole) or ''
-        name_height = QFontMetrics(self._name_font(option.font)).height()
-        tag_height = (QFontMetrics(option.font).height() * self.MAX_TAG_LINES
-                      if '\n' in display_text else 0)
+            icon_height = self._icon_size(self.parent(), icon).height()
+        name_height, tag_line_height = self._text_heights(option.font)
+        tag_height = (tag_line_height * self.MAX_TAG_LINES
+                      if image is not None and image.tags else 0)
         text_height = name_height + tag_height + 8
         width = option.rect.width() if option.rect.width() > 0 else 250
         return QSize(width, max(icon_height, text_height))
+
+    def _text_heights(self, font: QFont) -> tuple[int, int]:
+        """
+        The file name line height and the tag line height for the tag font
+        `font`, cached per font (see `sizeHint`). The heights are a pure
+        function of the font, so a key-equal font always gets the same
+        cached pair; no invalidation is needed.
+
+        `font` is an owning copy: `option.font` is a non-owning (borrowed)
+        wrapper whose C++ object is destroyed with the transient style
+        option, and a borrowed wrapper must not be kept as a cache key
+        (looking it up later would touch a deleted C++ object). `QFont(font)`
+        copies it into a new, owned `QFont`.
+        """
+        key = QFont(font)
+        heights = self._text_heights_cache.get(key)
+        if heights is None:
+            heights = (QFontMetrics(self._name_font(key)).height(),
+                       QFontMetrics(key).height())
+            self._text_heights_cache[key] = heights
+        return heights
 
     def _wrap_and_elide(self, metrics: QFontMetrics, text: str, width: int,
                         max_lines: int) -> list[str]:
@@ -711,6 +808,10 @@ class ImageListView(QListView):
     def delete_selected_images(self):
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
+        if not selected_image_count:
+            # Nothing is selected (e.g. the shortcut was used with no
+            # selection): do nothing rather than deleting everything.
+            return
         title = f'Delete {pluralize("Image", selected_image_count)}'
         question = (f'Delete {selected_image_count} selected '
                     f'{pluralize("image", selected_image_count)} and '
@@ -719,18 +820,9 @@ class ImageListView(QListView):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
-        for image in selected_images:
-            image_file = QFile(image.path)
-            if not image_file.moveToTrash():
-                QMessageBox.critical(self, 'Error',
-                                     f'Failed to delete {image.path}.')
-            caption_file_path = image.path.with_suffix('.txt')
-            caption_file = QFile(caption_file_path)
-            if caption_file.exists():
-                if not caption_file.moveToTrash():
-                    QMessageBox.critical(self, 'Error',
-                                         f'Failed to delete '
-                                         f'{caption_file_path}.')
+        source_model = self.proxy_image_list_model.sourceModel()
+        trash_images(self, [image.path for image in selected_images],
+                     [image.path for image in source_model.images])
         self.directory_reload_requested.emit()
 
     @Slot()
@@ -797,18 +889,8 @@ class ImageListView(QListView):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
-        for image_path in deleted_paths:
-            image_file = QFile(image_path)
-            if not image_file.moveToTrash():
-                QMessageBox.critical(self, 'Error',
-                                     f'Failed to delete {image_path}.')
-            caption_file_path = image_path.with_suffix('.txt')
-            caption_file = QFile(caption_file_path)
-            if caption_file.exists():
-                if not caption_file.moveToTrash():
-                    QMessageBox.critical(self, 'Error',
-                                         f'Failed to delete '
-                                         f'{caption_file_path}.')
+        trash_images(self, deleted_paths,
+                     [image.path for image in source_model.images])
         self.directory_reload_requested.emit()
 
     @Slot()
