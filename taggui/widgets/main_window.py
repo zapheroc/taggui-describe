@@ -1353,6 +1353,16 @@ class MainWindow(QMainWindow):
         self.image_tags_editor.reload_image_tags_if_changed(
             first_changed_index, last_changed_index)
 
+    @Slot(bool)
+    def on_is_captioning_changed(self, is_captioning: bool):
+        # Defer the All Tags view reset for the duration of the run (see
+        # `TagCounterModel.defer_view_reset`); when the run ends (finished
+        # or canceled), apply the one consolidated reset with the counts
+        # accumulated by the run.
+        self.tag_counter_model.defer_view_reset = is_captioning
+        if not is_captioning:
+            self.tag_counter_model.flush_view_reset()
+
     @Slot()
     def update_image_tags(self):
         image_index = self.image_tags_editor.image_index
@@ -1453,6 +1463,12 @@ class MainWindow(QMainWindow):
                 if description else
                 self.image_list_model.update_image_tags(image_index, tags)
             )
+        # While a run is in flight, the per-caption counter updates defer
+        # the All Tags view reset (which re-lays out every tag row and
+        # costs tens of milliseconds with a large tag vocabulary), and the
+        # deferred reset is applied once, at the end of the run.
+        self.auto_captioner.is_captioning_changed.connect(
+            self.on_is_captioning_changed)
         self.auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             self.image_tags_editor.reload_image_tags_if_changed(image_index,

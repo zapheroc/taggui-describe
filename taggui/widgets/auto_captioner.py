@@ -632,6 +632,11 @@ class ModelUnloadTask(QRunnable):
 
 class AutoCaptioner(QDockWidget):
     caption_generated = Signal(QModelIndex, str, list)
+    # Emitted when a captioning run starts or ends (the run ends on
+    # `captioning_thread.finished`, which also fires on cancel). The main
+    # window uses it to defer the All Tags view reset for the duration of
+    # the run (see `TagCounterModel.defer_view_reset`).
+    is_captioning_changed = Signal(bool)
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList):
@@ -778,11 +783,14 @@ class AutoCaptioner(QDockWidget):
         self._update_eject_button_state()
 
     def set_is_captioning(self, is_captioning: bool):
+        if self.is_captioning == is_captioning:
+            return
         self.is_captioning = is_captioning
         button_text = ('Cancel Auto-Captioning' if is_captioning
                        else 'Start Auto-Captioning')
         self.start_cancel_button.setText(button_text)
         self._update_eject_button_state()
+        self.is_captioning_changed.emit(is_captioning)
 
     @Slot(str)
     def update_console_text_edit(self, text: str):

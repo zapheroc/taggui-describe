@@ -656,7 +656,8 @@ not part of the repo, needs the repo + its venv on `sys.path`).
 The old per-caption path was `count_tags` (full recount of **all** images) +
 `SELECT name FROM tags` over the **whole** database + merge/sort + completer
 update. It grew with both dataset and database size (19.9 ms at 20k images;
-37.5 ms at 20k images + a 50k-tag database). The current path ("Fixes 2 & 3"):
+37.5 ms at 20k images + a 50k-tag database). The current path
+("Fixes 2–4"):
 
 - **Fix 2 — incremental tag counter.** `update_image_tags` /
   `update_image_description` set the `_pending_tag_delta` /
@@ -679,10 +680,43 @@ update. It grew with both dataset and database size (19.9 ms at 20k images;
   (`= None`) in `_apply_storage_backend`, `on_database_changed`, and the
   full-recount branch of `on_image_data_changed` — new places that can change
   the stored tag set must do the same.
+- **Fix 4 — the All Tags view reset is deferred for the duration of a
+  captioning run.** Fixes 2 & 3 removed the *data* cost, but every
+  per-caption counter update still ran `beginResetModel`/`endResetModel` on
+  `TagCounterModel`, and that reset re-lays out **every** All Tags row: in
+  the real GUI at 8,531 images / 3,730 unique tags the reset cycle was 47.6
+  ms per caption (`endResetModel` 46.8 ms,
+  `all_tags_list.doItemsLayout` 58.4 ms — the data side,
+  `Counter.most_common()`, is 0.3 ms). The cost scales with the **tag
+  vocabulary**, not the image count, so on larger datasets it is the
+  reported "UI completely freezes" during captioning. While a run is in
+  flight, `count_tags` / `apply_tag_delta` route the reset through
+  `_notify_all_tags_view()`: they update `tag_counter` / `most_common_tags`
+  but only set `_view_reset_pending`. `MainWindow.on_is_captioning_changed`
+  (wired to `AutoCaptioner.is_captioning_changed`, emitted by
+  `set_is_captioning()` at run start and at run end/cancel) sets
+  `TagCounterModel.defer_view_reset` for the run's duration and applies one
+  consolidated `flush_view_reset()` when the run ends —
+  `QSortFilterProxyModel` re-applies its active sort after a source reset
+  (verified empirically), so the list comes back correctly sorted. User
+  actions must never act on a stale row→tag mapping (a tag whose count
+  reached 0 — possible with the tag-removing caption positions — would index
+  out of range), so every read of the All Tags pane flushes first via
+  `AllTagsEditor.flush_counter_view`: `mousePressEvent`, the Delete-key path
+  of `keyPressEvent`, `handle_selection_change` (FILTER_IMAGES),
+  `copy_selected_tags_to_clipboard`, `doubleClicked` (before the inline-edit
+  delegate reads the row), and `TagCounterModel.setData` (the inline rename
+  commit).
 
 Measured per-caption GUI chain (30 tags/image, idle machine): old 1.2–37.5 ms
-→ new **~0.2 ms (1k-tag DB) / ~6.8 ms (50k-tag DB)**, and **flat in image
-count** — the GUI side can no longer outrun the model.
+→ new **~0.2 ms (1k-tag DB) / ~6.8 ms (50k-tag DB)** — that is the data
+side, and it is **flat in image count**. The view side (Fix 4) was not in
+those numbers: measured in the real GUI at 8,531 images / 3,730 unique tags,
+the per-caption All Tags reset alone was 47–58 ms, and after deferral the
+full per-caption GUI cost (`update_image_tags_total`) is ~12.4 ms (was
+40.5 ms), `apply_tag_delta` 0.65 ms (was 45.4 ms), and `count_tags` (pure
+recount, no reset) 13.7 ms (was 56.1 ms) — the GUI side can no longer
+outrun the model.
 
 ### Bench hygiene on this machine
 
