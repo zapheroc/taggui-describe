@@ -465,7 +465,7 @@ class FindDuplicatesDialog(QDialog):
             self.merge_tags_check_box.setToolTip(
                 'Not available: in database storage mode the copies of a '
                 'duplicate share one tag record, so they always have the '
-                'same tags.')
+                'same tags')
         actions_layout.addWidget(self.merge_tags_check_box, 1, 0, 1, 5)
 
         actions_layout.addWidget(QLabel('Other images:'), 2, 0)
