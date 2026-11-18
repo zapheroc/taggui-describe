@@ -201,6 +201,12 @@ class ImageListItemDelegate(QStyledItemDelegate):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        # (file name line height, tag line height) per tag font.
+        # `sizeHint` is called once per row on every full re-layout of the
+        # items (Qt discards the cached item sizes), so the two
+        # `QFontMetrics` constructions are cached per font instead of being
+        # repeated thousands of times (see `sizeHint`).
+        self._text_heights_cache: dict[QFont, tuple[int, int]] = {}
 
     def _name_font(self, font: QFont) -> QFont:
         """The file name font: slightly smaller than the tag font."""
@@ -325,18 +331,47 @@ class ImageListItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem,
                  index: QModelIndex) -> QSize:
-        widget: QWidget | None = self.parent()
-        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        # The row height depends only on the thumbnail (which captioning
+        # never changes) and on whether the image has tags, so take both
+        # from the `Image` object (UserRole) instead of the DisplayRole:
+        # building the display text joins every tag of the image, and
+        # `sizeHint` is called once per row on every full re-layout of the
+        # items, which would make that join run thousands of times per
+        # caption. `image.thumbnail` is exactly what the DecorationRole
+        # holds (see `ImageListModel.data`), and `'\n' in display_text`
+        # was equivalent to `image.tags` for every realistic file name.
+        image: Image | None = index.data(Qt.ItemDataRole.UserRole)
+        icon = image.thumbnail if image is not None else None
         icon_height = 0
         if icon is not None and not icon.isNull():
-            icon_height = self._icon_size(widget, icon).height()
-        display_text = index.data(Qt.ItemDataRole.DisplayRole) or ''
-        name_height = QFontMetrics(self._name_font(option.font)).height()
-        tag_height = (QFontMetrics(option.font).height() * self.MAX_TAG_LINES
-                      if '\n' in display_text else 0)
+            icon_height = self._icon_size(self.parent(), icon).height()
+        name_height, tag_line_height = self._text_heights(option.font)
+        tag_height = (tag_line_height * self.MAX_TAG_LINES
+                      if image is not None and image.tags else 0)
         text_height = name_height + tag_height + 8
         width = option.rect.width() if option.rect.width() > 0 else 250
         return QSize(width, max(icon_height, text_height))
+
+    def _text_heights(self, font: QFont) -> tuple[int, int]:
+        """
+        The file name line height and the tag line height for the tag font
+        `font`, cached per font (see `sizeHint`). The heights are a pure
+        function of the font, so a key-equal font always gets the same
+        cached pair; no invalidation is needed.
+
+        `font` is an owning copy: `option.font` is a non-owning (borrowed)
+        wrapper whose C++ object is destroyed with the transient style
+        option, and a borrowed wrapper must not be kept as a cache key
+        (looking it up later would touch a deleted C++ object). `QFont(font)`
+        copies it into a new, owned `QFont`.
+        """
+        key = QFont(font)
+        heights = self._text_heights_cache.get(key)
+        if heights is None:
+            heights = (QFontMetrics(self._name_font(key)).height(),
+                       QFontMetrics(key).height())
+            self._text_heights_cache[key] = heights
+        return heights
 
     def _wrap_and_elide(self, metrics: QFontMetrics, text: str, width: int,
                         max_lines: int) -> list[str]:

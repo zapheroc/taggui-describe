@@ -1304,11 +1304,13 @@ class MainWindow(QMainWindow):
         path), the model set `_pending_tag_delta` / `_pending_description_only`
         before emitting `dataChanged`, so the tag counter can be adjusted for
         just that image (or not at all) instead of recounting every image.
-        When a completed batch save synced duplicate copies
-        (`_pending_sync_deltas`), the counter is adjusted per synced copy the
-        same way. This slot is the only `dataChanged` handler, and the
-        connection is direct (same thread), so the flags are always
-        consumed here.
+        A save that refreshed duplicate copies set `_pending_sync_deltas`
+        the same way (both for a completed batch save and, from
+        `update_image_tags`, for the copies a single-image save synced —
+        in the latter case `_pending_tag_delta` and `_pending_sync_deltas`
+        are set together for the same emission). This slot is the only
+        `dataChanged` handler, and the connection is direct (same thread),
+        so the flags are always consumed here.
         """
         if roles == [Qt.ItemDataRole.DecorationRole]:
             return
@@ -1323,31 +1325,30 @@ class MainWindow(QMainWindow):
             # The description changed only: the tag counts are unchanged, so
             # neither the tag counter nor the tag suggestions need a refresh.
             pass
-        elif (tag_delta is not None
-              and first_changed_index.row() == last_changed_index.row()):
-            # Exactly one image changed (no duplicate copies were synced with
-            # it -- that would span several rows), so adjust the tag counter
-            # for that image instead of recounting every image.
-            self.tag_counter_model.apply_tag_delta(*tag_delta)
-            self.update_tag_suggestions()
-        elif sync_deltas:
-            # A completed batch save synced the duplicate copies of its
-            # saved images: adjust the tag counter per synced copy instead
-            # of recounting every image. The names the save wrote to the
-            # database are the tags of loaded images, which the counter
-            # holds once the deltas are applied (and the suggestions merge
-            # starts from it), so the cached database tag names stay valid
-            # -- no invalidation, no extra database scan.
-            for old_tags, new_tags in sync_deltas:
-                self.tag_counter_model.apply_tag_delta(old_tags, new_tags)
+        elif tag_delta is not None or sync_deltas:
+            # Every changed image has a known delta: a single-image update
+            # (`_pending_tag_delta`, from `update_image_tags`) and the
+            # duplicate copies its save refreshed, and/or the duplicate
+            # copies a completed batch save synced (`_pending_sync_deltas`).
+            # Adjust the tag counter per image instead of recounting every
+            # image. The names the save wrote to the database are the tags
+            # of loaded images, which the counter holds once the deltas are
+            # applied (and the suggestions merge starts from it), so the
+            # cached database tag names stay valid -- no invalidation, no
+            # extra database scan.
+            if tag_delta is not None:
+                self.tag_counter_model.apply_tag_delta(*tag_delta)
+            if sync_deltas:
+                for old_tags, new_tags in sync_deltas:
+                    self.tag_counter_model.apply_tag_delta(old_tags, new_tags)
             self.update_tag_suggestions()
         else:
-            # Several images changed (the edited image plus its duplicate
-            # copies, or a batch operation / undo-redo), or the change did
-            # not come from a single-image update: recount everything. The
-            # tag set of the loaded images may also have changed (a tag
-            # renamed or deleted), so drop the cached database tag names --
-            # the refresh below re-queries them once.
+            # Several images changed without known deltas (a batch operation
+            # / undo-redo), or the change did not come from a single-image
+            # update: recount everything. The tag set of the loaded images
+            # may also have changed (a tag renamed or deleted), so drop the
+            # cached database tag names -- the refresh below re-queries them
+            # once.
             self.tag_counter_model.count_tags(image_list_model.images)
             self.invalidate_database_tag_names()
         self.image_tags_editor.reload_image_tags_if_changed(

@@ -462,10 +462,12 @@ class ImageListModel(QAbstractListModel):
         # the tag counter needs no update at all). Same lifecycle as
         # `_pending_tag_delta`.
         self._pending_description_only = False
-        # (old_tags, new_tags) for each duplicate copy a completed batch
-        # save synced (see `on_batch_save_finished` and
-        # `_sync_duplicate_images`), so the tag counter can be adjusted per
-        # synced copy instead of recounting every image. Same lifecycle as
+        # (old_tags, new_tags) for each duplicate copy a save synced (see
+        # `on_batch_save_finished` and `_sync_duplicate_images`; set for
+        # the copies a completed batch save synced and, by
+        # `update_image_tags`, for the copies a single-image save
+        # refreshed), so the tag counter can be adjusted per synced copy
+        # instead of recounting every image. Same lifecycle as
         # `_pending_tag_delta`: set right before the sync's `dataChanged`
         # is emitted and consumed (and cleared) by the slot; None when the
         # most recent change did not sync duplicate copies.
@@ -1042,7 +1044,14 @@ class ImageListModel(QAbstractListModel):
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot(Image)
-    def write_image_tags_to_disk(self, image: Image):
+    def write_image_tags_to_disk(self, image: Image,
+                                 deltas: list | None = None):
+        # `deltas` (see `_sync_duplicate_images`): when given, the
+        # (old_tags, new_tags) pairs of the duplicate copies the save
+        # refreshes are appended to it, so the caller can hand them to the
+        # `dataChanged` handler via `_pending_sync_deltas` instead of
+        # triggering a full tag recount. Optional: this method is also
+        # connected directly to a signal that passes only the image.
         try:
             self.storage.save_image(image)
         except (OSError, sqlite3.Error) as exception:
@@ -1056,7 +1065,7 @@ class ImageListModel(QAbstractListModel):
             # The save failed, so the storage still holds the old values; do
             # not sync the other in-memory copies to the unsaved ones.
             return
-        self._sync_duplicate_images(image)
+        self._sync_duplicate_images(image, deltas=deltas)
 
     def write_images_tags_to_disk(self, images: list[Image]) -> bool:
         """
@@ -1684,11 +1693,18 @@ class ImageListModel(QAbstractListModel):
         # suggestions) may read the storage, so it must already reflect the
         # new tags and description. Batch mode defers the duplicate
         # copies' refresh so that one combined `dataChanged` covers the
-        # edited image and its updated copies.
+        # edited image and its updated copies. The copies' tag changes are
+        # recorded in `sync_deltas` and handed to the `dataChanged` handler
+        # via `_pending_sync_deltas`, so the tag counter is adjusted for
+        # them incrementally too: the combined change spans several rows,
+        # which the handler would otherwise treat as an unexplained batch
+        # and answer with a full recount of every image.
+        sync_deltas: list[tuple[list[str], list[str]]] = []
         self._begin_batch_sync()
-        self.write_image_tags_to_disk(image)
+        self.write_image_tags_to_disk(image, deltas=sync_deltas)
         rows = self._finish_batch_rows([image_index.row()])
         if rows is not None:
+            self._pending_sync_deltas = sync_deltas or None
             self.dataChanged.emit(self.index(rows[0]), self.index(rows[1]))
 
     def update_image_description(self, image_index: QModelIndex, description: str):
