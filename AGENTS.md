@@ -28,6 +28,14 @@ does not):
 - The **PixAI Tagger** (`pixai-labs/pixai-tagger-v1.0`) alongside the WD Tagger
   as the fast "tagger" models (both vectorized — see "Performance notes").
 - A **multi-image grid preview** in the image viewer (variant grid).
+- A **Find Duplicates** dialog (`Tools` -> `Find Duplicates...`,
+  `taggui/dialogs/find_duplicates_dialog.py`): reviews groups of
+  byte-identical images (the exact-duplicate port of taggui-plus's dialog;
+  near-duplicate/dHash detection is deliberately not included). Scanning is
+  an in-memory group-by over `Image.content_hash` plus `os.stat` — no
+  hashing or file reads. In database storage mode the copies share one tag
+  record, so the tag actions (tag-as-`duplicate`, tag merge) are disabled
+  there. See "Find Duplicates dialog" below.
 
 There is **no** web backend, CI, or package manifest
 (`pyproject.toml`/`setup.py`) — it is a plain script-based app. There is **no
@@ -76,7 +84,10 @@ taggui/run_gui.py                  Entry point (QApplication, warning suppressio
 taggui/widgets/main_window.py      MainWindow: assembles everything, menus,
                                    shortcuts, signal wiring (the app's "glue")
 taggui/widgets/image_list.py       Images pane; FilterLineEdit with the pyparsing
-                                   filter grammar; image context menu actions
+                                   filter grammar; image context menu actions;
+                                   `trash_images` / `move_images_to_folder`
+                                   (shared file-move helpers, also used by the
+                                   Find Duplicates dialog)
 taggui/widgets/image_tags_editor.py Tag pane: TagInputBox (autocomplete),
                                    tag list, token counter, description editor
 taggui/widgets/group_tags_panel.py Grouped tags view for multi-image
@@ -124,7 +135,9 @@ taggui/auto_captioning/models/*.py        One small subclass per model family
 taggui/auto_captioning/settings_group.py  SettingGroup enum (UI show/hide groups)
 taggui/dialogs/*.py                      Find & Replace, Batch Reorder, Settings
                                    (storage backend + database path), Export Images,
-                                   Filter Help, multi-image caption confirmation dialogs
+                                   Filter Help, Find Duplicates (exact-duplicate
+                                   review dialog), multi-image caption
+                                   confirmation dialogs
 taggui/utils/*.py                        Settings helpers, Image dataclass,
                                    enums, thumbnail generation, QSettings-backed
                                    widgets, small Qt utilities
@@ -303,6 +316,59 @@ have their own caption file, so that sync is skipped by the
 `shared_content_records` guard at the top of `_sync_duplicate_images` —
 "tag all copies" is done via "Select Duplicates" + a batch operation on the
 selection.
+
+### Find Duplicates dialog
+
+Fork addition (`taggui/dialogs/find_duplicates_dialog.py`, opened from
+`Tools` -> `Find Duplicates...`, no keyboard shortcut): the exact-duplicate
+port of taggui-plus's dialog. It finds loaded images with byte-identical
+content, shows each group side by side, and acts on the non-kept copies
+(delete to Recycle Bin, move to a folder, tag as `duplicate`), optionally
+copying their tags to the kept image first.
+
+- **Scan** — an in-memory group-by over `Image.content_hash` plus one
+  `os.stat` per image (size + `mtime_ns`, for the cards and the keep rules),
+  run on a `QThreadPool` worker following the repo's background-work
+  convention (strong-reference registry + generation counter, cancellable).
+  No file is re-read or decoded. Images with `content_hash is None` (the
+  hash could not be resolved, e.g. text-file mode with an unusable
+  database) are excluded and reported as skipped. Groups are sorted
+  largest-first; members by `(width*height, size, mtime_ns)` descending.
+- **Keep rules** — `Largest resolution`, `Largest file`, `Newest file`,
+  `Oldest file` (a missing mtime counts as the newest, so it is never
+  picked), `Most tags`; ties fall back to resolution then the earliest
+  member. "Apply to all groups" re-picks every non-ignored group.
+- **Settings** (QSettings-backed widgets, persisted): `duplicate_scan_scope`
+  (`'All images'` default), `duplicate_keep_rule` (`'Largest resolution'`
+  default), `duplicate_merge_tags` (default `False`).
+- **Tag actions** go through `add_tags_per_image` (one undo step, one
+  combined `dataChanged`) and are **disabled when
+  `storage.shared_content_records` is True** (database mode): there any tag
+  change to one copy syncs to all copies (`_sync_duplicate_images`), so
+  "tag only the extras" cannot exist, and the tag merge is a no-op.
+- **Delete** reuses `trash_images` (Recycle Bin; a caption still used by a
+  remaining loaded image is kept). **Move** uses `move_images_to_folder`
+  (`widgets/image_list.py`): existing files are never overwritten (a
+  colliding name gets a numeric suffix), an image is never placed next to a
+  caption file it would silently adopt, and a caption shared by two loaded
+  images is copied until the last user is moved. Neither action touches the
+  database: records are keyed by content (a moved file's stale `hash_cache`
+  row is simply re-resolved on the next load). Both destructive actions
+  then call the dialog's `reload_callback` (`MainWindow.reload_directory`,
+  the fast diff path) and clear their results — no auto-rescan.
+- **Preview** — clicking a thumbnail opens `_PreviewDialog`, which reuses
+  the shared `ImageViewer` with a standalone `_GroupImagesModel` (the
+  `Image` via `UserRole`, its `thumbnail` `QIcon` via `DecorationRole` —
+  the viewer only ever calls `data(index, role)`) and
+  `load_image(index, preserve_view=True)` for zoom-preserving steps through
+  the group (the new optional `ImageViewer.load_image` parameter; the
+  main-window paths are unchanged). The "Keep this image" button checks the
+  matching card's `Keep` radio (the `(QRadioButton | None, member)` tuples
+  are shared). The card thumbnails are the list thumbnails (already decoded)
+  smoothly scaled to 140 px — no separate decode thread.
+- Rendering caps: 100 groups shown at a time ("Show next 100 groups"), 12
+  members per group until expanded via a "+N more" tile; cards are built in
+  40-card chunks with `processEvents` between.
 
 ### Undo/redo and batch operations
 
@@ -773,6 +839,16 @@ outrun the model.
   test images collide with prior runs (updates silently no-op against the
   stale record), and "delete the file" does not remove the record (neither
   should it; the record may belong to another copy).
+- **Find Duplicates** (see the "Find Duplicates dialog" section): in
+  database storage mode the tag actions are intentionally disabled (the
+  copies share one tag record, so tagging one copy tags all of them); the
+  `move_images_to_folder` helper must stay never-overwrite (a colliding name
+  gets a numeric suffix, and an image is never renamed onto an existing
+  caption it would silently adopt); moving or deleting never touches the
+  database — do not "fix" a moved file's stale `hash_cache` row, it is
+  re-resolved on the next load. The dialog's tag actions rely on
+  `add_tags_per_image`'s single combined `dataChanged`; do not add a second
+  `dataChanged` consumer for them (see the pending-delta flags gotcha).
 - **`_upsert_image` never deletes tag rows.** When an image loses a tag, the
   `image_tags` row goes away but the `tags` name stays — by design, so every
   tag ever stored remains a suggestion. Don't "clean up" the `tags` table.

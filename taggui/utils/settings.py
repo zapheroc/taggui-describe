@@ -38,6 +38,15 @@ DEFAULT_SETTINGS = {
     # Location of the database file. Empty means the platform-appropriate
     # default location.
     'database_path': '',
+    # Find Duplicates dialog (Tools -> Find Duplicates...).
+    # Which images a scan covers; values are the Scope enum's.
+    'duplicate_scan_scope': 'All images',
+    # Which image to keep in each group when "Apply to all groups" is used.
+    'duplicate_keep_rule': 'Largest resolution',
+    # When deleting/moving/tagging the non-kept copies of a group, first copy
+    # their tags to the kept image (text-file mode only; in database mode the
+    # copies share one tag record).
+    'duplicate_merge_tags': False,
     # Maximum size of the on-disk thumbnail cache (see
     # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
     # images when evicted, so this only bounds disk usage. 4 GiB holds the

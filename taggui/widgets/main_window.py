@@ -15,6 +15,7 @@ from utils.clip_tokenizer import ClipTokenizer
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
+from dialogs.find_duplicates_dialog import FindDuplicatesDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import (ImageListModel, RefreshScanner,
                                      get_image_suffixes)
@@ -839,6 +840,13 @@ class MainWindow(QMainWindow):
         export_images_dialog.exec()
 
     @Slot()
+    def show_find_duplicates_dialog(self):
+        find_duplicates_dialog = FindDuplicatesDialog(
+            parent=self, image_list_model=self.image_list_model,
+            reload_callback=self.reload_directory)
+        find_duplicates_dialog.exec()
+
+    @Slot()
     def show_batch_reorder_tags_dialog(self):
         batch_reorder_tags_dialog = BatchReorderTagsDialog(
             parent=self, image_list_model=self.image_list_model,
@@ -954,6 +962,12 @@ class MainWindow(QMainWindow):
         export_images_action.setShortcut(QKeySequence('Ctrl+Shift+E'))
         export_images_action.triggered.connect(self.show_export_images_dialog)
         tools_menu.addAction(export_images_action)
+        # No keyboard shortcut: taggui-plus ships none either, and the
+        # natural candidates (Ctrl+D, Ctrl+Shift+D) are taken or reserved.
+        find_duplicates_action = QAction('Find Duplicates...', parent=self)
+        find_duplicates_action.triggered.connect(
+            self.show_find_duplicates_dialog)
+        tools_menu.addAction(find_duplicates_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
