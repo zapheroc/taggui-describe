@@ -19,8 +19,8 @@ models.
 - Tags and descriptions stored in a local SQLite database by default (or in
   classic `.txt` caption files), so tags follow each image across folders
 - Duplicate file handling: byte-identical copies are detected in both
-  storage modes, with an `n/k` indicator, a `Duplicates` filter, and a
-  cleanup action
+  storage modes, with an `n/k` indicator, a `Duplicates` filter, a
+  `Find Duplicates...` review dialog, and a cleanup action
 - Background-generated thumbnails with an on-disk cache, so re-opening a
   folder is fast
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
@@ -516,7 +516,8 @@ The `File` menu contains `Load Directory` (`Ctrl`+`L`), `Reload Directory`
 (`F5` or `Ctrl`+`Shift`+`L`), `Settings` (`Ctrl`+`Alt`+`S`), and `Exit`
 (`Ctrl`+`W`).
 The `Tools` menu contains `Export Images...` (see
-[Export Images](#export-images)).
+[Export Images](#export-images)) and `Find Duplicates...` (see
+[Find Duplicates](#find-duplicates)).
 
 ## Tag and description storage
 
@@ -632,8 +633,58 @@ TagGUI makes duplicates easy to spot and clean up:
   confirmation dialog lists exactly which files are kept and which are
   deleted.
 
+## Find Duplicates
+
+Use **`Tools` -> `Find Duplicates...`** to find loaded images with
+**byte-for-byte identical content** and review each group side by side.
+Scanning uses the same content hash the app already computes for
+[duplicate detection](#duplicate-files), so it is instant even for large
+folders — no image is re-read or decoded.
+
+- **Scope** — which images to scan: `All images`, `Filtered images`, or
+  `Selected images` (remembered between scans).
+- Each group shows its images with their name, resolution, file size,
+  modified date and tag count. You choose **which image to keep** (click
+  the image's card, or use a keep rule, below); the kept image is marked
+  **Kept** and the others **Identical file**.
+  The other images can be:
+  - **deleted to the Recycle Bin**, or
+  - **moved to a folder** — existing files are never overwritten (a
+    colliding name gets a numeric suffix, `b.jpg`, `b_1.jpg`, ...),
+    captions travel with their images, and a caption shared by two images
+    is copied rather than moved, so the image that stays keeps its tags, or
+  - **tagged as `duplicate`** for later review.
+- **Keep in each group** — how the kept image is picked: `Largest
+  resolution`, `Largest file`, `Newest file` or `Oldest file` (compares the
+  modified date shown on each image), or `Most tags`.
+  `Apply to all groups` re-picks the keeper in every group (clicking any
+  image's card overrides the pick); tick `Ignore this group` to leave a
+  whole group untouched.
+- **Copy the tags of the other images to the kept image** — checked, the
+  tags of the other images are copied to the kept image before acting
+  (text-file storage mode only).
+  In database storage mode this option and "Tag as `duplicate`" are
+  disabled, because the copies of a duplicate share one tag record there:
+  tagging one copy would tag every copy of the group.
+- Mouse-wheel scrolling over a group's row scrolls the results list;
+  `Shift`+wheel scrolls along the row.
+- **Click a thumbnail** to open a large viewer of the group (clicking
+  anywhere else on the card picks that image to keep): zoom with the
+  mouse wheel or `+`/`-` (also `Ctrl`+`+`/`Ctrl`+`-`), drag to pan, and
+  `0`/`Ctrl`+`0` or a double-click to reset the view (stepping through the
+  group keeps the zoom, so the same detail can be compared).
+  `←`/`→` step through the group, `G` toggles a grid of the whole group
+  (a double-click or `Enter` opens the shown cell in the single view),
+  `K` or `Enter` keeps the shown image (which checks its `Keep` radio
+  back in the results), `F11` toggles full screen, and `Esc` leaves full
+  screen or closes the viewer.
+
+Near-duplicate ("look-alike") detection is not part of this dialog: it only
+finds byte-identical files.
+
 ## Acknowledgments
 
-The "tagging variant images" feature was developed with reference to code in
-[taggui-plus](https://github.com/Overtime-Artist/taggui-plus#tagging-variant-images)
+The "tagging variant images" feature and the Find Duplicates dialog were
+developed with reference to code in
+[tagui-plus](https://github.com/Overtime-Artist/taggui-plus#tagging-variant-images)
 by Overtime-Artist.

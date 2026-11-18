@@ -23,6 +23,7 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        infix_notation, nums, one_of, printables)
 
 from dialogs.filter_help_dialog import FilterHelpDialog
+from models.image_export import list_existing_names, unique_name
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
@@ -104,6 +105,119 @@ def trash_images(parent, image_paths: list[Path],
         QMessageBox.critical(
             parent, 'Error', f'{heading}\n\n{format_error_summary(errors)}')
     return deleted
+
+
+def move_images_to_folder(parent, image_paths: list[Path],
+                          destination: Path,
+                          all_image_paths: list[Path]
+                          ) -> list[tuple[Path, Path]]:
+    """Move the images (and their caption files) into `destination`, without
+    confirmation. An existing file is never overwritten: a colliding name
+    gets a numeric suffix (`cat.jpg`, `cat_1.jpg`, ...), and an image is
+    never placed next to an existing caption file it would silently adopt
+    (or have its own caption overwrite). A caption file shared by two loaded
+    images (`a.png` and `a.jpg` using `a.txt`) is copied rather than moved
+    until the last image using it is moved, so the images that stay keep
+    their tags. Images that are already in `destination` are skipped. Any
+    errors are shown in a single dialog. `all_image_paths` are all the
+    loaded images' paths. Returns the (source, destination) path pairs of
+    the images that were moved."""
+
+    def caption_key(image_path: Path) -> str:
+        # The image's caption file, as a comparison key: ignoring upper/lower
+        # case makes `a.TXT` and `a.txt` the same caption on every platform.
+        return os.path.normcase(str(image_path.with_suffix('.txt')))
+
+    # How many of the loaded images use each caption file. A caption is only
+    # moved away once no image left behind still uses it (an image that
+    # could not be moved, or `a.jpg` sharing `a.txt` with `a.png`).
+    remaining_users = Counter(caption_key(image_path)
+                              for image_path in all_image_paths)
+    existing_names = list_existing_names(destination)
+    destination_key = os.path.normcase(str(destination.resolve()))
+    errors = []
+    moved = []
+    skipped = 0
+    # Names already planned for earlier images of this batch (casefolded).
+    used_names = set()
+    # Source caption key -> caption target keys already written.
+    written_captions: dict[str, set[str]] = {}
+    for image_path in image_paths:
+        if (os.path.normcase(str(image_path.parent.resolve()))
+                == destination_key):
+            # The image is already in the destination folder.
+            skipped += 1
+            continue
+        stem, _suffix = os.path.splitext(image_path.name)
+        # `existing_names` holds the names already in `destination`,
+        # `used_names` the names planned for earlier images of the batch. If
+        # the image's caption file would be placed on top of an existing one
+        # (or the image would silently adopt one), its own name is forbidden
+        # as well, so it gets a numeric suffix.
+        forbidden = existing_names | used_names
+        if f'{stem}.txt'.casefold() in existing_names:
+            forbidden.add(image_path.name.casefold())
+        name = unique_name(image_path.name, forbidden)
+        used_names.add(name.casefold())
+        destination_path = destination / name
+        try:
+            # Checked right before writing: never overwrite an existing file
+            # (the planning above should already have renamed the image).
+            if destination_path.exists() or destination_path.is_symlink():
+                raise FileExistsError(f'{destination_path.name} already exists')
+            # Unlike `Path.replace`, `shutil.move` also works across drives.
+            shutil.move(str(image_path), str(destination_path))
+        except OSError as exception:
+            errors.append(f'{image_path.name} could not be moved: '
+                          f'{exception.strerror or exception}')
+            continue
+        moved.append((image_path, destination_path))
+        caption_file_path = image_path.with_suffix('.txt')
+        if not caption_file_path.exists():
+            continue
+        key = caption_key(image_path)
+        remaining_users[key] -= 1
+        # The caption is moved (not copied) only once no image left behind
+        # still uses it.
+        is_last_user = remaining_users[key] <= 0
+        destination_caption_path = \
+            destination / f'{destination_path.stem}.txt'
+        target_caption_key = caption_key(destination_caption_path)
+        written_targets = written_captions.setdefault(key, set())
+        try:
+            if target_caption_key in written_targets:
+                # Another moved image that shares this caption already wrote
+                # the file; just remove the original once we are the last
+                # user of it.
+                if is_last_user:
+                    caption_file_path.unlink()
+            else:
+                if (destination_caption_path.exists()
+                        or destination_caption_path.is_symlink()):
+                    raise FileExistsError(
+                        f'{destination_caption_path.name} already exists')
+                if is_last_user:
+                    shutil.move(str(caption_file_path),
+                                str(destination_caption_path))
+                else:
+                    shutil.copy2(caption_file_path,
+                                 destination_caption_path)
+                written_targets.add(target_caption_key)
+        except OSError as exception:
+            errors.append(f'{image_path.name} was moved, but its caption '
+                          f'file {caption_file_path.name} could not be: '
+                          f'{exception.strerror or exception}')
+    if errors:
+        attempted_count = len(image_paths) - skipped
+        failed_count = attempted_count - len(moved)
+        heading = (f'{failed_count} of {attempted_count} '
+                   f'{pluralize("image", attempted_count)} could not '
+                   f'be moved to {destination}:' if failed_count
+                   else f'Some caption files could not be moved to '
+                        f'{destination}:')
+        QMessageBox.critical(
+            parent, 'Error', f'{heading}\n\n{format_error_summary(errors)}')
+    return moved
 
 
 class FilterLineEdit(QLineEdit):
