@@ -3,8 +3,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (QEventLoop, QItemSelectionModel, QKeyCombination,
-                            QModelIndex, QPoint, QUrl, Qt, QThreadPool,
-                            Slot, QTimer)
+                            QModelIndex, QObject, QPoint, QRunnable, QUrl, Qt,
+                            QThreadPool, Signal, Slot, QTimer)
 from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon, QFont,
                            QKeySequence, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
@@ -40,6 +40,71 @@ from widgets.image_viewer import ImageViewer
 ICON_PATH = Path('images/icon.ico')
 GITHUB_REPOSITORY_URL = 'https://github.com/zapheroc/taggui-describe'
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
+
+
+class DatabaseTagNamesTask(QObject, QRunnable):
+    """
+    Loads the database's tag names (the `SELECT name FROM tags` scan behind
+    the tag suggestions) off the GUI thread.
+
+    Follows the `RefreshScanner` pattern: the task is added to a
+    strong-reference `registry` set (so it is not garbage collected while
+    the thread pool still references it) and removed from it when it is
+    done. It reports by signal, which is delivered to the GUI thread; the
+    generation number lets the receiver discard the result when a newer
+    invalidation (a backend switch, a different database, a newer query)
+    superseded it.
+
+    `run` looks up `get_database_tag_names` in this module's globals when it
+    runs (rather than binding the function object at construction time), so
+    it can be patched for testing.
+    """
+
+    names_ready = Signal(int, object)
+    failed = Signal(int)
+
+    def __init__(self, generation: int, database_path: Path, registry: set):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        self.generation = generation
+        self.database_path = database_path
+        self.registry = registry
+        # The thread pool must not delete the C++ object while Python may
+        # still reference it.
+        self.setAutoDelete(False)
+        registry.add(self)
+
+    @Slot()
+    def run(self):
+        try:
+            names = get_database_tag_names(self.database_path)
+        except Exception as exception:
+            # The database may be unavailable (for example, it is corrupted
+            # or was removed while the query was running). Report the
+            # failure so the in-flight marker is cleared and the next
+            # refresh retries; the suggestions keep offering the loaded
+            # images' tags meanwhile.
+            print(f'Failed to load tag suggestions from the database: '
+                  f'{exception}', file=sys.stderr)
+            self._notify_failed()
+        else:
+            self._notify_ready(names)
+        self.registry.discard(self)
+
+    def _notify_ready(self, names: list[str]):
+        try:
+            self.names_ready.emit(self.generation, names)
+        except RuntimeError:
+            # The receiver (and therefore the main window) has been
+            # destroyed, so there is no one to notify.
+            pass
+
+    def _notify_failed(self):
+        try:
+            self.failed.emit(self.generation)
+        except RuntimeError:
+            # The receiver has been destroyed; there is no one to notify.
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -80,6 +145,18 @@ class MainWindow(QMainWindow):
         # every time. None when the cache is empty or known to be stale
         # (see `_database_tag_names`).
         self._cached_database_tag_names: list[str] | None = None
+        # The generation of the tag names the cache (or an in-flight query)
+        # is for: bumped by `invalidate_database_tag_names` so that a query
+        # started for an older generation is discarded when it arrives.
+        self._tag_names_generation = 0
+        # The generation the in-flight `DatabaseTagNamesTask` was started
+        # for, or None when no query is running (see
+        # `_start_database_tag_names_task`).
+        self._tag_names_inflight_generation: int | None = None
+        # Strong references to the tag-name tasks running in the global
+        # thread pool (each task removes itself from the set when it is
+        # done).
+        self._tag_name_tasks: set = set()
         self.image_tag_list_model = ImageTagListModel()
 
         self.setWindowIcon(QIcon(QPixmap(get_resource_path(ICON_PATH))))
@@ -399,8 +476,7 @@ class MainWindow(QMainWindow):
             # rows were removed (or added). Refresh them here, exactly as
             # the full-recount branch of `on_image_data_changed` does.
             self.tag_counter_model.count_tags(self.image_list_model.images)
-            self._cached_database_tag_names = None
-            self.update_tag_suggestions()
+            self.invalidate_database_tag_names()
         # If the image shown in the full-resolution viewer changed on disk,
         # reload it (its list thumbnail is refreshed by the model).
         current_index = self.image_list_selection_model.currentIndex()
@@ -563,8 +639,7 @@ class MainWindow(QMainWindow):
             self._reload_directory_full()
         # The active storage (and therefore the database behind the tag
         # suggestions) has changed: drop the cached database tag names.
-        self._cached_database_tag_names = None
-        self.update_tag_suggestions()
+        self.invalidate_database_tag_names()
         if migrated_count:
             if new_mode == 'sqlite':
                 count_text = (f'{migrated_count} '
@@ -599,8 +674,7 @@ class MainWindow(QMainWindow):
             self._reload_directory_full()
         # A different database (or none) is now in use: drop the cached
         # database tag names.
-        self._cached_database_tag_names = None
-        self.update_tag_suggestions()
+        self.invalidate_database_tag_names()
 
     def update_tag_suggestions(self):
         """
@@ -611,25 +685,51 @@ class MainWindow(QMainWindow):
         a tag is always how many of the loaded images use it, so the tags the
         user is using most in the current folder sort first and tags that are
         only in the database sort last (alphabetically), ready to be added.
-        When the database cannot be read, the suggestions are the tags of the
-        loaded images only.
 
-        The database's tag names are cached (`_cached_database_tag_names`,
-        see `_database_tag_names`) rather than re-scanned on every call:
-        this runs for every caption, and the scan is O(database tag count).
+        This runs for every caption, so it must stay cheap: the database's
+        tag names are cached (`_cached_database_tag_names`), and a cache
+        miss is filled by a worker thread (`_start_database_tag_names_task`)
+        rather than by scanning the database on the GUI thread. On a miss
+        the suggestions are offered from the loaded images' tags immediately
+        (the completer keeps working) and merged with the database's names
+        when the worker reports them (`on_database_tag_names_ready`). When
+        the database cannot be read, the suggestions are the tags of the
+        loaded images only.
         """
         local_tag_counts = self.tag_counter_model.tag_counter
         database_tag_names = self._database_tag_names()
         if database_tag_names is None:
             suggestions = list(local_tag_counts.most_common())
         else:
-            tag_counts = dict(local_tag_counts)
-            for tag_name in database_tag_names:
-                tag_counts.setdefault(tag_name, 0)
-            suggestions = sorted(tag_counts.items(),
-                                 key=lambda tag_and_count: (
-                                     -tag_and_count[1], tag_and_count[0]))
+            suggestions = self._merged_tag_suggestions(local_tag_counts,
+                                                       database_tag_names)
         self.tag_suggestion_model.update_suggestions(suggestions)
+
+    def _merged_tag_suggestions(self, local_tag_counts,
+                                database_tag_names: list[str]):
+        """
+        The tag suggestions: the loaded images' tags with their counts, plus
+        the database's tag names (count zero), most used first.
+        """
+        tag_counts = dict(local_tag_counts)
+        for tag_name in database_tag_names:
+            tag_counts.setdefault(tag_name, 0)
+        return sorted(tag_counts.items(),
+                      key=lambda tag_and_count: (
+                          -tag_and_count[1], tag_and_count[0]))
+
+    def invalidate_database_tag_names(self):
+        """
+        Drop the cached database tag names -- the database's tag set may
+        have changed (a save, a backend switch, a different database) -- and
+        refresh the tag suggestions. Bumping the generation counter also
+        discards any in-flight query for the stale names, and the refresh
+        below starts a new one for the new generation (see
+        `_start_database_tag_names_task`).
+        """
+        self._cached_database_tag_names = None
+        self._tag_names_generation += 1
+        self.update_tag_suggestions()
 
     def _database_tag_names(self) -> list[str] | None:
         """
@@ -638,31 +738,69 @@ class MainWindow(QMainWindow):
         per-caption suggestion refresh does not re-scan the entire database.
 
         The cache is a plain list (in the alphabetical order the query
-        returns it), not a set: the per-caption merge below iterates over
-        it, and iterating a list is much faster than iterating a set of the
-        same size. Tags the loaded images currently use never need to be in
+        returns it), not a set: the merge below iterates over it, and
+        iterating a list is much faster than iterating a set of the same
+        size. Tags the loaded images currently use never need to be in
         the cache: `update_tag_suggestions` starts from the tag counter,
         which holds them all.
 
-        Return None when the database is not the active storage backend or
-        cannot be read, in which case `update_tag_suggestions` offers the
-        loaded images' tags only (the completer keeps working).
+        When the cache is empty, start the worker thread that loads it and
+        return None, in which case `update_tag_suggestions` offers the
+        loaded images' tags only until the names arrive (or permanently,
+        when the database is not the active storage backend).
         """
         if get_storage_backend() != 'sqlite':
             return None
-        cached = self._cached_database_tag_names
-        if cached is None:
-            try:
-                cached = get_database_tag_names(get_database_path())
-            except (OSError, sqlite3.Error) as exception:
-                # The database is unavailable (for example, it is corrupted).
-                # Suggest the loaded images' tags only, so the completer
-                # keeps working. Do not cache the failure: retry next time.
-                print(f'Failed to load tag suggestions from the database: '
-                      f'{exception}', file=sys.stderr)
-                return None
-            self._cached_database_tag_names = cached
-        return cached
+        if self._cached_database_tag_names is not None:
+            return self._cached_database_tag_names
+        self._start_database_tag_names_task()
+        return None
+
+    def _start_database_tag_names_task(self):
+        """
+        Start the worker thread that loads the database's tag names (see
+        `DatabaseTagNamesTask`), unless one is already running for the
+        current (or a newer) generation: a second query for the same names
+        would only duplicate the work.
+        """
+        generation = self._tag_names_generation
+        if (self._tag_names_inflight_generation is not None
+                and self._tag_names_inflight_generation >= generation):
+            return
+        self._tag_names_inflight_generation = generation
+        task = DatabaseTagNamesTask(generation, get_database_path(),
+                                    self._tag_name_tasks)
+        task.names_ready.connect(self.on_database_tag_names_ready)
+        task.failed.connect(self.on_database_tag_names_failed)
+        QThreadPool.globalInstance().start(task)
+
+    @Slot(int, object)
+    def on_database_tag_names_ready(self, generation: int, names: object):
+        """
+        Apply the worker's tag names. Runs on the GUI thread (the signal is
+        queued, since the task runs in a pool thread). A newer invalidation
+        while the query was in flight bumped the generation, so results for
+        an older generation are discarded (and must not clear the in-flight
+        marker, which may belong to a newer query).
+        """
+        if generation != self._tag_names_generation:
+            return
+        self._tag_names_inflight_generation = None
+        self._cached_database_tag_names = list(names)
+        self.tag_suggestion_model.update_suggestions(
+            self._merged_tag_suggestions(self.tag_counter_model.tag_counter,
+                                         self._cached_database_tag_names))
+
+    @Slot(int)
+    def on_database_tag_names_failed(self, generation: int):
+        """
+        A tag-name query failed (see `DatabaseTagNamesTask.run`): clear the
+        in-flight marker so the next refresh retries. Runs on the GUI
+        thread. Failures for an older generation are discarded.
+        """
+        if generation != self._tag_names_generation:
+            return
+        self._tag_names_inflight_generation = None
 
     @Slot()
     def reset_to_defaults(self):
@@ -1166,39 +1304,65 @@ class MainWindow(QMainWindow):
         path), the model set `_pending_tag_delta` / `_pending_description_only`
         before emitting `dataChanged`, so the tag counter can be adjusted for
         just that image (or not at all) instead of recounting every image.
-        This slot is the only `dataChanged` handler, and the connection is
-        direct (same thread), so the flags are always consumed here.
+        A save that refreshed duplicate copies set `_pending_sync_deltas`
+        the same way (both for a completed batch save and, from
+        `update_image_tags`, for the copies a single-image save synced —
+        in the latter case `_pending_tag_delta` and `_pending_sync_deltas`
+        are set together for the same emission). This slot is the only
+        `dataChanged` handler, and the connection is direct (same thread),
+        so the flags are always consumed here.
         """
         if roles == [Qt.ItemDataRole.DecorationRole]:
             return
         image_list_model = self.image_list_model
         tag_delta = image_list_model._pending_tag_delta
         description_only = image_list_model._pending_description_only
+        sync_deltas = image_list_model._pending_sync_deltas
         image_list_model._pending_tag_delta = None
         image_list_model._pending_description_only = False
+        image_list_model._pending_sync_deltas = None
         if description_only:
             # The description changed only: the tag counts are unchanged, so
             # neither the tag counter nor the tag suggestions need a refresh.
             pass
-        elif (tag_delta is not None
-              and first_changed_index.row() == last_changed_index.row()):
-            # Exactly one image changed (no duplicate copies were synced with
-            # it -- that would span several rows), so adjust the tag counter
-            # for that image instead of recounting every image.
-            self.tag_counter_model.apply_tag_delta(*tag_delta)
+        elif tag_delta is not None or sync_deltas:
+            # Every changed image has a known delta: a single-image update
+            # (`_pending_tag_delta`, from `update_image_tags`) and the
+            # duplicate copies its save refreshed, and/or the duplicate
+            # copies a completed batch save synced (`_pending_sync_deltas`).
+            # Adjust the tag counter per image instead of recounting every
+            # image. The names the save wrote to the database are the tags
+            # of loaded images, which the counter holds once the deltas are
+            # applied (and the suggestions merge starts from it), so the
+            # cached database tag names stay valid -- no invalidation, no
+            # extra database scan.
+            if tag_delta is not None:
+                self.tag_counter_model.apply_tag_delta(*tag_delta)
+            if sync_deltas:
+                for old_tags, new_tags in sync_deltas:
+                    self.tag_counter_model.apply_tag_delta(old_tags, new_tags)
             self.update_tag_suggestions()
         else:
-            # Several images changed (the edited image plus its duplicate
-            # copies, or a batch operation / undo-redo), or the change did
-            # not come from a single-image update: recount everything. The
-            # tag set of the loaded images may also have changed (a tag
-            # renamed or deleted), so drop the cached database tag names --
-            # the refresh below re-queries them once.
+            # Several images changed without known deltas (a batch operation
+            # / undo-redo), or the change did not come from a single-image
+            # update: recount everything. The tag set of the loaded images
+            # may also have changed (a tag renamed or deleted), so drop the
+            # cached database tag names -- the refresh below re-queries them
+            # once.
             self.tag_counter_model.count_tags(image_list_model.images)
-            self._cached_database_tag_names = None
-            self.update_tag_suggestions()
+            self.invalidate_database_tag_names()
         self.image_tags_editor.reload_image_tags_if_changed(
             first_changed_index, last_changed_index)
+
+    @Slot(bool)
+    def on_is_captioning_changed(self, is_captioning: bool):
+        # Defer the All Tags view reset for the duration of the run (see
+        # `TagCounterModel.defer_view_reset`); when the run ends (finished
+        # or canceled), apply the one consolidated reset with the counts
+        # accumulated by the run.
+        self.tag_counter_model.defer_view_reset = is_captioning
+        if not is_captioning:
+            self.tag_counter_model.flush_view_reset()
 
     @Slot()
     def update_image_tags(self):
@@ -1300,6 +1464,12 @@ class MainWindow(QMainWindow):
                 if description else
                 self.image_list_model.update_image_tags(image_index, tags)
             )
+        # While a run is in flight, the per-caption counter updates defer
+        # the All Tags view reset (which re-lays out every tag row and
+        # costs tens of milliseconds with a large tag vocabulary), and the
+        # deferred reset is applied once, at the end of the run.
+        self.auto_captioner.is_captioning_changed.connect(
+            self.on_is_captioning_changed)
         self.auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             self.image_tags_editor.reload_image_tags_if_changed(image_index,
