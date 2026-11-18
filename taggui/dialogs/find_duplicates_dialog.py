@@ -106,11 +106,30 @@ def _make_indicator_visible(button):
 
 class _DuplicateCard(QFrame):
     """A frameless card; the kept one is outlined in the highlight color,
-    like a selected image in the Images pane."""
+    like a selected image in the Images pane. Clicking anywhere on the card
+    (except the thumbnail, which opens the preview) selects its image to be
+    kept, so the click target is the whole card, not just the radio button."""
+
+    clicked = Signal()
 
     def __init__(self):
         super().__init__()
         self.kept = False
+        self._preview_zone: QWidget | None = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_preview_zone(self, widget: QWidget):
+        """The child that opens the preview on click; clicks inside it do
+        not select the card's image to be kept."""
+        self._preview_zone = widget
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and (self._preview_zone is None
+                     or not self._preview_zone.rect().contains(
+                         event.position().toPoint()))):
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def set_kept(self, kept: bool):
         if kept != self.kept:
@@ -712,6 +731,9 @@ class FindDuplicatesDialog(QDialog):
         thumbnail_label.setFixedSize(_THUMBNAIL_SIZE, _THUMBNAIL_SIZE)
         thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumbnail_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Clicking the thumbnail opens the preview instead of picking the
+        # keeper, so it is the card's one non-keep click zone.
+        card.set_preview_zone(thumbnail_label)
         self._set_card_thumbnail(member, thumbnail_label)
         thumbnail_label.clicked.connect(
             lambda m=member, gc=group_cards: self._show_preview(gc, m))
@@ -728,6 +750,11 @@ class FindDuplicatesDialog(QDialog):
         radio = QRadioButton('Keep')
         _make_indicator_visible(radio)
         card_layout.addWidget(radio)
+        # A click anywhere on the card (the name, the details, the radio's
+        # text, the background) checks the radio, selecting this image to be
+        # kept. A click on the radio button itself toggles it as usual, and
+        # one on the thumbnail opens the preview.
+        card.clicked.connect(lambda: radio.setChecked(True))
         return card, radio, relation_label, info_label
 
     # ------------------------------------------------------------------

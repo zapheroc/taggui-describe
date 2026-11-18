@@ -356,6 +356,15 @@ copying their tags to the kept image first.
   row is simply re-resolved on the next load). Both destructive actions
   then call the dialog's `reload_callback` (`MainWindow.reload_directory`,
   the fast diff path) and clear their results — no auto-rescan.
+- **Keeper picker** — the whole card is clickable: `_DuplicateCard`
+  emits `clicked` on a left press anywhere on the card except inside the
+  thumbnail zone registered via `set_preview_zone`, and `_build_card`
+  connects it to checking the card's `Keep` radio (the per-group
+  exclusive `QButtonGroup` does the rest; the card shows a hand cursor
+  over its whole area). A left press on the thumbnail label opens the
+  preview and then propagates to the card (a `QLabel` ignores mouse
+  presses), where the zone check swallows it — so a thumbnail click never
+  changes the keeper.
 - **Preview** — clicking a thumbnail opens `_PreviewDialog`, which reuses
   the shared `ImageViewer` with a standalone `_GroupImagesModel` (the
   `Image` via `UserRole`, its `thumbnail` `QIcon` via `DecorationRole` —

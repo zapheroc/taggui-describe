@@ -644,8 +644,8 @@ folders — no image is re-read or decoded.
 - **Scope** — which images to scan: `All images`, `Filtered images`, or
   `Selected images` (remembered between scans).
 - Each group shows its images with their name, resolution, file size,
-  modified date and tag count. You choose **which image to keep** (the
-  `Keep` radio button, or a keep rule, below); the kept image is marked
+  modified date and tag count. You choose **which image to keep** (click
+  the image's card, or use a keep rule, below); the kept image is marked
   **Kept** and the others **Identical file**.
   The other images can be:
   - **deleted to the Recycle Bin**, or
@@ -657,9 +657,9 @@ folders — no image is re-read or decoded.
 - **Keep in each group** — how the kept image is picked: `Largest
   resolution`, `Largest file`, `Newest file` or `Oldest file` (compares the
   modified date shown on each image), or `Most tags`.
-  `Apply to all groups` re-picks the keeper in every group (picking the
-  `Keep` radio button of any image overrides the pick); tick
-  `Ignore this group` to leave a whole group untouched.
+  `Apply to all groups` re-picks the keeper in every group (clicking any
+  image's card overrides the pick); tick `Ignore this group` to leave a
+  whole group untouched.
 - **Copy the tags of the other images to the kept image** — checked, the
   tags of the other images are copied to the kept image before acting
   (text-file storage mode only).
@@ -668,7 +668,8 @@ folders — no image is re-read or decoded.
   tagging one copy would tag every copy of the group.
 - Mouse-wheel scrolling over a group's row scrolls the results list;
   `Shift`+wheel scrolls along the row.
-- **Click a thumbnail** to open a large viewer of the group: zoom with the
+- **Click a thumbnail** to open a large viewer of the group (clicking
+  anywhere else on the card picks that image to keep): zoom with the
   mouse wheel or `+`/`-` (also `Ctrl`+`+`/`Ctrl`+`-`), drag to pan, and
   `0`/`Ctrl`+`0` or a double-click to reset the view (stepping through the
   group keeps the zoom, so the same detail can be compared).
