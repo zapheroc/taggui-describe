@@ -339,6 +339,12 @@ selection.
   - `_pending_tag_delta = (old_tags, new_tags)` (set by `update_image_tags`)
     and a single-row change → `TagCounterModel.apply_tag_delta(old, new)`
     (incremental) + `update_tag_suggestions()`;
+  - `_pending_sync_deltas = [(old_tags, new_tags), ...]` (set by
+    `on_batch_save_finished`, one pair per duplicate copy its completed save
+    synced) → `apply_tag_delta(old, new)` for **each** pair +
+    `update_tag_suggestions()`, with **no** full recount and **no**
+    `_cached_database_tag_names` invalidation (the names the save wrote are
+    the loaded images' tags, which the counter holds);
   - otherwise (multi-row batch/undo, or no flag) → full `count_tags(images)`
     + drop `_cached_database_tag_names` + `update_tag_suggestions()`.
   Then it reloads the tag editor if the current image changed. **Do not add a
@@ -658,7 +664,11 @@ update. It grew with both dataset and database size (19.9 ms at 20k images;
   `dataChanged` handler (`MainWindow.on_image_data_changed`) applies
   `TagCounterModel.apply_tag_delta` for single-image changes and falls back to
   a full `count_tags` for batches/undo. Description-only captions do **neither**
-  a recount nor a suggestion refresh.
+  a recount nor a suggestion refresh. The same delta mechanism covers the
+  duplicate-copy refresh a completed batch save emits (`_pending_sync_deltas`,
+  one pair per synced copy): that emission no longer triggers a second full
+  recount or an extra database tag-name scan (the scoped-op-with-out-of-scope
+  duplicates case that otherwise recounted twice).
 - **Fix 3 — cached database tag names.**
   `MainWindow._cached_database_tag_names` is a **`list[str]`** (the
   alphabetical `get_database_tag_names` result) — **a list, not a set**:
@@ -737,9 +747,13 @@ count** — the GUI side can no longer outrun the model.
   Guarded by the regression suite (`test_text_mode_cache.py` T2/T3/T9/T10).
 - **The pending-delta flags are consumed exactly once.**
   `MainWindow.on_image_data_changed` is the only `dataChanged` handler and
-  reads/clears `_pending_tag_delta` / `_pending_description_only`; adding a
-  second handler (or emitting an extra `dataChanged` for the same edit) will
-  either re-run the full recount or drop the delta.
+  reads/clears `_pending_tag_delta` / `_pending_description_only` /
+  `_pending_sync_deltas`; adding a second handler (or emitting an extra
+  `dataChanged` for the same edit) will either re-run the full recount or
+  drop the delta. Each flag is set right before its `dataChanged` and
+  consumed by that emission's slot; they are never set together for the same
+  emission (a single-image update and a completed-save sync are separate,
+  synchronous emissions).
 - **`_cached_database_tag_names` must stay a `list`, not a `set`.** At 50k
   tag names, iterating a set measured ~3× slower than the equivalent list
   (see "Performance notes"), and any new code path that can change the stored

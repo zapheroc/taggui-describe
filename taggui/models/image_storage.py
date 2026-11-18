@@ -478,6 +478,27 @@ class ImageStorage(ABC):
     def save_image(self, image: Image) -> None:
         """Save the tags and description of one image."""
 
+    def save_images(self, images: list[Image]) -> list[Image]:
+        """
+        Save the tags and descriptions of several images, and return the
+        images that could not be saved (an empty list when all were saved).
+
+        The default saves one image at a time and collects the failures, so
+        backends keep working when only `save_image` is implemented (the
+        text-file backend uses it: one caption file per image is the format).
+        `SqliteStorage` overrides it to write all the records in a single
+        atomic transaction.
+        """
+        failed = []
+        for image in images:
+            try:
+                self.save_image(image)
+            except (OSError, sqlite3.Error) as exception:
+                print(f'Failed to save tags for {image.path}: {exception}',
+                      file=sys.stderr)
+                failed.append(image)
+        return failed
+
     def flush_hash_cache(self) -> None:
         """
         Write any pending derived data computed during a directory load.
@@ -640,6 +661,83 @@ class SqliteStorage(ImageStorage):
                               image.description)
         finally:
             connection.close()
+
+    def save_images(self, images: list[Image]) -> list[Image]:
+        """
+        Save several images' records with one connection and one all-or-
+        nothing transaction.
+
+        `save_image` pays a connect + commit per image, which dominates a
+        batch operation over thousands of images. The statements are the
+        same as `_upsert_image`'s, just batched: upsert the records, remove
+        the old tag assignments, register the new tag names (rows are never
+        deleted — suggestions rely on them), resolve the names' ids in one
+        query, insert the assignments. A failure rolls the whole batch back
+        and all the input images are reported as failed.
+
+        Loaded images that share a content (duplicate copies) share one
+        record: the last one seen wins, as with sequential `save_image`
+        calls.
+        """
+        entries = []
+        failed = []
+        for image in images:
+            # Hashing is file I/O, not part of the atomic write: resolve it
+            # before opening the transaction.
+            try:
+                content_hash = (image.content_hash
+                                or compute_content_hash(image.path))
+            except OSError:
+                failed.append(image)
+                continue
+            entries.append((content_hash, image.tags, image.description))
+        if not entries:
+            return failed
+        by_hash = {}
+        for entry in entries:
+            by_hash[entry[0]] = entry
+        entries = list(by_hash.values())
+        connection = _connect(self.db_path)
+        try:
+            with connection:
+                connection.executemany(
+                    'INSERT INTO images (hash, description) VALUES (?, ?) '
+                    'ON CONFLICT (hash) DO UPDATE SET '
+                    'description = excluded.description',
+                    [(content_hash, description)
+                     for content_hash, _, description in entries])
+                connection.executemany(
+                    'DELETE FROM image_tags WHERE image_hash = ?',
+                    [(content_hash,) for content_hash, _, _ in entries])
+                tag_names = set()
+                for _, tags, _ in entries:
+                    tag_names.update(tags)
+                name_to_id = {}
+                if tag_names:
+                    connection.executemany(
+                        'INSERT OR IGNORE INTO tags (name) VALUES (?)',
+                        [(name,) for name in tag_names])
+                    # SQLite's bound-parameter limit: chunk the IN list.
+                    names = list(tag_names)
+                    for start in range(0, len(names), 999):
+                        chunk = names[start:start + 999]
+                        name_to_id.update(connection.execute(
+                            'SELECT name, id FROM tags '
+                            'WHERE name IN (' + ','.join('?' * len(chunk))
+                            + ')', chunk))
+                connection.executemany(
+                    'INSERT INTO image_tags (image_hash, tag_id, position) '
+                    'VALUES (?, ?, ?)',
+                    [(content_hash, name_to_id[tag], position)
+                     for content_hash, tags, _ in entries
+                     for position, tag in enumerate(tags)])
+        except (OSError, sqlite3.Error):
+            # The `with connection` context manager rolled the batch back;
+            # report every input image as unsaved.
+            return list(images)
+        finally:
+            connection.close()
+        return failed
 
     def flush_hash_cache(self) -> None:
         """
