@@ -5,6 +5,10 @@ imagesize==2.0.1
 # Fast content hashing (xxh3-128) for the image identity used by the
 # database and the thumbnail cache.
 xxhash==4.1.0
+# 256-bit perceptual hashes (pHash) for the Find Similar Images dialog.
+# Pure Python wheel (pulls in scipy and PyWavelets); imported only when the
+# dialog is used, never at startup.
+ImageHash==4.3.2
 pillow==13.0.0
 pyparsing==3.3.3
 PySide6==6.12.0

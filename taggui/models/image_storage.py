@@ -16,7 +16,7 @@ from utils.utils import pluralize
 
 # The version of the database schema currently in use. A database that was
 # created (or last upgraded) at version N has `PRAGMA user_version` set to N.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # The size (in bytes) of the chunks read when computing content hashes.
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -78,6 +78,51 @@ _MIGRATIONS = [
          'ctime_ns INTEGER NOT NULL, '
          'inode    INTEGER NOT NULL, '
          'hash     TEXT    NOT NULL)'),
+    ),
+    # Version 4.
+    #
+    # The Find Similar Images feature: the perceptual hashes and the
+    # user's ignored pairs/groups.
+    #
+    # One 256-bit pHash per distinct image content. The hash is the 64-
+    # character hex form of the integer (a 256-bit value does not fit in a
+    # SQLite INTEGER, which would silently overflow to a REAL); it is keyed
+    # by the content hash, so it is correct by construction when files
+    # change (a new content is a new key) and it needs no mtime/size fields.
+    # There is deliberately no foreign key to `images`: in text-file
+    # storage mode no `images` record exists for the content (the tags stay
+    # in the caption files), and orphan rows (records cleared, content gone
+    # from the dataset) are bounded and removed by "Clear similarity cache".
+    # `phash_mirror` is the hash of the left-right mirrored image (the
+    # optional "match mirrored versions" setting); it is NULL until a scan
+    # with that option on has computed it, and it is keyed by the same
+    # content hash, so it needs no invalidation of its own.
+    # `phash_version` distinguishes hash algorithms/parameters: rows with
+    # an old version are recomputed instead of compared.
+    (
+        ('CREATE TABLE IF NOT EXISTS phash ('
+         'hash          TEXT PRIMARY KEY, '
+         'phash         TEXT NOT NULL, '
+         'phash_mirror  TEXT, '
+         'phash_version INTEGER NOT NULL)'),
+        # Pairwise exclusions: "these two images must never be grouped
+        # together". Pairs are stored with hash_a < hash_b (the accessors
+        # normalize); pairwise, not opaque groups, because the groups
+        # themselves change with the slider/model/dataset.
+        ('CREATE TABLE IF NOT EXISTS ignored_similarity_pairs ('
+         'hash_a TEXT NOT NULL, '
+         'hash_b TEXT NOT NULL, '
+         'PRIMARY KEY (hash_a, hash_b))'),
+        # Mode/threshold-specific group dismissal: `group_key` is
+        # 'phash:<threshold>:<seed_hash>', so ignoring a group at one
+        # threshold does not hide it at another. `mode` will be 'phash' or
+        # 'dino' (the future DINOv2 mode); `threshold_key` is the slider
+        # value that produced the group.
+        ('CREATE TABLE IF NOT EXISTS ignored_similarity_groups ('
+         'group_key     TEXT PRIMARY KEY, '
+         'seed_hash     TEXT NOT NULL, '
+         'mode          TEXT NOT NULL, '
+         'threshold_key TEXT NOT NULL)'),
     ),
 ]
 
@@ -802,6 +847,220 @@ def get_database_tag_names(db_path: Path) -> list[str]:
     try:
         return [row[0] for row in connection.execute(
             'SELECT name FROM tags ORDER BY name')]
+    finally:
+        connection.close()
+
+
+# --- Find Similar Images: the perceptual hash cache and the ignored
+# pairs/groups.
+#
+# These are plain module functions taking a `db_path` (like
+# `get_database_tag_names`), so they are storage-agnostic: the similarity
+# scan works in both storage modes, and in text-file mode they touch only
+# the `phash` / `ignored_*` tables — never `images`, `tags` or
+# `image_tags` (the D1 rule).
+
+# The `phash` rows computed by a similarity scan are written in batches
+# rather than one commit per image: the scan computes the hashes in worker
+# threads, and a per-image commit would make them contend for the database's
+# single write lock (the same reason the `hash_cache` rows are batched).
+# The buffer is module-global like the hash-cache buffer; its rows are
+# content-addressed and `INSERT OR REPLACE` is idempotent, so flushing from
+# a fresh connection (the scan is the only writer) is always safe.
+_phash_pending: list[tuple] = []
+_phash_pending_lock = threading.Lock()
+_PHASH_FLUSH_THRESHOLD = 256
+
+
+def _flush_phash_buffer(db_path: Path) -> None:
+    """
+    Write the pending `phash` rows in a single transaction.
+
+    Best-effort: on a write failure the rows are re-queued (so they are not
+    lost and are retried on the next flush) and the error is not propagated,
+    because the scan's result does not depend on the cache write — the rows
+    are derived data and are simply recomputed on the next scan if the write
+    never happens.
+    """
+    with _phash_pending_lock:
+        if not _phash_pending:
+            return
+        rows = _phash_pending[:]
+        _phash_pending.clear()
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.executemany(
+                'INSERT INTO phash (hash, phash, phash_mirror, '
+                'phash_version) VALUES (?, ?, ?, ?) '
+                'ON CONFLICT (hash) DO UPDATE SET phash = excluded.phash, '
+                'phash_version = excluded.phash_version, '
+                'phash_mirror = COALESCE(excluded.phash_mirror, '
+                'phash.phash_mirror)', rows)
+    except (OSError, sqlite3.Error) as exception:
+        with _phash_pending_lock:
+            _phash_pending[:0] = rows
+        print(f'Failed to write the phash cache: {exception}',
+              file=sys.stderr)
+    finally:
+        connection.close()
+
+
+def buffer_phash_row(db_path: Path, content_hash: str, phash_hex: str,
+                     phash_version: int,
+                     phash_mirror_hex: str | None = None) -> None:
+    """
+    Queue a computed `phash` row, flushing the buffer when it is full.
+
+    `phash_mirror_hex` (the mirrored image's hash, when the scan computed
+    it) is merged with `COALESCE` on conflict, so a row written without a
+    mirror never wipes one that was computed by an earlier mirror scan.
+
+    Called by the scan worker threads (which never share a connection with
+    a directory load, so the batch flush opens its own fresh connection).
+    """
+    with _phash_pending_lock:
+        _phash_pending.append(
+            (content_hash, phash_hex, phash_mirror_hex, phash_version))
+        should_flush = len(_phash_pending) >= _PHASH_FLUSH_THRESHOLD
+    if should_flush:
+        _flush_phash_buffer(db_path)
+
+
+def flush_phash_cache(db_path: Path) -> None:
+    """
+    Write the `phash` rows buffered by a similarity scan
+    (see `_flush_phash_buffer`).
+
+    Called by the scan task when it finishes (or is cancelled), so the
+    remainder of the last partial batch is not left unwritten.
+    """
+    with _phash_pending_lock:
+        pending = len(_phash_pending) > 0
+    if not pending:
+        return
+    _flush_phash_buffer(db_path)
+
+
+def load_phashes(db_path: Path) -> dict[str, tuple[str, str | None, int]]:
+    """
+    The stored perceptual hashes of the database at `db_path`: a mapping
+    content hash -> (64-character hex phash, the mirrored image's hex phash
+    or None, phash_version).
+    """
+    connection = _connect(db_path)
+    try:
+        return {row[0]: (row[1], row[2], row[3]) for row in connection.execute(
+            'SELECT hash, phash, phash_mirror, phash_version FROM phash')}
+    finally:
+        connection.close()
+
+
+def load_ignored_pairs(db_path: Path) -> list[tuple[str, str]]:
+    """
+    The ignored similarity pairs of the database at `db_path`, as
+    (hash_a, hash_b) with hash_a < hash_b.
+    """
+    connection = _connect(db_path)
+    try:
+        return [(row[0], row[1]) for row in connection.execute(
+            'SELECT hash_a, hash_b FROM ignored_similarity_pairs')]
+    finally:
+        connection.close()
+
+
+def store_ignored_pair(db_path: Path, hash_a: str, hash_b: str) -> None:
+    """
+    Ignore the pair of images with the given content hashes (they must
+    never be grouped together). The order of the two hashes does not
+    matter; they are stored with hash_a < hash_b.
+    """
+    if hash_a == hash_b:
+        return
+    first, second = (hash_a, hash_b) if hash_a < hash_b else (hash_b, hash_a)
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'INSERT OR IGNORE INTO ignored_similarity_pairs '
+                '(hash_a, hash_b) VALUES (?, ?)', (first, second))
+    finally:
+        connection.close()
+
+
+def remove_ignored_pair(db_path: Path, hash_a: str, hash_b: str) -> None:
+    """Un-ignore a pair (the inverse of `store_ignored_pair`)."""
+    if hash_a == hash_b:
+        return
+    first, second = (hash_a, hash_b) if hash_a < hash_b else (hash_b, hash_a)
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'DELETE FROM ignored_similarity_pairs '
+                'WHERE hash_a = ? AND hash_b = ?', (first, second))
+    finally:
+        connection.close()
+
+
+def load_ignored_groups(db_path: Path) -> list[tuple[str, str, str, str]]:
+    """
+    The ignored similarity groups of the database at `db_path`, as
+    (group_key, seed_hash, mode, threshold_key).
+    """
+    connection = _connect(db_path)
+    try:
+        return [(row[0], row[1], row[2], row[3]) for row in
+                connection.execute(
+                    'SELECT group_key, seed_hash, mode, threshold_key '
+                    'FROM ignored_similarity_groups')]
+    finally:
+        connection.close()
+
+
+def store_ignored_group(db_path: Path, group_key: str, seed_hash: str,
+                        mode: str, threshold_key: str) -> None:
+    """
+    Ignore a similarity group at a specific mode and threshold
+    (`group_key` is 'phash:<threshold>:<seed_hash>').
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO ignored_similarity_groups '
+                '(group_key, seed_hash, mode, threshold_key) '
+                'VALUES (?, ?, ?, ?)',
+                (group_key, seed_hash, mode, threshold_key))
+    finally:
+        connection.close()
+
+
+def remove_ignored_group(db_path: Path, group_key: str) -> None:
+    """Un-ignore a group (the inverse of `store_ignored_group`)."""
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'DELETE FROM ignored_similarity_groups WHERE group_key = ?',
+                (group_key,))
+    finally:
+        connection.close()
+
+
+def clear_similarity_cache(db_path: Path) -> int:
+    """
+    Delete all the `phash` rows of the database at `db_path` (the
+    "Clear similarity cache" action). The `ignored_*` tables are user
+    intent and are kept. Return the number of rows that were cleared.
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            cleared_count = connection.execute(
+                'SELECT COUNT(*) FROM phash').fetchone()[0]
+            connection.execute('DELETE FROM phash')
+        return cleared_count
     finally:
         connection.close()
 

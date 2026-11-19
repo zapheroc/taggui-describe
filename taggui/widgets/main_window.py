@@ -847,6 +847,60 @@ class MainWindow(QMainWindow):
         find_duplicates_dialog.exec()
 
     @Slot()
+    def show_find_similar_dialog(self):
+        # Imported here (not at the top of the module) so the dialog's
+        # dependencies (numpy in `models.similarity`, imagehash/scipy in the
+        # scan worker) are only loaded when the dialog is opened.
+        from dialogs.find_similar_dialog import FindSimilarDialog
+        find_similar_dialog = FindSimilarDialog(
+            parent=self, image_list_model=self.image_list_model,
+            reload_callback=self.reload_directory,
+            select_paths_callback=self.select_image_paths)
+        find_similar_dialog.exec()
+
+    @Slot(list)
+    def select_image_paths(self, paths: list):
+        """Select the images at `paths` (a list of `Path`) in the image
+        list, driving the multi-image grid preview and the grouped tag
+        view. Called by the Find Similar Images dialog ("Open as
+        selection" / "Open in image list")."""
+        from pathlib import Path
+        selected_paths = set(paths)
+        # The image list shows the filtered images; select the proxy rows
+        # whose source image is in `paths` (and that pass the filter).
+        selection_model = self.image_list_selection_model
+        proxy_model = self.image_list_model.proxy_image_list_model
+        selection_model.clearSelection()
+        selected_count = 0
+        first_index = None
+        for row in range(proxy_model.rowCount()):
+            proxy_index = proxy_model.index(row, 0)
+            source_index = proxy_model.mapToSource(proxy_index)
+            image = (self.image_list_model.data(source_index,
+                                                Qt.ItemDataRole.UserRole)
+                     if source_index.isValid() else None)
+            if image is not None and image.path in selected_paths:
+                selection_model.select(
+                    proxy_index, QItemSelectionModel.SelectionFlag.Select)
+                selected_count += 1
+                if first_index is None:
+                    first_index = proxy_index
+        if first_index is not None:
+            # Selecting the first match makes it the current image (and
+            # switches the central view to the image viewer).
+            self.image_list.list_view.set_current_image_index(first_index)
+        if selected_count != len(selected_paths):
+            # Some of the paths are not in the (filtered) image list any
+            # more (e.g. the directory reloaded in between).
+            QMessageBox.information(
+                self, 'Find Similar Images',
+                f'{selected_count} of {len(selected_paths)} selected '
+                'images are shown in the image list'
+                + (' (the rest do not match the current filter)'
+                   if proxy_model.rowCount()
+                   < self.image_list_model.rowCount() else ''))
+
+    @Slot()
     def show_batch_reorder_tags_dialog(self):
         batch_reorder_tags_dialog = BatchReorderTagsDialog(
             parent=self, image_list_model=self.image_list_model,
@@ -968,6 +1022,13 @@ class MainWindow(QMainWindow):
         find_duplicates_action.triggered.connect(
             self.show_find_duplicates_dialog)
         tools_menu.addAction(find_duplicates_action)
+        # No keyboard shortcut (like "Find Duplicates..."): the dialog's
+        # module (and its numpy/imagehash dependencies) is imported lazily
+        # when it is opened, so it is never loaded at startup.
+        find_similar_action = QAction('Find Similar Images...', parent=self)
+        find_similar_action.triggered.connect(
+            self.show_find_similar_dialog)
+        tools_menu.addAction(find_similar_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)

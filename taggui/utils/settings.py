@@ -47,6 +47,21 @@ DEFAULT_SETTINGS = {
     # their tags to the kept image (text-file mode only; in database mode the
     # copies share one tag record).
     'duplicate_merge_tags': False,
+    # Find Similar Images dialog (Tools -> Find Similar Images...).
+    # The active similarity mode; values are the mode names in the dialog's
+    # mode radios. 'Visually similar (DINOv2)' is reserved for a future
+    # version and is not selectable yet.
+    'similarity_mode': 'Near duplicates',
+    # Which images a scan covers; values are the Scope enum's.
+    'similarity_scan_scope': 'All images',
+    # Maximum pHash difference (0-256; 8 is conservative, 16 the default,
+    # 28 broad) for an image to join a group.
+    'similarity_phash_max_distance': 16,
+    # When enabled, a second hash of each image's left-right mirrored
+    # version is compared too, so mirrored variants are matched (the card
+    # then shows "mirrored: N / 256"). pHash is not mirror-invariant, so
+    # this is off by default.
+    'similarity_match_mirrored': False,
     # Maximum size of the on-disk thumbnail cache (see
     # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
     # images when evicted, so this only bounds disk usage. 4 GiB holds the
