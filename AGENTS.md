@@ -402,7 +402,8 @@ copying their tags to the kept image first.
   (`'All images'` default), `duplicate_keep_rule` (`'Largest resolution'`
   default), `duplicate_merge_tags` (default `False`), `similarity_mode`
   (`'Duplicates'` default), `similarity_phash_max_distance` (6),
-  `similarity_match_mirrored` (False).
+  `similarity_match_mirrored` (False), `similarity_show_ignored` (True —
+  whether ignored groups are shown in black and white or hidden entirely).
 - **Tag actions** go through `add_tags_per_image` (one undo step, one
   combined `dataChanged`) and are **disabled in Duplicates mode when
   `storage.shared_content_records` is True** (database mode): there any tag
@@ -426,16 +427,46 @@ copying their tags to the kept image first.
   `ignored_similarity_groups`, keyed `'phash:<threshold>:<seed_hash>'` in
   Near Duplicates mode (so it is threshold-specific — the *applied*
   threshold the grouping was computed at) and `'exact:<content_hash>'` in
-  Duplicates mode. The "Show ignored" checkbox defaults to **On**:
-  ignored groups stay visible with their **cards rendered in black and
-  white** — the group's `cards_scroll` is disabled (`_GroupCards` sets
-  `setEnabled(not self.ignored)`), and the Fusion style desaturates
-  disabled widgets, so the thumbnails, labels, "+N more" tile and the
-  (absent) radios all read as inert, like the ignore behavior in
-  taggui-plus; the cards are also unclickable (no preview, no keeper
-  picking, no card menu) — and are hidden when the checkbox is off. The
-  group header (title and its controls) stays normal and fully usable, so
-  an ignored group can still be un-ignored or opened as a selection.
+  Duplicates mode. Toggling is applied **in place** by
+  `set_group_ignored`: persist, update `_ignored_groups`, then flip
+  `cards_scroll.setEnabled` and run `update_relations()` on the existing
+  `_GroupCards` — no box is rebuilt (parity with taggui-plus's
+  `setEnabled`-only toggle), so the toggle can never flicker. The "Show
+  ignored" checkbox is **persisted** (`similarity_show_ignored`, a
+  `SettingsBigCheckBox`, default **On**) and is restored when the dialog
+  reopens (and drives the grouping on open): ignored groups stay visible
+  with
+  their **cards rendered in black and white** — the group's `cards_scroll`
+  is disabled (`_GroupCards` sets `setEnabled(not self.ignored)` at
+  construction; the toggle flips it in place), and the Fusion style
+  desaturates disabled widgets, so the thumbnails, labels, "+N more" tile
+  and the *kept but disabled* "Keep" radios all read as inert, like the
+  ignore behavior in taggui-plus (the radios are built for every
+  non-dimmed member, ignored groups included — the disabled card area
+  grays them out and makes them unclickable); the cards are also
+  unclickable (no preview, no keeper picking, no card menu). With the
+  checkbox **off**, ignoring a group hides it **right away, in place**:
+  `set_group_ignored` calls `_hide_group_cards`, which drops the group
+  from `_groups`/`_group_cards` (exactly what the rebuild
+  `_apply_grouping` would compute with "Show ignored" off), hides the
+  box, and — because hiding a layout item only *posts* a layout request —
+  forces the re-layout (`results_layout.activate()`) and the container
+  resize (`_sync_results_container_size`) synchronously, so the very next
+  paint is the final state (no gap, no leftover box, no one-frame
+  background difference below the content). The other groups' boxes are
+  untouched; hiding the last group leaves the "no groups" status with the
+  actions disabled. The user's place in the list is preserved too:
+  whatever part of the hidden box was above the viewport top is subtracted
+  from the scroll offset (set after the synchronous re-layout), so the
+  group at the viewport top stays there — hiding the first group while at
+  the top simply brings the next group to the top, and hiding a group
+  below the viewport leaves the offset alone. A hidden group's checkbox is
+  unreachable (the whole
+  box, header included, is hidden), so un-ignoring it means toggling
+  "Show ignored" back on (rebuild) or "Clear group ignores". While the
+  group is shown ignored, its header (title and its controls) stays
+  normal and fully usable, so it can still be un-ignored or opened as a
+  selection.
   Ignored/split *pairs*
   (Near Duplicates: `ignored_similarity_pairs`, pairwise
   `hash_a < hash_b`; a session-only "split" exclusion lives in memory only)
@@ -448,6 +479,32 @@ copying their tags to the kept image first.
   mouse-transparent overlay and its "Un-ignore pair" menu), so the overlay
   is only applied to them, never to an ignored group's cards. "Clear
   group ignores" wipes both the group and pair ignore data.
+  Everything that *structurally* changes the boxes — the "Show ignored"
+  toggle, pair ignore/un-ignore/split, a new scan — goes through
+  `_apply_grouping` → `_show_groups`, which rebuilds **atomically** (a
+  visible rebuild must never flicker either): all replacement boxes are
+  built first, parentless and therefore invisible (`processEvents()`
+  every 40 cards), then under one
+  `results_container.setUpdatesEnabled(False)` window the old boxes are
+  `hide()`d **before** `deleteLater()` (a taken-out widget is still a
+  visible child of the container at its old position until it is
+  destroyed — painting it there alongside the replacements is what
+  flickers) and every replacement is inserted with `_insert_group_box`,
+  which also *force-delivers* the box's Show event (`box.show()` +
+  `QCoreApplication.sendPostedEvents(box, QEvent.Type.Show)`) —
+  inserting a parentless box only *posts* that event, and without
+  forcing it the first paint after the swap would miss the new boxes
+  (one blank frame of flicker). The first paint after the window closes
+  is the final state. "Show next 100 groups" appends via
+  `_add_group_cards`, which uses the same `_insert_group_box`. Every
+  path that adds or removes boxes also calls
+  `_sync_results_container_size()`: the scroll area (widget resizable)
+  defers resizing its container to the next event loop pass, so the
+  container otherwise keeps its old height for one frame and the area
+  below the content is painted with the container's background instead of
+  the viewport's — the helper resizes it now (viewport width × layout
+  height, the scroll area's own target, which its later pass then
+  recomputes as a no-op).
 - **Open as selection** — selects the group's images in the main window's
   image list via the dialog's `select_paths_callback`
   (`MainWindow.select_image_paths`), driving the multi-image grid preview
@@ -580,7 +637,8 @@ copying their tags to the kept image first.
 - Find Duplicates dialog (fork): `duplicate_scan_scope`,
   `duplicate_keep_rule`, `duplicate_merge_tags`, `similarity_mode`
   (`'Duplicates'` / `'Near Duplicates'`), `similarity_phash_max_distance`
-  (6), `similarity_match_mirrored` (False) — see "Find Duplicates dialog".
+  (6), `similarity_match_mirrored` (False), `similarity_show_ignored`
+  (True) — see "Find Duplicates dialog".
 - Settings that require a restart (font size, tag separator, image width, file
   formats, autocomplete, models directory) show a warning in the Settings
   dialog; new restart-required settings should too.

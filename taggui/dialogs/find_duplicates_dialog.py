@@ -44,8 +44,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QObject,
-                            QRunnable, Qt, QThreadPool, QTimer, Signal, Slot)
+from PySide6.QtCore import (QAbstractListModel, QCoreApplication, QEvent,
+                            QModelIndex, QObject, QRunnable, Qt, QThreadPool,
+                            QTimer, Signal, Slot)
 from PySide6.QtGui import (QFont, QIcon, QKeySequence, QPainter,
                            QPalette, QPen, QShortcut)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox,
@@ -974,10 +975,14 @@ class FindDuplicatesDialog(QDialog):
         self.match_mirrored_check_box.setToolTip(
             'The change applies the next time you press "Scan".')
         scan_grid.addWidget(self.match_mirrored_check_box, 1, 3, 1, 2)
-        self.show_ignored_check_box = QCheckBox('Show ignored')
-        self.show_ignored_check_box.setChecked(True)
+        self.show_ignored_check_box = SettingsBigCheckBox(
+            key='similarity_show_ignored', default=True,
+            text='Show ignored')
+        # The state is restored from the settings in the constructor (and
+        # the `toggled` signal fires there, before this connection
+        # exists), so connecting afterwards cannot re-apply a stale
+        # grouping.
         self.show_ignored_check_box.toggled.connect(self._apply_grouping)
-        _make_indicator_visible(self.show_ignored_check_box)
         scan_grid.addWidget(self.show_ignored_check_box, 1, 5)
         layout.addLayout(scan_grid)
         self._update_scope_count_label()
@@ -1419,8 +1424,28 @@ class FindDuplicatesDialog(QDialog):
             item = self.results_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Hide before the deferred delete: a taken-out widget is
+                # still a visible child of the results container at its old
+                # position until it is destroyed, and painting it there
+                # (alongside the replacement boxes) is what flickers.
+                widget.hide()
                 widget.deleteLater()
         self.results_layout.addStretch()
+        self._sync_results_container_size()
+
+    def _sync_results_container_size(self):
+        """Resize the results container now, the way the scroll area would
+        on the next event loop pass (viewport width, the layout's height).
+        The scroll area defers that resize, so without this the container
+        keeps its old height for one frame after boxes are added or
+        removed, and the area below the content is painted with the
+        container's background instead of the viewport's — one more
+        intermediate frame. The scroll area's own pass then computes the
+        same size and is a no-op."""
+        viewport = self.results_scroll_area.viewport()
+        hint = self.results_container.sizeHint()
+        self.results_container.resize(max(viewport.width(), hint.width()),
+                                      hint.height())
 
     @Slot(int)
     def _on_threshold_changed(self, value: int):
@@ -1599,43 +1624,132 @@ class FindDuplicatesDialog(QDialog):
 
     def _show_groups(self):
         groups = self._groups
-        self._remove_group_cards()
         if not groups:
-            noun = ('similar images' if self.mode == MODE_NEAR_DUPPLICATES
-                    else 'duplicate files')
-            self.status_label.setText(
-                f'No {noun} found among {self._scanned_count} '
-                f'{pluralize("image", self._scanned_count)}.'
-                + self._skipped_note())
+            self._remove_group_cards()
+            self._set_no_groups_status()
             self._set_actions_enabled(False)
             return
         self._tag_counts = {image.path: len(image.tags)
                             for image in self.image_list_model.images}
-        self._add_group_cards(groups[:_MAX_GROUPS_SHOWN])
+        # Build every replacement box before touching the current ones:
+        # the boxes are parentless (and therefore invisible) until the
+        # swap below, so the build can take its time — with event-loop
+        # yields in between — without ever painting an intermediate state.
+        new_group_cards = self._build_group_cards(groups[:_MAX_GROUPS_SHOWN])
+        # Swap the current boxes for the replacements in one
+        # paint-suppressed window: the old boxes are hidden before they are
+        # destroyed, no paint can happen between the removal and the
+        # insertion, and every replacement box is made visible *before* the
+        # window closes (see _insert_group_box) — so the first paint after
+        # the swap is the final state (a visible rebuild must never flicker).
+        self.results_container.setUpdatesEnabled(False)
+        try:
+            self._remove_group_cards()
+            for group_cards in new_group_cards:
+                self._insert_group_box(group_cards)
+            self._sync_results_container_size()
+        finally:
+            self.results_container.setUpdatesEnabled(True)
+        self._group_cards = new_group_cards
         self._set_actions_enabled(True)
         self._update_status()
 
-    def _add_group_cards(self, groups: list):
-        # Yield to the event loop now and then so the window stays
-        # responsive while many cards are built.
+    def _insert_group_box(self, group_cards):
+        """Insert a built box into the results layout and make it visible
+        synchronously. Inserting a parentless box posts its Show event but
+        does not deliver it: until the event loop runs, the box is still
+        hidden, and the first paint after a rebuild would miss it (one
+        frame with the old boxes gone and the new ones not yet there —
+        the rebuild flicker). Forcing the Show event to be delivered now
+        (inside the caller's paint-suppressed window) makes the box part of
+        the very next paint."""
+        self.results_layout.insertWidget(
+            self.results_layout.count() - 1, group_cards.box)
+        group_cards.box.show()
+        QCoreApplication.sendPostedEvents(group_cards.box, QEvent.Type.Show)
+
+    def _hide_group_cards(self, group_cards):
+        """Hide one group's box in place: this is what ignoring a group
+        does while "Show ignored" is off — the group must disappear
+        right away, but the other groups' boxes are not touched (rebuilding
+        every group just to hide one is what the toggle must not do).
+
+        The group is dropped from `_group_cards` and `_groups` exactly as
+        `_apply_grouping` computes them with "Show ignored" off, and the
+        status/actions follow. The hidden box stays in the layout (a hidden
+        item takes no space) and its `_GroupCards` stays alive until the
+        next rebuild, where `_remove_group_cards` clears it. The user's
+        place in the list is preserved (see the scroll offset math
+        below): whatever part of the hidden box was above the viewport
+        top is subtracted from the scroll offset, so the group that was
+        at the top of the viewport stays there (and hiding the first
+        group while at the top simply brings the next group to the top
+        instead of jumping down)."""
+        if group_cards in self._group_cards:
+            self._group_cards.remove(group_cards)
+        if group_cards.group in self._groups:
+            self._groups.remove(group_cards.group)
+        # Preserve the user's scroll position: everything below the hidden
+        # box shifts up by the box's height plus the layout's spacing, so
+        # the scroll offset must shrink by whatever part of the box was
+        # above the current offset. Without this, the list jumps down by
+        # the hidden box's height (and the top of the list is lost when
+        # the first group is hidden).
+        scroll_bar = self.results_scroll_area.verticalScrollBar()
+        offset = scroll_bar.value()
+        box_top = group_cards.box.y()
+        box_bottom = (box_top + group_cards.box.height()
+                      + self.results_layout.spacing())
+        new_offset = offset - max(0, min(offset, box_bottom) - box_top)
+        group_cards.box.hide()
+        # Hiding a layout item only *posts* a layout request: the siblings
+        # would move to their collapsed positions on the next event loop
+        # pass, so the first paint would still show the old layout with a
+        # gap. Force the re-layout (and the container's own resize, which
+        # the scroll area likewise defers) now so the very next paint is
+        # the final state.
+        self.results_layout.activate()
+        self._sync_results_container_size()
+        if new_offset != offset:
+            scroll_bar.setValue(new_offset)
+        if self._groups:
+            self._set_actions_enabled(True)
+            self._update_status()
+        else:
+            self._set_no_groups_status()
+            self._set_actions_enabled(False)
+
+    def _build_group_cards(self, groups: list) -> list:
+        """Construct the given groups' card boxes without showing them.
+        The boxes are parentless until the caller inserts them, so building
+        them can never paint an intermediate state; the event loop is
+        yielded to now and then so the window stays responsive while many
+        cards are built."""
+        group_cards = []
         cards_built = 0
         for group in groups:
             if self.mode == MODE_NEAR_DUPPLICATES:
                 # The representative (the first member) is the default
                 # keeper.
-                group_cards = _GroupCards(self, group)
+                group_cards.append(_GroupCards(self, group))
             else:
-                group_cards = _GroupCards(
+                group_cards.append(_GroupCards(
                     self, group,
                     choose_keeper(group, self.keep_rule_combo_box.currentText(),
-                                  self._tag_counts, self._stats))
-            self._group_cards.append(group_cards)
-            self.results_layout.insertWidget(
-                self.results_layout.count() - 1, group_cards.box)
-            cards_built += group_cards.shown_count
+                                  self._tag_counts, self._stats)))
+            cards_built += group_cards[-1].shown_count
             if cards_built >= 40:
                 cards_built = 0
                 QApplication.processEvents()
+        return group_cards
+
+    def _add_group_cards(self, groups: list):
+        # Appending only (the "Show next 100 groups" button): nothing is
+        # removed, so every state along the way is a consistent one.
+        for group_cards in self._build_group_cards(groups):
+            self._group_cards.append(group_cards)
+            self._insert_group_box(group_cards)
+        self._sync_results_container_size()
 
     @Slot()
     def show_more_groups(self):
@@ -1649,6 +1763,18 @@ class FindDuplicatesDialog(QDialog):
         return (f' {self._skipped_count} '
                 f'{pluralize("image", self._skipped_count)} were skipped '
                 'because their content could not be checked.')
+
+    def _set_no_groups_status(self):
+        """The status line for "no groups to show" (no results at all, or
+        every group hidden because it is ignored and "Show ignored" is
+        off)."""
+        noun = ('similar images' if self.mode == MODE_NEAR_DUPPLICATES
+                else 'duplicate files')
+        self.status_label.setText(
+            f'No {noun} found among {self._scanned_count} '
+            f'{pluralize("image", self._scanned_count)}.'
+            + self._skipped_note())
+        self.show_more_button.hide()
 
     def _update_status(self):
         groups = self._groups
@@ -1720,13 +1846,14 @@ class FindDuplicatesDialog(QDialog):
 
     def _build_card(self, member, group_cards) -> tuple:
         """Return (card, keep radio or None, relation label, info label).
-        A card gets no "Keep" radio when its group is ignored or when the
-        member is a display-only ignored-pair member (Near Duplicates
-        mode). Only the latter is covered by the translucent overlay: an
-        ignored group's cards are rendered in black and white by the
-        group's card area being disabled (see `_GroupCards`)."""
+        A card gets no "Keep" radio only when the member is a display-only
+        ignored-pair member (Near Duplicates mode) — the only case covered
+        by the translucent overlay. An ignored group's cards keep their
+        radios (like taggui-plus): the group's card area is disabled, so
+        the radios are grayed out and unclickable, and toggling the group's
+        "Ignore" checkbox only enables/disables the area in place (no
+        rebuild — the toggle must not flicker)."""
         member_dimmed = isinstance(member, dict) and member['dimmed']
-        dimmed = member_dimmed or group_cards.ignored
         image = _member_image(member)
         card = _DuplicateCard()
         card_layout = QVBoxLayout(card)
@@ -1754,7 +1881,7 @@ class FindDuplicatesDialog(QDialog):
         card_layout.addWidget(relation_label)
 
         radio = None
-        if not dimmed:
+        if not member_dimmed:
             radio = QRadioButton('Keep')
             _make_indicator_visible(radio)
             card_layout.addWidget(radio)
@@ -1887,10 +2014,21 @@ class FindDuplicatesDialog(QDialog):
         remove_ignored_pair(self.db_path, *pair)
         self._apply_grouping()
 
-    def ignore_group(self, group):
-        """Persistently ignore a group (it is shown in black and white
-        while "Show ignored" is on, hidden while it is off, and never
-        acted on)."""
+    def set_group_ignored(self, group, group_cards, ignored: bool):
+        """Persistently ignore (or un-ignore) a group and apply the state
+        to the group's cards in place: the card area is disabled/enabled,
+        which renders the group in black and white (and grays out its
+        "Keep" radios and the "+N more" tile) in a single repaint.
+
+        No rebuild: rebuilding would destroy and re-create every group's
+        boxes, and the intermediate states (the old boxes are only
+        deleteLater'd, so they linger at their old positions while the
+        replacements are inserted one by one) are what makes the toggle
+        flicker. While "Show ignored" is on the group is still shown in
+        black and white; while it is off the group's box is hidden in
+        place right away (`_hide_group_cards`) — same end state as the
+        rebuild `_apply_grouping` would produce, without touching the
+        other groups' boxes. The action buttons never act on it."""
         if isinstance(group, _SimilarGroup):
             group_key = group.group_key
             seed_hash = group.seed_hash
@@ -1898,26 +2036,26 @@ class FindDuplicatesDialog(QDialog):
             # group's key embeds the threshold its grouping was computed
             # at.
             threshold_key = str(self._applied_threshold)
+            mode = MODE_NEAR_DUPPLICATES
         else:
-            content_hash = group[0].content_hash
             group_key = self._exact_group_key(group)
-            seed_hash = content_hash
+            seed_hash = group[0].content_hash
             threshold_key = ''
-        self._ignored_groups.add(group_key)
-        store_ignored_group(self.db_path, group_key, seed_hash,
-                            MODE_NEAR_DUPPLICATES if isinstance(
-                                group, _SimilarGroup) else MODE_DUPLICATES,
-                            threshold_key)
-        self._apply_grouping()
-
-    def unignore_group(self, group):
-        if isinstance(group, _SimilarGroup):
-            group_key = group.group_key
+            mode = MODE_DUPLICATES
+        if ignored:
+            self._ignored_groups.add(group_key)
+            store_ignored_group(self.db_path, group_key, seed_hash, mode,
+                                threshold_key)
         else:
-            group_key = self._exact_group_key(group)
-        self._ignored_groups.discard(group_key)
-        remove_ignored_group(self.db_path, group_key)
-        self._apply_grouping()
+            self._ignored_groups.discard(group_key)
+            remove_ignored_group(self.db_path, group_key)
+        group_cards.ignored = ignored
+        group_cards.cards_scroll.setEnabled(not ignored)
+        group_cards.update_relations()
+        if ignored and not self.show_ignored_check_box.isChecked():
+            # "Show ignored" is off: the group is not shown at all, so it
+            # is hidden in place right away (see `_hide_group_cards`).
+            self._hide_group_cards(group_cards)
 
     # ------------------------------------------------------------------
     # Opening results in the main window
@@ -2247,7 +2385,9 @@ class _GroupCards:
         self.shown_count = 0
         # Whether the group is ignored (persisted, both modes): ignored
         # groups are shown in black and white (their card area disabled),
-        # and the action buttons never act on them.
+        # and the action buttons never act on them. The group's "Ignore"
+        # checkbox toggles this in place (see
+        # `FindDuplicatesDialog.set_group_ignored`) — no rebuild.
         self.ignored = (group.ignored if isinstance(group, _SimilarGroup)
                         else f'exact:{group[0].content_hash}'
                         in dialog._ignored_groups)
@@ -2313,13 +2453,13 @@ class _GroupCards:
         self._populate()
 
     def _on_ignore_toggled(self, checked: bool):
-        # Toggling rebuilds every group's cards (the checkbox comes back
-        # with the persisted state), so the connection must not fire
-        # during construction (see `__init__`).
-        if checked:
-            self.dialog.ignore_group(self.group)
-        else:
-            self.dialog.unignore_group(self.group)
+        # Persist the state and apply it in place (the card area is
+        # enabled/disabled, which in one paint renders the group in black
+        # and white and grays out its "Keep" radios) — like taggui-plus,
+        # without rebuilding the groups, so the toggle flickers nothing.
+        # The checkbox is set before this connection is made in `__init__`,
+        # so this cannot fire during construction.
+        self.dialog.set_group_ignored(self.group, self, checked)
 
     def _on_open_as_selection(self):
         self.dialog.open_group_as_selection(self.group)

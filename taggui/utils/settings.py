@@ -60,6 +60,9 @@ DEFAULT_SETTINGS = {
     # then shows "mirrored: N / 256"). pHash is not mirror-invariant, so
     # this is off by default.
     'similarity_match_mirrored': False,
+    # Whether the Find Duplicates dialog shows ignored groups (in black
+    # and white) or hides them entirely.
+    'similarity_show_ignored': True,
     # Maximum size of the on-disk thumbnail cache (see
     # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
     # images when evicted, so this only bounds disk usage. 4 GiB holds the
