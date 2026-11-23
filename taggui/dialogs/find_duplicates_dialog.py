@@ -1419,6 +1419,11 @@ class FindDuplicatesDialog(QDialog):
         self._remove_group_cards()
 
     def _remove_group_cards(self):
+        # The boxes about to be hidden may contain the focused widget
+        # (a card menu action leaves the focus where it was): see
+        # `_redirect_focus_out_of_results` for why that must not happen
+        # while the boxes are hidden.
+        self._redirect_focus_out_of_results()
         self._group_cards.clear()
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
@@ -1626,11 +1631,25 @@ class FindDuplicatesDialog(QDialog):
         groups = self._groups
         if not groups:
             self._remove_group_cards()
+            self.results_scroll_area.verticalScrollBar().setValue(0)
             self._set_no_groups_status()
             self._set_actions_enabled(False)
             return
         self._tag_counts = {image.path: len(image.tags)
                             for image in self.image_list_model.images}
+        # Preserve the user's place in the list across the rebuild (see
+        # `_restore_scroll_anchor`): which box the viewport top is in, and
+        # where inside it — captured before any box is hidden.
+        old_group_cards = list(self._group_cards)
+        old_offset = self.results_scroll_area.verticalScrollBar().value()
+        anchor_key = None
+        anchor_inset = 0
+        for group_cards in old_group_cards:
+            box = group_cards.box
+            if box.y() <= old_offset < box.y() + box.height():
+                anchor_key = self._group_key_of(group_cards.group)
+                anchor_inset = old_offset - box.y()
+                break
         # Build every replacement box before touching the current ones:
         # the boxes are parentless (and therefore invisible) until the
         # swap below, so the build can take its time — with event-loop
@@ -1647,12 +1666,64 @@ class FindDuplicatesDialog(QDialog):
             self._remove_group_cards()
             for group_cards in new_group_cards:
                 self._insert_group_box(group_cards)
+            # Make the replacement boxes' final positions available now
+            # (the scroll anchor restore below reads them; a no-op if the
+            # forced Show events already activated the layout).
+            self.results_layout.activate()
             self._sync_results_container_size()
         finally:
             self.results_container.setUpdatesEnabled(True)
         self._group_cards = new_group_cards
+        self._restore_scroll_anchor(self.results_scroll_area, old_group_cards,
+                                    new_group_cards, old_offset, anchor_key,
+                                    anchor_inset)
         self._set_actions_enabled(True)
         self._update_status()
+
+    def _group_key_of(self, group) -> str:
+        """A stable identity for a group across rebuilds: the same key the
+        ignore persistence uses (in Duplicates mode the scanned group
+        objects are reused as-is, in Near Duplicates mode the grouping
+        re-creates `_SimilarGroup` objects with the same key)."""
+        if isinstance(group, _SimilarGroup):
+            return group.group_key
+        return self._exact_group_key(group)
+
+    def _restore_scroll_anchor(self, scroll_area, old_group_cards,
+                               new_group_cards, old_offset, anchor_key,
+                               anchor_inset):
+        """Scroll the rebuilt results list back to the user's place: the
+        group whose box the viewport top was in keeps it there, at the
+        same inset. If that group's box was not rebuilt — it is hidden,
+        e.g. an ignored group while "Show ignored" is off — the first
+        rebuilt box after it in the old order takes its place (its top
+        comes to the viewport top, exactly as hiding it in place would
+        do); if nothing was rebuilt after it, the offset is clamped by
+        the scroll area to the smaller maximum (the user was at the
+        bottom, and stays at the bottom). `anchor_key` is None when the
+        viewport top was above the first box: nothing moved above it, so
+        the offset stands (clamped)."""
+        if anchor_key is None:
+            scroll_area.verticalScrollBar().setValue(old_offset)
+            return
+        for group_cards in new_group_cards:
+            if self._group_key_of(group_cards.group) == anchor_key:
+                scroll_area.verticalScrollBar().setValue(
+                    group_cards.box.y() + anchor_inset)
+                return
+        # The anchor group's box is gone: find the first rebuilt box that
+        # came after it in the old order. A new box's old position is the
+        # index of its key in the old list; groups that did not exist
+        # before (a fresh scan) have none and are skipped.
+        old_keys = [self._group_key_of(group_cards.group)
+                    for group_cards in old_group_cards]
+        anchor_index = old_keys.index(anchor_key)
+        for group_cards in new_group_cards:
+            key = self._group_key_of(group_cards.group)
+            if key in old_keys and old_keys.index(key) > anchor_index:
+                scroll_area.verticalScrollBar().setValue(group_cards.box.y())
+                return
+        scroll_area.verticalScrollBar().setValue(old_offset)
 
     def _insert_group_box(self, group_cards):
         """Insert a built box into the results layout and make it visible
@@ -1667,6 +1738,20 @@ class FindDuplicatesDialog(QDialog):
             self.results_layout.count() - 1, group_cards.box)
         group_cards.box.show()
         QCoreApplication.sendPostedEvents(group_cards.box, QEvent.Type.Show)
+
+    def _redirect_focus_out_of_results(self):
+        """Move the focus out of the results area, if it is there, before
+        boxes are hidden: hiding a focused widget makes Qt move the focus
+        to a fallback widget and *synchronously* scroll the scroll area to
+        make the newly focused widget visible — that is the invisible hand
+        that jumps the list when a group is hidden. The "Show ignored"
+        checkbox is always visible (it is in the header, outside the
+        scroll area), so focusing it scrolls nothing, and it is the very
+        control that brings hidden groups back."""
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is not None and self.results_container.isAncestorOf(
+                focus_widget):
+            self.show_ignored_check_box.setFocus()
 
     def _hide_group_cards(self, group_cards):
         """Hide one group's box in place: this is what ignoring a group
@@ -1695,12 +1780,13 @@ class FindDuplicatesDialog(QDialog):
         # above the current offset. Without this, the list jumps down by
         # the hidden box's height (and the top of the list is lost when
         # the first group is hidden).
-        scroll_bar = self.results_scroll_area.verticalScrollBar()
-        offset = scroll_bar.value()
+        scroll_area = self.results_scroll_area
+        offset = scroll_area.verticalScrollBar().value()
         box_top = group_cards.box.y()
         box_bottom = (box_top + group_cards.box.height()
                       + self.results_layout.spacing())
         new_offset = offset - max(0, min(offset, box_bottom) - box_top)
+        self._redirect_focus_out_of_results()
         group_cards.box.hide()
         # Hiding a layout item only *posts* a layout request: the siblings
         # would move to their collapsed positions on the next event loop
@@ -1710,8 +1796,12 @@ class FindDuplicatesDialog(QDialog):
         # the final state.
         self.results_layout.activate()
         self._sync_results_container_size()
-        if new_offset != offset:
-            scroll_bar.setValue(new_offset)
+        # Re-assert the offset *unconditionally* — also when it did not
+        # change (hiding the first group while at the top, hiding a group
+        # below the viewport): the re-layout may have clamped it, and
+        # anything that moved it during the hide is corrected here, so
+        # the group at the viewport top stays exactly where it was.
+        scroll_area.verticalScrollBar().setValue(new_offset)
         if self._groups:
             self._set_actions_enabled(True)
             self._update_status()

@@ -455,12 +455,29 @@ copying their tags to the kept image first.
   paint is the final state (no gap, no leftover box, no one-frame
   background difference below the content). The other groups' boxes are
   untouched; hiding the last group leaves the "no groups" status with the
-  actions disabled. The user's place in the list is preserved too:
-  whatever part of the hidden box was above the viewport top is subtracted
-  from the scroll offset (set after the synchronous re-layout), so the
-  group at the viewport top stays there — hiding the first group while at
-  the top simply brings the next group to the top, and hiding a group
-  below the viewport leaves the offset alone. A hidden group's checkbox is
+  actions disabled. The user's place in the list is preserved too — by
+  two parts, because two things would otherwise move the scrollbar:
+  (1) the *focus*: the box being hidden contains the just-clicked Ignore
+  checkbox, and hiding a focused widget makes Qt move the focus to a
+  fallback widget and *synchronously* scroll the scroll area to make the
+  newly focused widget visible (that invisible hand is what jumped the
+  list — the "ignore the top item while at the top and the scrollbar
+  moves down" report); `_redirect_focus_out_of_results` therefore runs
+  **before** `box.hide()`: if `QApplication.focusWidget()` is inside
+  `results_container`, the focus goes to the "Show ignored" checkbox
+  (always visible in the header, scrolls nothing, and it is the very
+  control that brings hidden groups back); (2) the *layout*: everything
+  below the hidden box shifts up by the box's height plus the layout's
+  spacing, so the scroll offset must shrink by whatever part of the box
+  was above the current offset. The re-assertion
+  (`verticalScrollBar().setValue(new_offset)`) runs **unconditionally**
+  after the synchronous re-layout — *not* guarded by `new_offset !=
+  offset`: the re-layout may have clamped the value, and anything that
+  moved it during the hide is corrected, which is exactly the cases the
+  guard would have skipped (hiding the first group while at the top
+  stays at the top, the next group coming to the top; hiding a group
+  below the viewport leaves the offset alone). A hidden group's checkbox
+  is
   unreachable (the whole
   box, header included, is hidden), so un-ignoring it means toggling
   "Show ignored" back on (rebuild) or "Clear group ignores". While the
@@ -495,7 +512,28 @@ copying their tags to the kept image first.
   inserting a parentless box only *posts* that event, and without
   forcing it the first paint after the swap would miss the new boxes
   (one blank frame of flicker). The first paint after the window closes
-  is the final state. "Show next 100 groups" appends via
+  is the final state. The user's place in the list is preserved across
+  the rebuild the same way: before the swap, `_show_groups` records the
+  scroll offset and which box the viewport top is in, identified by
+  *group key*, not object identity (`_group_key_of`: the `group_key` of
+  the `_SimilarGroup` in Near Duplicates mode, `exact:<content_hash>` in
+  Duplicates mode — the same keys the ignore persistence uses, so they
+  are stable across rebuilds even though Near Duplicates mode re-creates
+  the `_SimilarGroup` objects); after the swap — inside the paint-
+  suppressed window, after a forced `results_layout.activate()` so the
+  replacement boxes' `y()` positions are final — `_restore_scroll_anchor`
+  scrolls the rebuilt box of the same group back to the viewport top at
+  the same inset. If that group's box was not rebuilt (it was ignored
+  and "Show ignored" is off, so it is hidden), the first rebuilt box
+  after it in the old order takes its place (its top at the viewport
+  top, exactly as the in-place hide does); if nothing was rebuilt after
+  it, the offset is clamped to the smaller maximum (the user was at the
+  bottom, and stays at the bottom); if the viewport top was above the
+  first box, the offset stands. `_remove_group_cards` (hides *all* boxes
+  during the swap) runs the same focus redirect as `_hide_group_cards`
+  first — a card-menu action leaves the focus inside a box about to be
+  hidden — and the no-groups branch scrolls to 0. "Show next 100 groups"
+  appends via
   `_add_group_cards`, which uses the same `_insert_group_box`. Every
   path that adds or removes boxes also calls
   `_sync_results_container_size()`: the scroll area (widget resizable)
