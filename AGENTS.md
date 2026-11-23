@@ -427,17 +427,26 @@ copying their tags to the kept image first.
   Near Duplicates mode (so it is threshold-specific — the *applied*
   threshold the grouping was computed at) and `'exact:<content_hash>'` in
   Duplicates mode. The "Show ignored" checkbox defaults to **On**:
-  ignored groups stay visible with their **cards** dimmed (the group
-  header — title and its controls — stays normal and fully usable;
-  the dimming is a per-card translucent overlay, transparent to the
-  mouse), and are hidden when the checkbox is off. Ignored/split *pairs*
+  ignored groups stay visible with their **cards rendered in black and
+  white** — the group's `cards_scroll` is disabled (`_GroupCards` sets
+  `setEnabled(not self.ignored)`), and the Fusion style desaturates
+  disabled widgets, so the thumbnails, labels, "+N more" tile and the
+  (absent) radios all read as inert, like the ignore behavior in
+  taggui-plus; the cards are also unclickable (no preview, no keeper
+  picking, no card menu) — and are hidden when the checkbox is off. The
+  group header (title and its controls) stays normal and fully usable, so
+  an ignored group can still be un-ignored or opened as a selection.
+  Ignored/split *pairs*
   (Near Duplicates: `ignored_similarity_pairs`, pairwise
   `hash_a < hash_b`; a session-only "split" exclusion lives in memory only)
   are **always** excluded from the neighbor graph, so the seed selection —
   and therefore the groups' persisted keys — stays stable while "Show
   ignored" is toggled; with it on, the ignored pair's members are
   additionally appended as display-only *dimmed* members (no Keep radio,
-  skipped by every action, their card offers "Un-ignore pair"). "Clear
+  skipped by every action, their card offers "Un-ignore pair") — unlike
+  ignored groups, those stay *interactive* (the card keeps a translucent,
+  mouse-transparent overlay and its "Un-ignore pair" menu), so the overlay
+  is only applied to them, never to an ignored group's cards. "Clear
   group ignores" wipes both the group and pair ignore data.
 - **Open as selection** — selects the group's images in the main window's
   image list via the dialog's `select_paths_callback`

@@ -184,11 +184,11 @@ def _make_indicator_visible(button):
 
 
 def _make_dim_overlay(parent: QWidget) -> QFrame:
-    """A translucent gray overlay covering `parent` and its children
-    (ignored groups, dimmed members): it is transparent to the mouse, so
-    the widget stays fully usable. Created hidden; raise it above the
-    widget's children when showing it (children created after the overlay
-    would otherwise be drawn on top of it)."""
+    """A translucent gray overlay covering `parent` and its children (a
+    card of a display-only ignored-pair member): it is transparent to the
+    mouse, so the widget stays fully usable. Created hidden; raise it
+    above the widget's children when showing it (children created after
+    the overlay would otherwise be drawn on top of it)."""
     overlay = QFrame(parent)
     overlay.setObjectName('dimmedOverlay')
     overlay.setStyleSheet(
@@ -198,14 +198,6 @@ def _make_dim_overlay(parent: QWidget) -> QFrame:
     return overlay
 
 
-def _dim_widget(widget: QWidget, overlay: QFrame):
-    """Cover `widget` with its dim overlay (created by `_make_dim_overlay`):
-    raise it above the widget's children and size it to the widget."""
-    overlay.raise_()
-    overlay.setGeometry(widget.rect())
-    overlay.show()
-
-
 class _DuplicateCard(QFrame):
     """A frameless card; the kept one is outlined in the highlight color,
     like a selected image in the Images pane. Clicking anywhere on the card
@@ -213,9 +205,11 @@ class _DuplicateCard(QFrame):
     kept, so the click target is the whole card, not just the radio button.
 
     A card can also be dimmed (a translucent gray overlay over the card and
-    its labels): when its group is ignored, or when the member is a
-    display-only ignored-pair member (Near Duplicates mode, shown by "Show
-    ignored")."""
+    its labels) when its member is a display-only ignored-pair member
+    (Near Duplicates mode, shown by "Show ignored"). The cards of an
+    ignored group are rendered differently: the group's whole card area is
+    disabled, which the Fusion style draws in black and white (and makes
+    unclickable), so the group reads as "not to be acted on"."""
 
     clicked = Signal()
 
@@ -1726,12 +1720,13 @@ class FindDuplicatesDialog(QDialog):
 
     def _build_card(self, member, group_cards) -> tuple:
         """Return (card, keep radio or None, relation label, info label).
-        A card is dimmed when its group is ignored or when the member is a
-        display-only ignored-pair member (Near Duplicates mode): dimmed
-        cards get no radio and a dimmed card (the overlay covers the card
-        and its labels)."""
-        dimmed = (isinstance(member, dict) and member['dimmed']) \
-            or group_cards.ignored
+        A card gets no "Keep" radio when its group is ignored or when the
+        member is a display-only ignored-pair member (Near Duplicates
+        mode). Only the latter is covered by the translucent overlay: an
+        ignored group's cards are rendered in black and white by the
+        group's card area being disabled (see `_GroupCards`)."""
+        member_dimmed = isinstance(member, dict) and member['dimmed']
+        dimmed = member_dimmed or group_cards.ignored
         image = _member_image(member)
         card = _DuplicateCard()
         card_layout = QVBoxLayout(card)
@@ -1777,9 +1772,10 @@ class FindDuplicatesDialog(QDialog):
         card.customContextMenuRequested.connect(
             lambda pos, m=member, gc=group_cards: self._show_card_menu(
                 m, gc, card.mapToGlobal(pos)))
-        if dimmed:
+        if member_dimmed and not group_cards.ignored:
             # After the card's children exist, so the overlay is raised
-            # above them.
+            # above them. (An ignored group's cards are already rendered
+            # in black and white by the disabled card area.)
             card.set_dimmed(True)
         return card, radio, relation_label, info_label
 
@@ -1892,8 +1888,9 @@ class FindDuplicatesDialog(QDialog):
         self._apply_grouping()
 
     def ignore_group(self, group):
-        """Persistently ignore a group (it is shown dimmed while "Show
-        ignored" is on, hidden while it is off, and never acted on)."""
+        """Persistently ignore a group (it is shown in black and white
+        while "Show ignored" is on, hidden while it is off, and never
+        acted on)."""
         if isinstance(group, _SimilarGroup):
             group_key = group.group_key
             seed_hash = group.seed_hash
@@ -2222,9 +2219,12 @@ class _GroupCards:
     group. ``keep_member`` is the image to keep, even when it is hidden: in
     Duplicates mode it is picked by the keep rule when the cards are built,
     in Near Duplicates mode the representative (the first member) is the
-    default keeper. Dimmed cards (an ignored group, or a display-only
-    ignored-pair member in Near Duplicates mode) have no "Keep" radio and
-    are never acted on; the group's header stays normal and usable.
+    default keeper. An ignored group's card area is disabled, so its cards
+    are rendered in black and white (the Fusion style desaturates disabled
+    widgets) and are unclickable — the group reads as "not to be acted
+    on" — while a display-only ignored-pair member (Near Duplicates mode)
+    is dimmed with a translucent overlay. Such cards have no "Keep" radio
+    and are never acted on; the group's header stays normal and usable.
     """
 
     def __init__(self, dialog, group, keep_member=None):
@@ -2246,8 +2246,8 @@ class _GroupCards:
         self.cards: list = []
         self.shown_count = 0
         # Whether the group is ignored (persisted, both modes): ignored
-        # groups are shown dimmed, and the action buttons never act on
-        # them.
+        # groups are shown in black and white (their card area disabled),
+        # and the action buttons never act on them.
         self.ignored = (group.ignored if isinstance(group, _SimilarGroup)
                         else f'exact:{group[0].content_hash}'
                         in dialog._ignored_groups)
@@ -2258,8 +2258,8 @@ class _GroupCards:
             f'{title} \u2014 {len(members)} images')
         # Only a title and a divider line, so the images sit directly on the
         # dark results background like in the Images pane. (The header is
-        # never dimmed: an ignored group's cards are dimmed, but the group
-        # stays fully usable.)
+        # never disabled: an ignored group's cards are rendered in black
+        # and white, but the group stays fully usable.)
         self.box.setFlat(True)
         title_font = self.box.font()
         title_font.setBold(True)
@@ -2269,9 +2269,9 @@ class _GroupCards:
 
         # A header row with the group's actions (only the group's title is
         # bold). "Ignore this group" is a checkbox, persisted in both
-        # modes: while "Show ignored" is on the group is shown dimmed
-        # (its cards), while it is off the group is hidden; either way the
-        # action buttons never act on it.
+        # modes: while "Show ignored" is on the group is shown in black
+        # and white (its cards disabled), while it is off the group is
+        # hidden; either way the action buttons never act on it.
         normal_font = QFont(title_font)
         normal_font.setBold(False)
         header = QHBoxLayout()
@@ -2304,6 +2304,12 @@ class _GroupCards:
         self.cards_scroll.horizontalScrollBar().installEventFilter(
             self._wheel_forwarder)
         box_layout.addWidget(self.cards_scroll)
+        # An ignored group's cards are rendered in black and white (the
+        # Fusion style desaturates disabled widgets) and are unclickable,
+        # like taggui-plus: the whole group reads as "not to be acted on".
+        # The header above stays enabled, so the group can still be
+        # un-ignored or opened as a selection.
+        self.cards_scroll.setEnabled(not self.ignored)
         self._populate()
 
     def _on_ignore_toggled(self, checked: bool):
@@ -2357,11 +2363,8 @@ class _GroupCards:
             more_tile.setFrameShape(QFrame.Shape.StyledPanel)
             more_tile.setCursor(Qt.CursorShape.PointingHandCursor)
             more_tile.clicked.connect(self.expand)
-            if self.ignored:
-                # Like the cards, the tile is dimmed when the group is
-                # ignored (the fixed size is final, so the overlay does not
-                # need a resize hook).
-                _dim_widget(more_tile, _make_dim_overlay(more_tile))
+            # In an ignored group the tile is rendered in black and white
+            # by the disabled card area, like the cards.
             cards_layout.addWidget(more_tile)
         cards_layout.addStretch()
 
@@ -2401,10 +2404,13 @@ class _GroupCards:
                 relation_label.setText(
                     f'<b>{text}</b>' if image is self.keep_member else text)
         for card, member in self.cards:
-            dimmed = (isinstance(member, dict) and member['dimmed']) \
-                or self.ignored
-            card.set_dimmed(dimmed)
-            card.set_kept(not dimmed
+            member_dimmed = isinstance(member, dict) and member['dimmed']
+            # An ignored group's cards are rendered in black and white by
+            # the disabled card area; the overlay is only for the
+            # display-only ignored-pair members of a group that is not
+            # ignored itself.
+            card.set_dimmed(member_dimmed and not self.ignored)
+            card.set_kept(not (member_dimmed or self.ignored)
                           and _member_image(member) is self.keep_member)
 
     def refresh_info(self):
