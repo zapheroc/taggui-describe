@@ -772,7 +772,8 @@ class ImageViewer(QWidget):
         return placeholder
 
     @Slot()
-    def load_image(self, proxy_image_index: QModelIndex):
+    def load_image(self, proxy_image_index: QModelIndex,
+                   preserve_view: bool = False):
         if self._grid_mode:
             # A grid is being shown for a multi-image selection; ignore
             # single-image loads until the grid is torn down via exit_grid().
@@ -795,10 +796,14 @@ class ImageViewer(QWidget):
         # directory is loading).
         if image is None:
             return
-        # Reset zoom/scroll state immediately (image load happens async).
-        self.zoom_factor = 1.0
-        self.scroll_area.horizontalScrollBar().setValue(0)
-        self.scroll_area.verticalScrollBar().setValue(0)
+        # Reset zoom/scroll state immediately (image load happens async),
+        # unless the caller wants the current view kept (the Find
+        # Duplicates preview, so the same detail can be compared across a
+        # group).
+        if not preserve_view:
+            self.zoom_factor = 1.0
+            self.scroll_area.horizontalScrollBar().setValue(0)
+            self.scroll_area.verticalScrollBar().setValue(0)
         # Start async decode; _on_image_loaded fires when done. Show the list
         # thumbnail upscaled as an instant placeholder for large images.
         placeholder = self._get_thumbnail_placeholder(proxy_image_index, image)
