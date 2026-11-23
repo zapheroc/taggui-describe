@@ -47,16 +47,14 @@ DEFAULT_SETTINGS = {
     # their tags to the kept image (text-file mode only; in database mode the
     # copies share one tag record).
     'duplicate_merge_tags': False,
-    # Find Similar Images dialog (Tools -> Find Similar Images...).
-    # The active similarity mode; values are the mode names in the dialog's
-    # mode radios. 'Visually similar (DINOv2)' is reserved for a future
-    # version and is not selectable yet.
-    'similarity_mode': 'Near duplicates',
-    # Which images a scan covers; values are the Scope enum's.
-    'similarity_scan_scope': 'All images',
-    # Maximum pHash difference (0-256; 8 is conservative, 16 the default,
-    # 28 broad) for an image to join a group.
-    'similarity_phash_max_distance': 16,
+    # The Find Duplicates dialog's mode: 'Duplicates' (byte-for-byte
+    # identical content; an instant in-memory scan, run automatically when
+    # the dialog opens) or 'Near Duplicates' (256-bit perceptual hash; the
+    # scan decodes the uncached images, so it waits for a Scan press).
+    'similarity_mode': 'Duplicates',
+    # Maximum pHash difference (0-100; 6 is the default, 8 conservative,
+    # 28 broad) for an image to join a near-duplicate group.
+    'similarity_phash_max_distance': 6,
     # When enabled, a second hash of each image's left-right mirrored
     # version is compared too, so mirrored variants are matched (the card
     # then shows "mirrored: N / 256"). pHash is not mirror-invariant, so

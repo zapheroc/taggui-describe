@@ -1,9 +1,9 @@
 """
-Perceptual similarity of the loaded images (the Find Similar Images
-feature): 256-bit pHash computation, vectorized Hamming distances, and
-seed-based (non-transitive) grouping.
+Perceptual similarity of the loaded images (the Find Duplicates dialog's
+Near Duplicates mode): 256-bit pHash computation, vectorized Hamming
+distances, and seed-based (non-transitive) grouping.
 
-Imported only by the Find Similar Images dialog, which the main window
+Imported only by the Find Duplicates dialog, which the main window
 imports lazily when the dialog is opened, so the heavy dependencies are
 never loaded at application start: `numpy` is imported at module level here
 (moderate cost, paid once on dialog open) and `imagehash`/`scipy` are

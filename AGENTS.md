@@ -29,13 +29,18 @@ does not):
   as the fast "tagger" models (both vectorized — see "Performance notes").
 - A **multi-image grid preview** in the image viewer (variant grid).
 - A **Find Duplicates** dialog (`Tools` -> `Find Duplicates...`,
-  `taggui/dialogs/find_duplicates_dialog.py`): reviews groups of
-  byte-identical images (the exact-duplicate port of taggui-plus's dialog;
-  near-duplicate/dHash detection is deliberately not included). Scanning is
-  an in-memory group-by over `Image.content_hash` plus `os.stat` — no
-  hashing or file reads. In database storage mode the copies share one tag
+  `taggui/dialogs/find_duplicates_dialog.py`): a single dialog with two
+  modes. **Duplicates** (default) reviews groups of byte-identical images
+  (the exact-duplicate port of taggui-plus's dialog); scanning is an
+  in-memory group-by over `Image.content_hash` plus `os.stat` — no hashing
+  or file reads — and runs automatically when the dialog opens. **Near
+  Duplicates** reviews groups of visually similar images via 256-bit pHash
+  (`taggui/models/similarity.py` + the schema-v4 `phash` database cache);
+  the scan decodes every uncached image and always waits for an explicit
+  "Scan". In database storage mode exact-duplicate copies share one tag
   record, so the tag actions (tag-as-`duplicate`, tag merge) are disabled
-  there. See "Find Duplicates dialog" below.
+  there; near-duplicate groups are different content and work in both
+  storage modes. See "Find Duplicates dialog" below.
 
 There is **no** web backend, CI, or package manifest
 (`pyproject.toml`/`setup.py`) — it is a plain script-based app. There is **no
@@ -103,7 +108,16 @@ taggui/models/image_list_model.py  Core data model: Image list, directory load,
                                    undo/redo, ALL batch tag operations, disk I/O
                                    (reads/writes go through the active storage
                                    backend; syncs duplicate-content images)
-taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate
+taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate; schema v4 adds the `phash` cache (256-bit pHash + mirror, hex TEXT) and the ignored-similarity pair/group tables (Find Duplicates, Near Duplicates mode)
+taggui/models/similarity.py        pHash core for the Find Duplicates dialog's
+                                    Near Duplicates mode: `compute_phash` /
+                                    `compute_phash_mirrored` (ImageHash,
+                                    256 bits), hex round-trip, threaded
+                                    `compute_neighbors` (LUT Hamming pass),
+                                    non-transitive `seed_group`; numpy at
+                                    module level, imagehash/scipy only
+                                    inside the compute functions (the module
+                                    is imported only when the dialog opens)
 taggui/models/proxy_image_list_model.py  Filter evaluation (recursive AST walk)
 taggui/models/tag_counter_model.py       Tag frequency counter (autocomplete source) + apply_tag_delta (incremental update)
 taggui/models/proxy_tag_counter_model.py Sorting/filtering for the All Tags list
@@ -135,8 +149,9 @@ taggui/auto_captioning/models/*.py        One small subclass per model family
 taggui/auto_captioning/settings_group.py  SettingGroup enum (UI show/hide groups)
 taggui/dialogs/*.py                      Find & Replace, Batch Reorder, Settings
                                    (storage backend + database path), Export Images,
-                                   Filter Help, Find Duplicates (exact-duplicate
-                                   review dialog), multi-image caption
+                                   Filter Help, Find Duplicates (dual-mode
+                                   exact / pHash near-duplicate review
+                                   dialog), multi-image caption
                                    confirmation dialogs
 taggui/utils/*.py                        Settings helpers, Image dataclass,
                                    enums, thumbnail generation, QSettings-backed
@@ -320,32 +335,81 @@ selection.
 ### Find Duplicates dialog
 
 Fork addition (`taggui/dialogs/find_duplicates_dialog.py`, opened from
-`Tools` -> `Find Duplicates...`, no keyboard shortcut): the exact-duplicate
-port of taggui-plus's dialog. It finds loaded images with byte-identical
-content, shows each group side by side, and acts on the non-kept copies
+`Tools` -> `Find Duplicates...`, no keyboard shortcut). One dialog with two
+modes (combo near the top, persisted in `similarity_mode`; a stored value
+that is not one of the combo's items leaves the combo on its first item,
+`'Duplicates'` — `QComboBox.setCurrentText` is a no-op for non-item
+values):
+
+- **Duplicates** (default) — the exact-duplicate port of taggui-plus's
+  dialog. It finds loaded images with byte-identical content and shows each
+  group side by side.
+- **Near Duplicates** — visually similar images via 256-bit pHash
+  (`taggui/models/similarity.py`). The group header text switches
+  `'Exact duplicates'` <-> `'Near duplicates'` with the mode, and the
+  mode-dependent controls (slider, mirror option, clear-cache button) are
+  shown only in Near Duplicates mode.
+
+Both modes show each group side by side and act on the non-kept members
 (delete to Recycle Bin, move to a folder, tag as `duplicate`), optionally
 copying their tags to the kept image first.
 
-- **Scan** — an in-memory group-by over `Image.content_hash` plus one
-  `os.stat` per image (size + `mtime_ns`, for the cards and the keep rules),
-  run on a `QThreadPool` worker following the repo's background-work
-  convention (strong-reference registry + generation counter, cancellable).
-  No file is re-read or decoded. Images with `content_hash is None` (the
-  hash could not be resolved, e.g. text-file mode with an unusable
-  database) are excluded and reported as skipped. Groups are sorted
-  largest-first; members by `(width*height, size, mtime_ns)` descending.
+- **Duplicates scan** — an in-memory group-by over `Image.content_hash`
+  plus one `os.stat` per image (size + `mtime_ns`, for the cards and the
+  keep rules), run on a `QThreadPool` worker following the repo's
+  background-work convention (strong-reference registry + generation
+  counter, cancellable). No file is re-read or decoded. Because it is
+  instant, it **runs automatically when the dialog opens** (deferred to the
+  first `showEvent`, so a dialog that is constructed but never shown never
+  scans). Images with `content_hash is None` (the hash could not be
+  resolved, e.g. text-file mode with an unusable database) are excluded and
+  reported as skipped. Groups are sorted largest-first; members by
+  `(width*height, size, mtime_ns)` descending.
+- **Near Duplicates scan** — `_PhashScanTask` (same QThreadPool pattern,
+  its own registry, `Signal(object)` finished payload — a `Signal(dict)`
+  corrupts payloads across queued connections) in three phases: (1) resolve
+  the pHash of every distinct content hash in scope (database `phash`
+  cache first, then ImageHash for the misses — with "Match mirrored
+  versions" on, the mirrored hash too; computed rows are buffered like
+  `hash_cache`), (2) compute the neighbor links with
+  `similarity.compute_neighbors` (threaded LUT Hamming pass over 32-byte
+  hashes), (3) group with `similarity.seed_group` (non-transitive: an
+  image joins a group only within threshold of the group's *representative*;
+  seeds greedy by `(neighbor count, area, size, path)`). The scan decodes
+  every uncached image and always waits for an explicit "Scan" press.
+  The **Max pHash difference** slider (0–100, persisted in
+  `similarity_phash_max_distance`, default 6) and "Match mirrored
+  versions" (`similarity_match_mirrored`) are **inert until a "Scan"
+  press** — moving/toggling them only persists the value. A "Scan"
+  press then re-groups the cached neighbor lists in memory when the
+  scanned image set and the mirror option are unchanged and the slider is
+  at or below the scanned threshold (no file is re-read, no distance
+  pass), and re-runs the distance pass on the cached hashes otherwise
+  (raising the slider above the scanned threshold, or a changed mirror
+  option, which changes the pair distances). The grouping — and
+  therefore the groups' persisted keys — runs at the *applied*
+  threshold (the slider's value at the last scan or fast regroup,
+  `_applied_threshold`), never at the live slider value. "Clear
+  similarity cache" wipes the `phash` rows only.
 - **Keep rules** — `Largest resolution`, `Largest file`, `Newest file`,
   `Oldest file` (a missing mtime counts as the newest, so it is never
   picked), `Most tags`; ties fall back to resolution then the earliest
-  member. "Apply to all groups" re-picks every non-ignored group.
+  member. "Apply to all groups" re-picks every non-ignored group. In
+  Duplicates mode the cards are built with the keep rule already applied;
+  in Near Duplicates mode the representative (first member) is the default
+  keeper.
 - **Settings** (QSettings-backed widgets, persisted): `duplicate_scan_scope`
   (`'All images'` default), `duplicate_keep_rule` (`'Largest resolution'`
-  default), `duplicate_merge_tags` (default `False`).
+  default), `duplicate_merge_tags` (default `False`), `similarity_mode`
+  (`'Duplicates'` default), `similarity_phash_max_distance` (6),
+  `similarity_match_mirrored` (False).
 - **Tag actions** go through `add_tags_per_image` (one undo step, one
-  combined `dataChanged`) and are **disabled when
+  combined `dataChanged`) and are **disabled in Duplicates mode when
   `storage.shared_content_records` is True** (database mode): there any tag
   change to one copy syncs to all copies (`_sync_duplicate_images`), so
-  "tag only the extras" cannot exist, and the tag merge is a no-op.
+  "tag only the extras" cannot exist, and the tag merge is a no-op. Near
+  Duplicates groups are different content (different records), so the tag
+  actions work in both storage modes there.
 - **Delete** reuses `trash_images` (Recycle Bin; a caption still used by a
   remaining loaded image is kept). **Move** uses `move_images_to_folder`
   (`widgets/image_list.py`): existing files are never overwritten (a
@@ -356,6 +420,29 @@ copying their tags to the kept image first.
   row is simply re-resolved on the next load). Both destructive actions
   then call the dialog's `reload_callback` (`MainWindow.reload_directory`,
   the fast diff path) and clear their results — no auto-rescan.
+- **Ignore / show ignored** — the group's "Ignore this group (leave all
+  its images untouched)" **checkbox** (checked when the group is ignored;
+  toggling it ignores/un-ignores) persists a dismissal in
+  `ignored_similarity_groups`, keyed `'phash:<threshold>:<seed_hash>'` in
+  Near Duplicates mode (so it is threshold-specific — the *applied*
+  threshold the grouping was computed at) and `'exact:<content_hash>'` in
+  Duplicates mode. The "Show ignored" checkbox defaults to **On**:
+  ignored groups stay visible with their **cards** dimmed (the group
+  header — title and its controls — stays normal and fully usable;
+  the dimming is a per-card translucent overlay, transparent to the
+  mouse), and are hidden when the checkbox is off. Ignored/split *pairs*
+  (Near Duplicates: `ignored_similarity_pairs`, pairwise
+  `hash_a < hash_b`; a session-only "split" exclusion lives in memory only)
+  are **always** excluded from the neighbor graph, so the seed selection —
+  and therefore the groups' persisted keys — stays stable while "Show
+  ignored" is toggled; with it on, the ignored pair's members are
+  additionally appended as display-only *dimmed* members (no Keep radio,
+  skipped by every action, their card offers "Un-ignore pair"). "Clear
+  group ignores" wipes both the group and pair ignore data.
+- **Open as selection** — selects the group's images in the main window's
+  image list via the dialog's `select_paths_callback`
+  (`MainWindow.select_image_paths`), driving the multi-image grid preview
+  and the grouped tag view for tag consolidation before pruning.
 - **Keeper picker** — the whole card is clickable: `_DuplicateCard`
   emits `clicked` on a left press anywhere on the card except inside the
   thumbnail zone registered via `set_preview_zone`, and `_build_card`
@@ -374,7 +461,15 @@ copying their tags to the kept image first.
   main-window paths are unchanged). The "Keep this image" button checks the
   matching card's `Keep` radio (the `(QRadioButton | None, member)` tuples
   are shared). The card thumbnails are the list thumbnails (already decoded)
-  smoothly scaled to 140 px — no separate decode thread.
+  smoothly scaled to 140 px — no separate decode thread. In Near Duplicates
+  mode the cards and the preview also carry the relation text per member
+  (`'Representative'`, `'pHash difference: N / 256'`,
+  `'mirrored: N / 256'`, plus `'(ignored pair)'` on dimmed members).
+- **Lazy import** — the dialog module (and with it `models.similarity` and
+  its numpy import) is imported only in
+  `MainWindow.show_find_duplicates_dialog`, never at app startup;
+  `imagehash`/scipy are imported only inside the scan worker's compute
+  functions, when a cache miss has to be hashed.
 - Rendering caps: 100 groups shown at a time ("Show next 100 groups"), 12
   members per group until expanded via a "+N more" tile; cards are built in
   40-card chunks with `processEvents` between.
@@ -473,6 +568,10 @@ copying their tags to the kept image first.
   `MainWindow` can confirm/migrate/reload — the dialog itself only edits
   settings; the switching logic lives in `MainWindow._apply_storage_backend`
   and `on_database_changed`.
+- Find Duplicates dialog (fork): `duplicate_scan_scope`,
+  `duplicate_keep_rule`, `duplicate_merge_tags`, `similarity_mode`
+  (`'Duplicates'` / `'Near Duplicates'`), `similarity_phash_max_distance`
+  (6), `similarity_match_mirrored` (False) — see "Find Duplicates dialog".
 - Settings that require a restart (font size, tag separator, image width, file
   formats, autocomplete, models directory) show a warning in the Settings
   dialog; new restart-required settings should too.
@@ -849,8 +948,10 @@ outrun the model.
   stale record), and "delete the file" does not remove the record (neither
   should it; the record may belong to another copy).
 - **Find Duplicates** (see the "Find Duplicates dialog" section): in
-  database storage mode the tag actions are intentionally disabled (the
-  copies share one tag record, so tagging one copy tags all of them); the
+  database storage mode the *Duplicates-mode* tag actions are intentionally
+  disabled (the copies share one tag record, so tagging one copy tags all
+  of them — Near Duplicates groups are different content and work in both
+  storage modes); the
   `move_images_to_folder` helper must stay never-overwrite (a colliding name
   gets a numeric suffix, and an image is never renamed onto an existing
   caption it would silently adopt); moving or deleting never touches the

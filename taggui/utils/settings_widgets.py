@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QLineEdit,
-                               QPlainTextEdit, QSpinBox)
+                               QPlainTextEdit, QSlider, QSpinBox)
 
 from utils.big_widgets import BigCheckBox
 from utils.focused_scroll_mixin import FocusedScrollMixin
@@ -59,6 +59,21 @@ class SettingsSpinBox(QSpinBox):
 
 
 class FocusedScrollSettingsSpinBox(FocusedScrollMixin, SettingsSpinBox):
+    pass
+
+
+class SettingsSlider(QSlider):
+    def __init__(self, key: str, default: int, minimum: int, maximum: int):
+        super().__init__(Qt.Orientation.Horizontal)
+        # The range must be set here so that a stored value outside it
+        # (for example from a wider legacy range) is safely clamped.
+        self.setRange(minimum, maximum)
+        settings = get_settings()
+        self.setValue(int(settings.value(key, default, type=int)))
+        self.valueChanged.connect(lambda value: settings.setValue(key, value))
+
+
+class FocusedScrollSettingsSlider(FocusedScrollMixin, SettingsSlider):
     pass
 
 
