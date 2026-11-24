@@ -399,7 +399,17 @@ every kept one, when a group keeps several.
   `similarity.compute_neighbors` (threaded LUT Hamming pass over 32-byte
   hashes), (3) group with `similarity.seed_group` (non-transitive: an
   image joins a group only within threshold of the group's *representative*;
-  seeds greedy by `(neighbor count, area, size, path)`). The scan decodes
+  seeds greedy by `(link count, area, size, path)`, counting links in
+  both directions). With "Match mirrored versions" the pair distance
+  `min(direct(i, j), hamming(i, mirror_j))` is *not* symmetric, so a
+  link counts in either direction — for the seed's degree and for
+  joining (a flipped copy that links only to the representative joins
+  its group instead of being stranded); each image is a member of at
+  most one group. `seed_group` still emits a 1-image group for an
+  image whose links were all absorbed by earlier groups
+  (non-transitivity forbids merging it into another group), and the
+  dialog **drops 1-image groups** — every shown group has at least two
+  images. The scan decodes
   every uncached image and always waits for an explicit "Scan" press.
   The **Max pHash difference** slider (0–100, persisted in
   `similarity_phash_max_distance`, default 6) and "Match mirrored

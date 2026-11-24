@@ -1508,8 +1508,13 @@ class FindDuplicatesDialog(QDialog):
         neighbors = self._filter_neighbors(threshold)
         order_keys = self._order_keys(neighbors)
         groups = seed_group(neighbors, order_keys)
+        # A 1-image group is not a group: `seed_group` emits one for an
+        # image whose neighbors were all absorbed by earlier groups (the
+        # grouping is deliberately non-transitive, so the image cannot be
+        # shown in any other group) — drop it.
         self._groups = [self._make_group(seed, members, threshold)
-                        for seed, members in groups]
+                        for seed, members in groups
+                        if len(members) >= 2]
         if not show_ignored:
             # Ignored groups are not shown.
             self._groups = [group for group in self._groups
@@ -1527,14 +1532,21 @@ class FindDuplicatesDialog(QDialog):
 
     def _order_keys(self, neighbors: list) -> list:
         """The seed ordering of `seed_group`: (degree, area, size, path),
-        larger first."""
+        larger first. The degree counts the links in both directions: the
+        pair distance is not symmetric under mirror matching, and the
+        image a flipped copy links to is the natural group
+        representative."""
+        in_degree = [0] * len(neighbors)
+        for links in neighbors:
+            for (j, _distance, _mirrored) in links:
+                in_degree[j] += 1
         images = self.image_list_model.images
         keys = []
         for p, content_hash in enumerate(self._hashes_keys):
             image = images[self._hash_rows[content_hash][0]]
             width, height = (image.dimensions or (0, 0))
             size, _mtime_ns = self._stats.get(image.path, (0, 0))
-            keys.append((len(neighbors[p]),
+            keys.append((len(neighbors[p]) + in_degree[p],
                          (width or 0) * (height or 0),
                          size or 0, str(image.path)))
         return keys
@@ -1554,6 +1566,13 @@ class FindDuplicatesDialog(QDialog):
             content_hash = self._hashes_keys[pos]
             if pos != seed:
                 distance, mirrored = info.get(pos, (None, False))
+                if distance is None:
+                    # A one-way link to the seed (the pair distance is not
+                    # symmetric under mirror matching): the distance as
+                    # seen from that image's own list.
+                    distance, mirrored = next(
+                        ((d, m) for (j, d, m) in self._neighbors[pos]
+                         if j == seed), (None, False))
             else:
                 distance, mirrored = None, False
             for row_position, row in enumerate(self._hash_rows[content_hash]):

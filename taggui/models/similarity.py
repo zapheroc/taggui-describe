@@ -294,29 +294,59 @@ def seed_group(neighbors: list, order_keys: list) -> list:
     The seed-based (non-transitive) groups of the neighbor lists.
 
     `neighbors[i]` is the (index, distance, mirrored) list of the images
-    within the threshold of i (its own entry removed).
+    within the threshold of i (its own entry removed). The lists need not
+    be symmetric: with mirror matching the pair distance is
+    `min(direct(i, j), hamming(i, mirror_j))`, which is not the same value
+    with i and j swapped. An image is therefore "within the threshold of"
+    another one when the link exists in *either* direction, and every image
+    with a link in either direction is a seed candidate.
     `order_keys[i]` is a comparable tuple, larger first — the caller puts
-    in (degree, area, size, path) — used to order the candidate seeds.
+    in (degree, area, size, path), the degree counting the links in both
+    directions — used to order the candidate seeds.
 
     The image with the most neighbors seeds a group; it takes every
-    not-yet-grouped image that is within its threshold; the next seed is
-    chosen from the remainder, and so on. An image joins a group only if it
-    meets the threshold with that group's representative, so A~B and B~C
-    never force A and C into one group (plain connected components would).
+    not-yet-grouped image that is within its threshold in either
+    direction; the next seed is chosen from the remainder, and so on. An
+    image joins a group only if it meets the threshold with that group's
+    representative, so A~B and B~C never force A and C into one group
+    (plain connected components would).
 
-    Returns a list of (seed_index, [seed_index, member indices, ...]).
-    Images with no neighbors are in no group.
+    Returns a list of (seed_index, [seed_index, member indices, ...]); the
+    members follow the seed, first the images the seed links to (in list
+    order), then the images that link only to the seed (in index order).
+    Each image is a member of at most one group. A seed whose neighbors
+    were all absorbed by earlier groups forms a 1-image group; a caller
+    that shows the groups decides whether to drop it.
     """
-    unassigned = {i for i in range(len(neighbors)) if neighbors[i]}
+    # `linked[i]`: the indices i has a link with in at least one direction
+    # (the link may point either way — the pair distance is not symmetric
+    # under mirror matching).
+    linked = [set() for _ in range(len(neighbors))]
+    for i, links in enumerate(neighbors):
+        for (j, _distance, _mirrored) in links:
+            linked[i].add(j)
+            linked[j].add(i)
+    unassigned = {i for i in range(len(neighbors)) if linked[i]}
     groups = []
     for seed in sorted(unassigned, key=lambda i: order_keys[i], reverse=True):
         if seed not in unassigned:
             # Already absorbed by an earlier seed.
             continue
         members = [seed]
+        outgoing = set()
         for (j, _distance, _mirrored) in neighbors[seed]:
+            outgoing.add(j)
             if j in unassigned:
                 members.append(j)
                 unassigned.discard(j)
+        for j in sorted(linked[seed] - outgoing):
+            # A link that only exists in the other direction (the pair
+            # distance is not symmetric under mirror matching).
+            if j in unassigned:
+                members.append(j)
+                unassigned.discard(j)
+        # The seed is grouped now: it must not be claimed again by a later
+        # seed that links to it.
+        unassigned.discard(seed)
         groups.append((seed, members))
     return groups
