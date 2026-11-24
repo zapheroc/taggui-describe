@@ -14,24 +14,30 @@ Two modes (the "Mode" combo box at the top):
   at most the threshold. The scan decodes every uncached image, so it waits
   for an explicit "Scan" press.
 
-Both modes show their groups side by side, let the user pick one image to
-keep per group, and act on the rest non-destructively (delete to Recycle
-Bin, move to a folder, or tag them), optionally copying their tags to the
-kept image first. In database storage mode the copies of an exact duplicate
-share one tag record, so those tag actions are disabled in Duplicates mode;
-near-duplicate images are different content (and different records) and
-keep them in both storage modes.
+In Duplicates mode the user picks one image to keep per group (the "Keep"
+radio, exclusive per group); in Near Duplicates mode the user marks one or
+more images to keep per group (the "Keep" check box — the group's
+representative is kept by default), and the actions then apply to the
+images that are not kept. Acting is non-destructive (delete to Recycle
+Bin, move to a folder, or tag), optionally copying the tags of the acted-
+on images to the kept ones first. In database storage mode the copies of
+an exact duplicate share one tag record, so those tag actions are disabled
+in Duplicates mode; near-duplicate images are different content (and
+different records) and keep them in both storage modes. The kept picks are
+kept in memory for the dialog's lifetime (they survive an in-session
+regroup or "Show ignored" toggle) and reset when the dialog is closed or
+a new scan runs.
 
 Every pHash is cached in the database, keyed by the image's content hash
-(schema version 4, the `phash` table), so a rescan decodes and hashes only
+(schema version 5, the `phash` table), so a rescan decodes and hashes only
 the new images. The threshold slider and the "Match mirrored versions"
 option are inert until a "Scan" press: the scan re-groups the cached
 neighbor lists in memory when the scanned image set and the mirror option
 are unchanged and the threshold is at or below the scanned one, and
 re-runs the distance pass on the cached hashes otherwise (either way no
-file is re-read as long as the hashes are cached). Ignored groups and
-ignored pairs are persisted in the same database (the `ignored_*` tables)
-and can be forgotten with "Clear group ignores"; "Clear similarity cache"
+file is re-read as long as the hashes are cached). Ignored groups are
+persisted in the same database (the `ignored_similarity_groups` table) and
+can be forgotten with "Clear group ignores"; "Clear similarity cache"
 drops the cached pHashes.
 
 This module is imported lazily by the main window when the dialog is
@@ -59,9 +65,8 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox,
 from models.image_list_model import ImageListModel, Scope
 from models.image_storage import (
     buffer_phash_row, clear_group_ignores, clear_similarity_cache,
-    flush_phash_cache, load_ignored_groups, load_ignored_pairs, load_phashes,
-    remove_ignored_group, remove_ignored_pair, store_ignored_group,
-    store_ignored_pair)
+    flush_phash_cache, load_ignored_groups, load_phashes,
+    remove_ignored_group, store_ignored_group)
 from models.similarity import (PHASH_BITS, PHASH_VERSION, ScanCancelled,
                                TooManyMatches, compute_neighbors,
                                compute_phash, compute_phash_mirrored,
@@ -90,13 +95,15 @@ _DESCRIPTIONS = {
     MODE_NEAR_DUPPLICATES: (
         'Finds images that look alike: their 256-bit perceptual hashes '
         '(pHash) differ by at most the threshold below. In each group, the '
-        'representative is the image the group is built around; pick the '
-        'image to keep (by default the representative) and act on the '
-        'others. Grouping is non-transitive: an image joins a group only if '
-        'it is within the threshold of that group\'s representative, so a '
-        'chain of similar images is not collapsed into one giant group. '
-        'Click a thumbnail to view it larger. Deleted images go to the '
-        'Recycle Bin.'),
+        'representative is the image the group is built around; it is kept '
+        'by default. Check "Keep" for every image to keep (one or more — '
+        'clicking a card works too; uncheck them all to act on the whole '
+        'group) and act on the images that are not kept. Grouping is '
+        'non-transitive: '
+        'an image joins a group only if it is within the threshold of that '
+        'group\'s representative, so a chain of similar images is not '
+        'collapsed into one giant group. Click a thumbnail to view it '
+        'larger. Deleted images go to the Recycle Bin.'),
 }
 
 # Thumbnail edge length (pixels) for the cards in a group.
@@ -184,47 +191,30 @@ def _make_indicator_visible(button):
     button.installEventFilter(_indicator_palette_filter)
 
 
-def _make_dim_overlay(parent: QWidget) -> QFrame:
-    """A translucent gray overlay covering `parent` and its children (a
-    card of a display-only ignored-pair member): it is transparent to the
-    mouse, so the widget stays fully usable. Created hidden; raise it
-    above the widget's children when showing it (children created after
-    the overlay would otherwise be drawn on top of it)."""
-    overlay = QFrame(parent)
-    overlay.setObjectName('dimmedOverlay')
-    overlay.setStyleSheet(
-        'QFrame#dimmedOverlay { background: rgba(128, 128, 110, 110); }')
-    overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-    overlay.hide()
-    return overlay
-
-
 class _DuplicateCard(QFrame):
-    """A frameless card; the kept one is outlined in the highlight color,
+    """A frameless card; a kept one is outlined in the highlight color,
     like a selected image in the Images pane. Clicking anywhere on the card
-    (except the thumbnail, which opens the preview) selects its image to be
-    kept, so the click target is the whole card, not just the radio button.
+    (except the thumbnail, which opens the preview) changes the image's
+    kept state — picking it to be kept (the "Keep" radio, Duplicates mode)
+    or toggling it (the "Keep" check box, Near Duplicates mode) — so the
+    click target is the whole card, not just the widget.
 
-    A card can also be dimmed (a translucent gray overlay over the card and
-    its labels) when its member is a display-only ignored-pair member
-    (Near Duplicates mode, shown by "Show ignored"). The cards of an
-    ignored group are rendered differently: the group's whole card area is
-    disabled, which the Fusion style draws in black and white (and makes
-    unclickable), so the group reads as "not to be acted on"."""
+    The cards of an ignored group are rendered differently: the group's
+    whole card area is disabled, which the Fusion style draws in black and
+    white (and makes unclickable), so the group reads as "not to be acted
+    on"."""
 
     clicked = Signal()
 
     def __init__(self):
         super().__init__()
         self.kept = False
-        self.dimmed = False
         self._preview_zone: QWidget | None = None
-        self._dim_overlay = _make_dim_overlay(self)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_preview_zone(self, widget: QWidget):
         """The child that opens the preview on click; clicks inside it do
-        not select the card's image to be kept."""
+        not change the card's image's kept state."""
         self._preview_zone = widget
 
     def mousePressEvent(self, event):
@@ -239,20 +229,6 @@ class _DuplicateCard(QFrame):
         if kept != self.kept:
             self.kept = kept
             self.update()
-
-    def set_dimmed(self, dimmed: bool):
-        if dimmed != self.dimmed:
-            self.dimmed = dimmed
-            self._dim_overlay.setVisible(dimmed)
-            if dimmed:
-                # Raise above the card's children, which are created after
-                # the overlay and would otherwise be drawn on top of it.
-                self._dim_overlay.raise_()
-        self._dim_overlay.setGeometry(self.rect())
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._dim_overlay.setGeometry(self.rect())
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -498,10 +474,8 @@ class _PhashScanTask(QObject, QRunnable):
 
     - `neighbors`: for every compact position, the (index, distance,
       mirrored) list of the other positions within the scanned threshold
-      (the complete matrix: the ignored pairs' links are not excluded
-      here — the exclusion is applied at regroup time, in
-      `_filter_neighbors`, and the regroup needs the ignored pairs' link
-      distances to re-attach their members as dimmed display members);
+      (the complete matrix; a regroup at a lower threshold re-filters
+      this list in memory, in `_filter_neighbors`);
     - `hashes`: the 256-bit pHash (int) of each compact position;
     - `mirrors`: the mirrored pHash of each compact position, or None;
     - `hashes_keys`: the content hash of each compact position;
@@ -654,13 +628,6 @@ class _PhashScanTask(QObject, QRunnable):
                 compact_mirrors = [phash_from_hex(mirrors[k])
                                    for k in present]
 
-        # The ignored pairs' links are deliberately NOT excluded here: the
-        # stored matrix must stay complete, because the exclusion is
-        # applied at regroup time (`_filter_neighbors`) and the regroup
-        # re-attaches the ignored pairs' members as dimmed display members,
-        # which needs the pairs' link distances — a scan that ran while a
-        # pair was already ignored would store no link for it, and the
-        # member would then vanish from the results.
         neighbors = compute_neighbors(
             compact_hashes, self.threshold,
             mirrored_hashes=compact_mirrors,
@@ -786,9 +753,7 @@ class _SimilarGroup:
     - `distance`: the pHash difference from the representative, in bits
       (0..256), None for the representative itself;
     - `mirrored`: whether the mirrored version of the image matched the
-      representative better than the direct image did (the mirror option);
-    - `dimmed`: the link to the representative is an ignored pair (only
-      ever true with "Show ignored" on).
+      representative better than the direct image did (the mirror option).
     """
 
     def __init__(self, dialog, seed_hash: str, group_key: str,
@@ -867,14 +832,28 @@ class FindDuplicatesDialog(QDialog):
         # the cards of the groups currently shown.
         self._groups: list = []
         self._group_cards: list = []
-        # The "Keep" pick per group (group key -> kept image path), so a
-        # rebuild (a "Show ignored" toggle, a regroup, "Show next 100
-        # groups") can re-apply it instead of resetting every group to its
-        # default keeper.
-        self._keeper_selection: dict = {}
-        # The persisted suppressions: the content-hash pairs whose links
-        # are dropped (a < b) and the dismissed group keys.
-        self._ignored_pairs: set = set(load_ignored_pairs(self.db_path))
+        # The images the user marked to keep (image paths, in memory only
+        # for the dialog's lifetime): a group's kept images are exactly its
+        # members whose path is in this set. The set always mirrors the
+        # cards' state: when a group's cards are first built, its kept
+        # state is seeded with the default kept image (the representative
+        # — or the keep rule's pick in Duplicates mode), and every toggle
+        # records the group's checked widgets. A rebuild (a "Show ignored"
+        # toggle, a regroup, "Show next 100 groups") re-applies the set
+        # instead of resetting the user's picks. The groups' memberships
+        # are disjoint (each image is in at most one group — `seed_group`
+        # consumes its unassigned set), so the set is safe to manage per
+        # group.
+        self._kept_images: set = set()
+        # The group keys whose kept state is already in `_kept_images`
+        # (seeded or user-toggled): "no recorded state" means "the group's
+        # cards are not built yet" — not "the user unchecked everything",
+        # which is a recorded empty state that must survive a rebuild.
+        # Keys are stable across a "Show ignored" rebuild (same threshold,
+        # same seeds) and change with a regroup, where the picks follow
+        # the kept images instead.
+        self._kept_initialized: set = set()
+        # The persisted group dismissals (the dismissed group keys).
         self._ignored_groups: set = set(
             row[0] for row in load_ignored_groups(self.db_path))
         # In database storage mode the copies of an exact duplicate share
@@ -1050,12 +1029,12 @@ class FindDuplicatesDialog(QDialog):
         self.clear_cache_button.setToolTip(
             'Delete the cached perceptual hashes of every image: the next '
             'Near Duplicates scan has to re-decode and re-hash them. '
-            'Ignored pairs and groups are kept.')
+            'Ignored groups are kept.')
         self.clear_cache_button.clicked.connect(self.clear_cache)
         actions_layout.addWidget(self.clear_cache_button, 3, 0, 1, 3)
         self.clear_ignores_button = QPushButton('Clear group ignores')
         self.clear_ignores_button.setToolTip(
-            'Forget every ignored group and ignored pair (both modes): '
+            'Forget every ignored group (both modes): '
             'they are shown again on the next scan or regrouping. The '
             'cached perceptual hashes are kept.')
         self.clear_ignores_button.clicked.connect(self.clear_ignores)
@@ -1415,8 +1394,9 @@ class FindDuplicatesDialog(QDialog):
         self._scanned_paths = frozenset()
         self._thumbnails = {}
         # A fresh scan (or a mode switch, or the post-action reload) builds
-        # new groups; the picks of the old ones no longer apply.
-        self._keeper_selection.clear()
+        # new groups; the kept picks of the old ones no longer apply.
+        self._kept_images.clear()
+        self._kept_initialized.clear()
         self.show_more_button.hide()
         self._remove_group_cards()
 
@@ -1474,21 +1454,16 @@ class FindDuplicatesDialog(QDialog):
         Near Duplicates mode: the neighbor lists are filtered at the last
         *applied* threshold (the slider's value at the last scan or fast
         regroup — the slider and the mirror option are inert until a "Scan"
-        press, which re-groups in memory or runs a new scan) and the
-        excluded pairs, and `seed_group` runs. No file is re-read and no
-        database row is touched; a "Scan" at a higher threshold re-runs the
-        distance pass on the cached hashes instead.
+        press, which re-groups in memory or runs a new scan) and
+        `seed_group` runs. No file is re-read and no database row is
+        touched; a "Scan" at a higher threshold re-runs the distance pass
+        on the cached hashes instead.
 
-        Ignored pairs are *always* excluded from the graph here (the scan
-        stores the complete matrix; `_filter_neighbors` applies the
-        exclusion), so the grouping — and therefore the groups' persisted
-        keys, which name the seed — stays stable while the user toggles
-        "Show ignored": the toggle only shows the ignored groups and adds
-        the dimmed display members of the ignored pairs (see
-        `_attach_ignored_pairs`).
-        Re-linking the ignored pairs for display would re-seed the groups,
-        and an ignored group would come back under a different key that
-        its dismissal no longer matches."""
+        The grouping — and therefore the groups' persisted keys, which
+        name the seed — never depends on user state: toggling "Show
+        ignored" only filters the ignored groups out of the shown list
+        (and hides/shows their boxes), so a dismissed group always comes
+        back under the same key its dismissal matches."""
         if self._scanner is not None:
             return
         if self.mode == MODE_DUPLICATES:
@@ -1509,45 +1484,23 @@ class FindDuplicatesDialog(QDialog):
         # the applied threshold.
         threshold = self._applied_threshold
         show_ignored = self.show_ignored_check_box.isChecked()
-        excluded = self._excluded_index_pairs()
-        neighbors = self._filter_neighbors(threshold, excluded)
+        neighbors = self._filter_neighbors(threshold)
         order_keys = self._order_keys(neighbors)
         groups = seed_group(neighbors, order_keys)
-        # The exclusion above can drop a member out of its group — and,
-        # when the ignored pair was the group's only link, the group
-        # itself. Re-attach those members as dimmed display members so the
-        # group (and its ignored member) survives a "Show ignored"
-        # toggle instead of vanishing.
-        dimmed = self._attach_ignored_pairs(groups, threshold, order_keys)
-        self._groups = [self._make_group(seed, members, dimmed[gi],
-                                         threshold)
-                        for gi, (seed, members) in enumerate(groups)]
+        self._groups = [self._make_group(seed, members, threshold)
+                        for seed, members in groups]
         if not show_ignored:
-            # Ignored groups are not shown (only their members, when
-            # absorbed into another group, can still appear).
+            # Ignored groups are not shown.
             self._groups = [group for group in self._groups
                             if not group.ignored]
         self._show_groups()
 
-    def _excluded_index_pairs(self) -> set:
-        """The ignored content-hash pairs as (min, max) pairs of compact
-        positions."""
-        pos_of = {content_hash: p for p, content_hash in
-                  enumerate(self._hashes_keys)}
-        excluded = set()
-        for a, b in self._ignored_pairs:
-            pa, pb = pos_of.get(a), pos_of.get(b)
-            if pa is not None and pb is not None:
-                excluded.add((min(pa, pb), max(pa, pb)))
-        return excluded
-
-    def _filter_neighbors(self, threshold: int, excluded: set) -> list:
+    def _filter_neighbors(self, threshold: int) -> list:
         filtered = []
         for i, links in enumerate(self._neighbors):
             kept = [(j, distance, mirrored)
                     for (j, distance, mirrored) in links
-                    if distance <= threshold
-                    and (min(i, j), max(i, j)) not in excluded]
+                    if distance <= threshold]
             filtered.append(kept)
         return filtered
 
@@ -1565,119 +1518,7 @@ class FindDuplicatesDialog(QDialog):
                          size or 0, str(image.path)))
         return keys
 
-    def _attach_ignored_pairs(self, groups: list, threshold: int,
-                              order_keys: list) -> list:
-        """The dimmed display members the ignored pairs' exclusion dropped
-        out of the groups, one list per group.
-
-        The groups are computed with the ignored pairs' links removed, so
-        a member whose only link to its group was an ignored one — and,
-        when the ignored pair was the group's only link, the group itself —
-        would simply vanish, and a "Show ignored" toggle would make the
-        whole group disappear. Those members are shown dimmed while
-        "Show ignored" is on (their corner check box un-ignores the pair
-        in place), so the ignored link is re-attached here, display-only:
-        the member joins the group its partner belongs to, or — when
-        neither partner is in any group — the pair forms a group of its
-        own, seeded by the same (degree, area, size, path) order
-        `seed_group` uses; with both degrees tied at zero it breaks the
-        tie the same way the original grouping did, so the group's
-        persisted key is stable across the ignore/un-ignore.
-
-        The pairs are processed in sorted order and every position is
-        claimed at most once, so an image that appears in several ignored
-        pairs is shown dimmed in exactly one group, and the result is
-        identical on every rebuild (the persisted set iterates
-        nondeterministically — never iterate it directly here).
-        """
-        if not self._ignored_pairs:
-            return [[] for _ in groups]
-        pos_of = {content_hash: p
-                  for p, content_hash in enumerate(self._hashes_keys)}
-        # The pairs with both members in the scanned scope and a link
-        # within the applied threshold, in deterministic order. The
-        # distances come from the scan's complete neighbor lists (the scan
-        # does not exclude the ignored pairs — see `_PhashScanTask`), so
-        # the link is present even for a scan that ran while the pair was
-        # already ignored.
-        pairs = []
-        for a, b in sorted(self._ignored_pairs):
-            pa, pb = pos_of.get(a), pos_of.get(b)
-            if pa is None or pb is None:
-                continue  # outside the scanned scope
-            link = self._link_between(pa, pb)
-            if link is None or link[0] > threshold:
-                continue  # no link at the applied threshold
-            pairs.append((pa, pb, link[0], link[1]))
-        if not pairs:
-            return [[] for _ in groups]
-        membership = {}
-        for gi, (_seed, members) in enumerate(groups):
-            for pos in members:
-                membership[pos] = gi
-        claimed = set()
-        dimmed = [[] for _ in groups]
-        # First: the ignored pairs whose members are in no group at all
-        # (the pair was the group's only link) form a group of their own —
-        # one representative plus the other member as its dimmed display
-        # member — so the pair stays visible instead of vanishing.
-        synthetics = []
-        for pa, pb, distance, mirrored in pairs:
-            if pa in membership or pb in membership:
-                continue  # handled by the second pass
-            if pa in claimed or pb in claimed:
-                continue  # already shown dimmed by another pair's group
-            seed = pa if order_keys[pa] >= order_keys[pb] else pb
-            other = pb if seed == pa else pa
-            synthetics.append((seed, other, distance, mirrored))
-            claimed.add(seed)
-            claimed.add(other)
-        # The synthetic groups take their place in the seed order (every
-        # real group's seed has degree >= 1 in the filtered graph, every
-        # synthetic seed degree 0, so they sort after all real groups;
-        # `seed_group`'s output is already in seed order, so the real
-        # groups' order is untouched).
-        synthetics.sort(key=lambda synthetic: order_keys[synthetic[0]],
-                        reverse=True)
-        for seed, other, distance, mirrored in synthetics:
-            groups.append((seed, [seed]))
-            membership[seed] = len(groups) - 1
-            dimmed.append([(other, distance, mirrored)])
-        # Then: attach every other ignored pair's ungrouped member to the
-        # group its partner belongs to.
-        for pa, pb, distance, mirrored in pairs:
-            ga, gb = membership.get(pa), membership.get(pb)
-            if ga is not None and gb is not None:
-                # Both members are shown (in the same group, or in two
-                # different ones): the pair is not displayed together, so
-                # the ignore is already honored.
-                continue
-            if ga is None:
-                gi, other = gb, pa
-            else:
-                gi, other = ga, pb
-            if other in claimed:
-                continue  # already shown dimmed by another pair
-            claimed.add(other)
-            dimmed[gi].append((other, distance, mirrored))
-        return dimmed
-
-    def _link_between(self, a: int, b: int):
-        """The (distance, mirrored) of the pair's link in the scan's full
-        neighbor lists (symmetric — the scan does not exclude the ignored
-        pairs, see `_PhashScanTask`), or None when the pair is not a link
-        of the last scan (it was out of the scanned threshold, the image
-        set changed, or the per-seed neighbor cap dropped it).
-        """
-        for (j, distance, mirrored) in self._neighbors[a]:
-            if j == b:
-                return (distance, mirrored)
-        for (j, distance, mirrored) in self._neighbors[b]:
-            if j == a:
-                return (distance, mirrored)
-        return None
-
-    def _make_group(self, seed: int, members: list, dimmed: list,
+    def _make_group(self, seed: int, members: list,
                     threshold: int) -> _SimilarGroup:
         images = self.image_list_model.images
         seed_hash = self._hashes_keys[seed]
@@ -1709,25 +1550,6 @@ class FindDuplicatesDialog(QDialog):
                     'hash': content_hash,
                     'distance': member_distance,
                     'mirrored': mirrored,
-                    'dimmed': False,
-                })
-        # The dimmed display members of the ignored pairs (see
-        # `_attach_ignored_pairs`), appended after the group's real
-        # members so the representative stays first (the default keeper).
-        # `_populate` shows them while "Show ignored" is on and filters
-        # them out while it is off; the keep/tag/removal actions skip
-        # them, and the member's corner check box un-ignores the pair in
-        # place.
-        for pos, distance, mirrored in dimmed:
-            content_hash = self._hashes_keys[pos]
-            for row in self._hash_rows[content_hash]:
-                group_members.append({
-                    'image': images[row],
-                    'row': row,
-                    'hash': content_hash,
-                    'distance': distance,
-                    'mirrored': mirrored,
-                    'dimmed': True,
                 })
         return _SimilarGroup(self, seed_hash, group_key, ignored,
                              group_members)
@@ -1781,7 +1603,7 @@ class FindDuplicatesDialog(QDialog):
             for group_cards in new_group_cards:
                 self._insert_group_box(group_cards)
             self._group_cards = new_group_cards
-            # Re-apply the "Keep" picks the rebuild reset to the defaults,
+            # Re-apply the kept images the rebuild reset to the defaults,
             # *before* the layout activation: restoring a pick can expand
             # a group whose kept image was behind the "+N more" tile,
             # which changes the box's height — the scroll anchor restore
@@ -1809,58 +1631,36 @@ class FindDuplicatesDialog(QDialog):
             return group.group_key
         return self._exact_group_key(group)
 
-    def _record_keeper(self, group, image):
-        """Remember a group's "Keep" pick (`_keeper_selection`: group key
-        -> kept image path) so a rebuild can restore it: rebuilding resets
-        every keeper to the default (the representative / the keep rule),
-        and a "Show ignored" toggle or a regroup must not destroy the
-        user's picks."""
-        self._keeper_selection[self._group_key_of(group)] = image.path
+    def _record_group_kept(self, group, kept: set):
+        """Remember a group's kept images (`_kept_images`: the dialog-wide
+        set of kept image paths) so a rebuild can restore them: the cards
+        are rebuilt with the recorded state (`_populate`), and a "Show
+        ignored" toggle or a regroup must not destroy the user's picks.
+        The group's contribution to the set is replaced: all of the
+        group's members leave the set, then its kept images re-enter it.
+        The groups' memberships are disjoint (each image is in at most one
+        group), so this only ever touches this group's images."""
+        self._kept_images.difference_update(
+            _member_image(member).path
+            for member in _group_members(group))
+        self._kept_images.update(kept)
 
     def _restore_keeper_selections(self):
-        """Re-apply the "Keep" picks (see `_record_keeper`) to the
-        currently built cards, and drop the picks of images that left
-        every group. A pick follows its kept image, not the group key: a
-        regroup (a threshold change, a "Show ignored" toggle, "Clear
-        group ignores") can re-seed a group under a new key or drop the
-        picked image from it, and the pick must survive that."""
-        picked_paths = set(self._keeper_selection.values())
-        # Every non-dimmed image still in a group (the picks of the
-        # images that left every group are dropped).
-        live = set()
-        for group in self._groups:
-            for member in _group_members(group):
-                if isinstance(member, dict) and member['dimmed']:
-                    continue
-                live.add(_member_image(member).path)
-        self._keeper_selection = {key: path for key, path in
-                                  self._keeper_selection.items()
-                                  if path in live}
+        """Re-apply the kept images (see `_record_group_kept`) to the
+        currently built cards. A pick follows its kept image, not the
+        group: a regroup (a threshold change, a "Show ignored" toggle,
+        "Clear group ignores") can re-seed a group under a new key or move
+        its kept images, and the picks must survive that. The cards are
+        already built with the recorded state in `_populate` (which seeds
+        a group's default when it has none recorded), so this only does
+        real work for a kept image hidden behind a group's "+N more"
+        tile — whose `set_kept` expands the row first."""
         for group_cards in self._group_cards:
-            group = group_cards.group
-            kept = self._keeper_selection.get(self._group_key_of(group))
-            kept_image = None
-            if kept is not None:
-                for member in _group_members(group):
-                    image = _member_image(member)
-                    if (image.path == kept
-                            and not (isinstance(member, dict)
-                                     and member['dimmed'])):
-                        kept_image = image
-                        break
-            if kept_image is None:
-                # The pick is not (any more) in this group: the group's
-                # key changed (re-seed), or the picked image left it.
-                # Follow the kept image to where it is now.
-                for member in _group_members(group):
-                    if isinstance(member, dict) and member['dimmed']:
-                        continue
-                    image = _member_image(member)
-                    if image.path in picked_paths:
-                        kept_image = image
-                        break
-            if kept_image is not None:
-                group_cards.set_keep(kept_image)
+            kept = {_member_image(member).path
+                    for member in _group_members(group_cards.group)
+                    if _member_image(member).path in self._kept_images}
+            if kept:
+                group_cards.set_kept(kept)
 
     def _restore_scroll_anchor(self, scroll_area, old_group_cards,
                                new_group_cards, old_offset, anchor_key,
@@ -2042,17 +1842,10 @@ class FindDuplicatesDialog(QDialog):
         self.show_more_button.hide()
 
     def _visible_group_members(self, group) -> list:
-        """The group's members as the cards show them: while "Show
-        ignored" is off the dimmed members of the ignored pairs have no
-        card (see `_populate`), so the group's title and the results
-        status count the images the user can see, not the group's full
-        membership."""
-        members = _group_members(group)
-        if not self.show_ignored_check_box.isChecked():
-            members = [member for member in members
-                       if not (isinstance(member, dict)
-                                and member['dimmed'])]
-        return members
+        """The group's members as the cards show them (all of them: the
+        group's title and the results status count the images the user
+        can see, which is the group's full membership)."""
+        return _group_members(group)
 
     def _update_status(self):
         groups = self._groups
@@ -2117,29 +1910,19 @@ class FindDuplicatesDialog(QDialog):
             tip = (f'This image\'s pHash differs from the group\'s '
                    f'representative by {distance} bits (out of '
                    f'{PHASH_BITS}).')
-        if member['dimmed']:
-            # The label keeps the plain metric so an ignored card is the
-            # same size as an un-ignored one (the suffix used to widen the
-            # card); the tooltip carries the ignore state instead.
-            tip += (' This link is an ignored pair; with "Show ignored" off '
-                    'the images are not grouped together.')
         return text, tip
 
     def _build_card(self, member, group_cards) -> tuple:
-        """Return (card, keep radio, relation label, info label).
+        """Return (card, keep widget, relation label, info label).
 
-        The "Keep" radio is disabled (rather than absent) when the member
-        is a display-only ignored-pair member (Near Duplicates mode — the
-        only case covered by the translucent overlay), so un-ignoring the
-        pair in place can simply enable it — no card rebuild. An ignored
-        group's cards keep their radios (like taggui-plus): the group's
-        card area is disabled, so the radios are grayed out and unclickable,
-        and toggling the group's "Ignore" checkbox only enables/disables
-        the area in place (no rebuild — the toggle must not flicker).
-
-        Non-representative members of Near Duplicates groups also get the
-        pair-ignore check box in the top-left corner of the thumbnail."""
-        member_dimmed = isinstance(member, dict) and member['dimmed']
+        The keep widget is the "Keep" radio (Duplicates mode, exclusive
+        per group — exactly one image is kept) or the "Keep" check box
+        (Near Duplicates mode — one or more images are kept, the
+        representative by default). An ignored group's cards keep their
+        widgets (like taggui-plus): the group's card area is disabled, so
+        the widgets are grayed out and unclickable, and toggling the
+        group's "Ignore" checkbox only enables/disables the area in place
+        (no rebuild — the toggle must not flicker)."""
         image = _member_image(member)
         card = _DuplicateCard()
         card_layout = QVBoxLayout(card)
@@ -2158,41 +1941,6 @@ class FindDuplicatesDialog(QDialog):
             lambda m=member, gc=group_cards: self._show_preview(gc, m))
         card_layout.addWidget(thumbnail_label)
 
-        # The pair-ignore check box: the top-left corner of the thumbnail
-        # of every Near Duplicates member except the representative (it
-        # has no pair to ignore). Checked = the member's pair with the
-        # representative is ignored (the card is dimmed, or hidden while
-        # "Show ignored" is off). The dimmed overlay (mouse-transparent)
-        # stays raised above it, so on an ignored card it reads as grayed
-        # out but still un-ignores on click.
-        if (self.mode == MODE_NEAR_DUPPLICATES
-                and isinstance(group_cards.group, _SimilarGroup)
-                and isinstance(member, dict)
-                and member['hash'] != group_cards.group.seed_hash):
-            ignore_check_box = QCheckBox(thumbnail_label)
-            ignore_check_box.setFixedSize(20, 20)
-            # A dark backing keeps the indicator readable over the
-            # thumbnail; the indicator itself follows the theme.
-            ignore_check_box.setStyleSheet(
-                'QCheckBox { background: rgba(0, 0, 0, 140);'
-                ' border-radius: 4px; margin: 0; padding: 0; }')
-            _make_indicator_visible(ignore_check_box)
-            ignore_check_box.setCursor(Qt.CursorShape.ArrowCursor)
-            ignore_check_box.setToolTip(
-                'Never group this image with the group\'s representative '
-                'again (saved for future scans). It is skipped by the '
-                'delete/move/tag actions and hidden while "Show ignored" '
-                'is off — toggle it back on to see it again. Uncheck to '
-                'restore.')
-            # The state first, then the connection: setting the check
-            # during construction must not (un)ignore the pair.
-            ignore_check_box.setChecked(bool(member['dimmed']))
-            ignore_check_box.toggled.connect(
-                lambda checked, m=member, gc=group_cards:
-                    self._on_member_ignore_toggled(checked, m, gc))
-            ignore_check_box.move(2, 2)
-            card._ignore_check_box = ignore_check_box
-
         info_label = QLabel(self._card_info_text(image))
         info_label.setToolTip(str(image.path))
         card_layout.addWidget(info_label)
@@ -2201,36 +1949,39 @@ class FindDuplicatesDialog(QDialog):
         relation_label = QLabel(' ')
         card_layout.addWidget(relation_label)
 
-        # The "Keep" radio of a dimmed member is disabled (grayed with the
-        # rest of the card): un-ignoring the pair in place simply enables
-        # it, so no card is ever rebuilt for that.
-        radio = QRadioButton('Keep')
-        radio.setEnabled(not member_dimmed)
-        _make_indicator_visible(radio)
-        card_layout.addWidget(radio)
-        # A click anywhere on the card (the name, the details, the radio's
-        # text, the background) checks the radio, selecting this image to
-        # be kept. A click on the radio button itself toggles it as usual,
-        # and one on the thumbnail opens the preview. The isEnabled guard
-        # matters: a programmatic setChecked works on a disabled radio, so
-        # without it a card click would pick a dimmed member, and the
-        # exclusive button group would steal the pick from the real keeper.
-        card.clicked.connect(
-            lambda r=radio: r.setChecked(True) if r.isEnabled() else None)
+        if self.mode == MODE_NEAR_DUPPLICATES:
+            # One or more images can be kept (the representative by
+            # default): a "Keep" check box that toggles this image's kept
+            # state.
+            keep_widget = QCheckBox('Keep')
+            # A click anywhere on the card (the name, the details, the
+            # check box's text, the background) toggles the check box. A
+            # click on the check box itself toggles it as usual, and one
+            # on the thumbnail opens the preview. The isEnabled guard
+            # matters: a programmatic setChecked works on a disabled
+            # check box (an ignored group's card area is disabled), so
+            # without it a card click would toggle it anyway.
+            card.clicked.connect(
+                lambda w=keep_widget: w.setChecked(not w.isChecked())
+                if w.isEnabled() else None)
+        else:
+            # The exclusive "Keep" radio (one keeper per group): a click
+            # anywhere on the card checks the radio, selecting this image
+            # to be kept. A click on the radio itself checks it as usual,
+            # and one on the thumbnail opens the preview.
+            keep_widget = QRadioButton('Keep')
+            card.clicked.connect(
+                lambda w=keep_widget: w.setChecked(True)
+                if w.isEnabled() else None)
+        _make_indicator_visible(keep_widget)
+        card_layout.addWidget(keep_widget)
 
-        # The per-member actions (open in the image list; the pair-ignore
-        # state of Near Duplicates members lives on the card's corner
-        # check box, see below).
+        # The per-member actions (open in the image list).
         card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         card.customContextMenuRequested.connect(
             lambda pos, m=member, gc=group_cards: self._show_card_menu(
                 m, gc, card.mapToGlobal(pos)))
-        if member_dimmed and not group_cards.ignored:
-            # After the card's children exist, so the overlay is raised
-            # above them. (An ignored group's cards are already rendered
-            # in black and white by the disabled card area.)
-            card.set_dimmed(True)
-        return card, radio, relation_label, info_label
+        return card, keep_widget, relation_label, info_label
 
     # ------------------------------------------------------------------
     # Thumbnails
@@ -2260,16 +2011,16 @@ class FindDuplicatesDialog(QDialog):
 
     def _show_preview(self, group_cards, member):
         """Open a large preview that can cycle through the group's images
-        and let the user pick which one to keep."""
-        if group_cards is not None and group_cards.radio_members:
-            radio_members = [(radio, _member_image(m))
-                             for (radio, m) in group_cards.radio_members]
+        and let the user change which ones are kept."""
+        if group_cards is not None and group_cards.keep_widgets:
+            keep_widgets = [(widget, _member_image(m))
+                             for (widget, m) in group_cards.keep_widgets]
         else:
             # Fallback: a standalone image with no group/keep context.
-            radio_members = [(None, _member_image(member))]
+            keep_widgets = [(None, _member_image(member))]
 
         index = 0
-        for position, (_radio, current) in enumerate(radio_members):
+        for position, (_widget, current) in enumerate(keep_widgets):
             if current is _member_image(member):
                 index = position
                 break
@@ -2283,74 +2034,26 @@ class FindDuplicatesDialog(QDialog):
             # labels, which only make sense for exact duplicates.
             relations = {m['image'].path: self._card_relation_text(m)[0]
                          for m in group_cards.group.members}
-        dialog = _PreviewDialog(self, radio_members, index,
+        dialog = _PreviewDialog(self, keep_widgets, index,
                                 self._thumbnails, self._stats, relations)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.exec()
 
     # ------------------------------------------------------------------
-    # Card menu and pair-ignore actions
+    # Card menu and group-ignore actions
     # ------------------------------------------------------------------
 
     def _show_card_menu(self, member, group_cards, global_pos):
-        # The pair-ignore state lives on the card's corner check box (see
-        # `_build_card`); the menu only opens the image in the list.
         menu = QMenu(self)
         menu.addAction('Open in image list',
                        lambda: self.open_in_image_list(_member_image(member)))
         menu.exec(global_pos)
 
-    @staticmethod
-    def _pair_of(hash_a: str, hash_b: str) -> tuple:
-        return (hash_a, hash_b) if hash_a < hash_b else (hash_b, hash_a)
-
-    def ignore_pair(self, member: dict, group_cards: '_GroupCards'):
-        """Persistently ignore `member`'s pair with its group's
-        representative (the images are never grouped together again) and
-        apply it to the card in place (see `_GroupCards.set_member_ignored`).
-
-        No regroup: applying the exclusion to the graph would re-seed the
-        group and reorder the results, and an ignore click must not do
-        that. The regroup happens on the next explicit regroup (a "Scan"
-        press, the "Show ignored" toggle or "Clear group ignores"); until
-        then the group is shown as it was, with the ignored member dimmed
-        (or hidden, with "Show ignored" off). The actions are safe in the
-        meanwhile: they skip dimmed members, so acting on the stale
-        grouping only ever touches a subset of what the regrouped grouping
-        would offer."""
-        group = group_cards.group
-        pair = self._pair_of(group.seed_hash, member['hash'])
-        if pair in self._ignored_pairs:
-            return
-        self._ignored_pairs.add(pair)
-        store_ignored_pair(self.db_path, *pair)
-        group_cards.set_member_ignored(member, True)
-
-    def unignore_pair(self, member: dict, group_cards: '_GroupCards'):
-        group = group_cards.group
-        pair = self._pair_of(group.seed_hash, member['hash'])
-        if pair not in self._ignored_pairs:
-            return
-        self._ignored_pairs.discard(pair)
-        remove_ignored_pair(self.db_path, *pair)
-        group_cards.set_member_ignored(member, False)
-
-    def _on_member_ignore_toggled(self, checked: bool, member: dict,
-                                  group_cards: '_GroupCards'):
-        # The card's corner check box changed state: persist the
-        # (un)ignore and apply it to the card in place. (The checkbox's
-        # state is set during construction before this connection is made,
-        # so this cannot fire while the card is built.)
-        if checked:
-            self.ignore_pair(member, group_cards)
-        else:
-            self.unignore_pair(member, group_cards)
-
     def set_group_ignored(self, group, group_cards, ignored: bool):
         """Persistently ignore (or un-ignore) a group and apply the state
         to the group's cards in place: the card area is disabled/enabled,
         which renders the group in black and white (and grays out its
-        "Keep" radios and the "+N more" tile) in a single repaint.
+        "Keep" widgets and the "+N more" tile) in a single repaint.
 
         No rebuild: rebuilding would destroy and re-create every group's
         boxes, and the intermediate states (the old boxes are only
@@ -2411,37 +2114,40 @@ class FindDuplicatesDialog(QDialog):
 
     @Slot()
     def apply_keep_rule(self):
+        # Duplicates mode: pick the keep rule's best image per group (as
+        # before). Near Duplicates mode: reset the group to the single best
+        # image under the rule — unchecking every other kept image.
         rule = self.keep_rule_combo_box.currentText()
         for group_cards in self._group_cards:
             if group_cards.ignored:
                 continue
             members = _group_members(group_cards.group)
-            # Dimmed members (ignored pairs, Near Duplicates mode) are not
-            # acted on, so they are not candidates either.
-            candidates = [_member_image(member) for member in members
-                          if not (isinstance(member, dict)
-                                  and member['dimmed'])]
-            group_cards.set_keep(choose_keeper(candidates, rule,
-                                               self._tag_counts,
-                                               self._stats))
+            keeper = choose_keeper([_member_image(member)
+                                    for member in members], rule,
+                                   self._tag_counts, self._stats)
+            group_cards.set_kept({keeper.path})
 
     def _keeper_targets(self) -> list:
-        """Return (kept image, [other images]) for every shown group that is
-        not ignored. In Near Duplicates mode dimmed members (ignored pairs,
-        visible only with "Show ignored" on) are not acted on. Includes
-        images hidden behind a group's "+N more" tile."""
+        """Return (kept images, [non-kept images]) for every shown group
+        that is not ignored. Includes images hidden behind a group's "+N
+        more" tile."""
         pairs = []
         for group_cards in self._group_cards:
             if group_cards.ignored:
                 continue
-            keeper = group_cards.keep_member
-            members = _group_members(group_cards.group)
-            others = [_member_image(member) for member in members
-                      if _member_image(member) is not keeper
-                      and not (isinstance(member, dict)
-                               and member['dimmed'])]
+            kept = {_member_image(member).path
+                    for member in _group_members(group_cards.group)
+                    if _member_image(member).path in self._kept_images}
+            kept_images = []
+            others = []
+            for member in _group_members(group_cards.group):
+                image = _member_image(member)
+                if image.path in kept:
+                    kept_images.append(image)
+                else:
+                    others.append(image)
             if others:
-                pairs.append((keeper, others))
+                pairs.append((kept_images, others))
         return pairs
 
     def _tag_actions_allowed(self) -> bool:
@@ -2472,23 +2178,26 @@ class FindDuplicatesDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _merge_tags_by_row(self, pairs, lookup, acted_on=None) -> dict:
-        """Return {model row: tags} adding the other images' tags (that the
-        keeper lacks) to each keeper. Only others in `acted_on` (a set of
-        paths) count, if given."""
+        """Return {model row: tags} adding the non-kept images' tags (that
+        a kept image lacks) to each kept image — to every kept one, when
+        the group keeps several (Near Duplicates mode). Only others in
+        `acted_on` (a set of paths) count, if given. (`add_tags_per_image`
+        later skips the tags an image already has.)"""
         tags_by_row = {}
-        for keeper, others in pairs:
-            keeper_entry = lookup.get(keeper.path)
-            if keeper_entry is None:
-                continue
-            tags = []
-            for member in others:
-                if acted_on is not None and member.path not in acted_on:
+        for kept_images, others in pairs:
+            for kept in kept_images:
+                kept_entry = lookup.get(kept.path)
+                if kept_entry is None:
                     continue
-                entry = lookup.get(member.path)
-                if entry is not None:
-                    tags.extend(entry[1].tags)
-            if tags:
-                tags_by_row.setdefault(keeper_entry[0], []).extend(tags)
+                tags = []
+                for member in others:
+                    if acted_on is not None and member.path not in acted_on:
+                        continue
+                    entry = lookup.get(member.path)
+                    if entry is not None:
+                        tags.extend(entry[1].tags)
+                if tags:
+                    tags_by_row.setdefault(kept_entry[0], []).extend(tags)
         return tags_by_row
 
     def _add_tags_by_row(self, tags_by_row: dict, action_name: str):
@@ -2515,7 +2224,7 @@ class FindDuplicatesDialog(QDialog):
     @Slot()
     def delete_others(self):
         pairs = self._keeper_targets()
-        targets = [member for _keeper, others in pairs for member in others]
+        targets = [member for _kept, others in pairs for member in others]
         if not targets:
             self._warn_no_targets()
             return
@@ -2556,7 +2265,7 @@ class FindDuplicatesDialog(QDialog):
     @Slot()
     def move_others(self):
         pairs = self._keeper_targets()
-        targets = [member for _keeper, others in pairs for member in others]
+        targets = [member for _kept, others in pairs for member in others]
         if not targets:
             self._warn_no_targets()
             return
@@ -2595,7 +2304,7 @@ class FindDuplicatesDialog(QDialog):
         tags_by_row = (self._merge_tags_by_row(pairs, lookup)
                        if self._merge_enabled() else {})
         tagged_count = 0
-        for _keeper, others in pairs:
+        for _kept, others in pairs:
             for member in others:
                 entry = lookup.get(member.path)
                 if entry is not None:
@@ -2618,7 +2327,7 @@ class FindDuplicatesDialog(QDialog):
             'Clear Similarity Cache',
             'Delete the cached perceptual hashes of every image? The next '
             'scan will have to re-decode and re-hash them all.\n\n'
-            'Ignored pairs and groups are kept.')
+            'Ignored groups are kept.')
         if reply != QMessageBox.StandardButton.Yes:
             return
         clear_similarity_cache(self.db_path)
@@ -2632,7 +2341,7 @@ class FindDuplicatesDialog(QDialog):
     def clear_ignores(self):
         reply = get_confirmation_dialog_reply(
             'Clear Group Ignores',
-            'Forget every ignored group and ignored pair (both modes)? '
+            'Forget every ignored group (both modes)? '
             'They will be shown again in the current results and on the '
             'next scan or regrouping.\n\n'
             'The cached perceptual hashes are kept.')
@@ -2640,7 +2349,6 @@ class FindDuplicatesDialog(QDialog):
             return
         clear_group_ignores(self.db_path)
         self._ignored_groups.clear()
-        self._ignored_pairs.clear()
         if (self.mode == MODE_DUPLICATES and self._scanned_groups
                 or self.mode == MODE_NEAR_DUPPLICATES and self._neighbors):
             self._apply_grouping()
@@ -2671,7 +2379,7 @@ class FindDuplicatesDialog(QDialog):
     def _warn_no_targets(self):
         if self.mode == MODE_NEAR_DUPPLICATES:
             text = ('There is nothing to act on: every shown group is '
-                    'ignored or has only its kept image.')
+                    'ignored or keeps all its images.')
         else:
             text = ('There is nothing to act on: every shown group is '
                     'ignored. Un-ignore a group first.')
@@ -2683,17 +2391,17 @@ class _GroupCards:
 
     Only the first ``_MAX_MEMBERS_PER_GROUP`` images are shown initially; a
     clickable "+N more" tile expands the row to show every image in the
-    group. ``keep_member`` is the image to keep, even when it is hidden: in
-    Duplicates mode it is picked by the keep rule when the cards are built,
-    in Near Duplicates mode the representative (the first member) is the
-    default keeper. An ignored group's card area is disabled, so its cards
-    are rendered in black and white (the Fusion style desaturates disabled
+    group. ``keep_member`` is the group's default kept image, even when it
+    is hidden: in Duplicates mode it is picked by the keep rule when the
+    cards are built, in Near Duplicates mode the representative (the first
+    member). In Duplicates mode exactly one image is kept (the "Keep"
+    radio, exclusive per group); in Near Duplicates mode one or more are
+    (the "Keep" check boxes), and the kept images live in the dialog's
+    kept set (`FindDuplicatesDialog._kept_images`), which the widgets
+    mirror. An ignored group's card area is disabled, so its cards are
+    rendered in black and white (the Fusion style desaturates disabled
     widgets) and are unclickable — the group reads as "not to be acted
-    on" — while a display-only ignored-pair member (Near Duplicates mode)
-    is dimmed with a translucent overlay and its "Keep" radio disabled (it
-    is never acted on and cannot be picked); the member's card carries the
-    pair-ignore check box in the thumbnail's top-left corner, and the
-    group's header stays normal and usable.
+    on" — while the group's header stays normal and usable.
     """
 
     def __init__(self, dialog, group, keep_member=None):
@@ -2702,15 +2410,16 @@ class _GroupCards:
         members = _group_members(group)
         # In Duplicates mode the caller passes the keeper picked by the keep
         # rule; in Near Duplicates mode the representative (the first
-        # member) is the default keeper.
+        # member) is the default kept image.
         self.keep_member = (keep_member if keep_member is not None
                             else _member_image(members[0]))
         self.expanded = False
-        # list of (QRadioButton | None, member) for the currently shown
-        # cards (every card has a radio now; a dimmed member's is
-        # disabled — the preview treats a disabled radio as "not
-        # keepable").
-        self.radio_members: list = []
+        # list of (QCheckBox | QRadioButton, member) for the currently
+        # shown cards (a check box in Near Duplicates mode — one or more
+        # kept — and the exclusive "Keep" radio in Duplicates mode); the
+        # preview dialog shares these widgets to (un)keep an image from
+        # there.
+        self.keep_widgets: list = []
         # list of (relation QLabel, info QLabel, member) for the shown cards.
         self.card_labels: list = []
         # list of (_DuplicateCard, member) for the shown cards.
@@ -2727,9 +2436,7 @@ class _GroupCards:
 
         title = ('Near duplicates' if dialog.mode == MODE_NEAR_DUPPLICATES
                  else 'Exact duplicates')
-        # Count the images the user can see: while "Show ignored" is off
-        # the dimmed members of the ignored pairs have no card, so they
-        # are not in the title either (see `_visible_group_members`).
+        # Count the images the user can see (the group's full membership).
         self.box = QGroupBox(
             f'{title} \u2014 '
             f'{len(dialog._visible_group_members(group))} images')
@@ -2792,7 +2499,7 @@ class _GroupCards:
     def _on_ignore_toggled(self, checked: bool):
         # Persist the state and apply it in place (the card area is
         # enabled/disabled, which in one paint renders the group in black
-        # and white and grays out its "Keep" radios) — like taggui-plus,
+        # and white and grays out its "Keep" widgets) — like taggui-plus,
         # without rebuilding the groups, so the toggle flickers nothing.
         # The checkbox is set before this connection is made in `__init__`,
         # so this cannot fire during construction.
@@ -2805,7 +2512,7 @@ class _GroupCards:
         button_group = QButtonGroup(self.box)
         button_group.setExclusive(True)
         self.button_group = button_group
-        self.radio_members = []
+        self.keep_widgets = []
         self.card_labels = []
         self.cards = []
 
@@ -2813,26 +2520,37 @@ class _GroupCards:
         cards_layout = QHBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 0, 0, 0)
         cards_layout.setSpacing(10)
-        # The row's layout, kept for the in-place card hide
-        # (`set_member_ignored`), which force-activates it so the very
-        # next paint is the final state.
-        self.cards_layout = cards_layout
 
-        # A member whose pair is ignored is shown (dimmed) only while
-        # "Show ignored" is on: with it off it gets no card at all —
-        # neither in the initial row nor behind the "+N more" tile.
         members = self.dialog._visible_group_members(self.group)
         shown = members if self.expanded else members[:_MAX_MEMBERS_PER_GROUP]
+        # The images the group keeps (the dialog's kept set; a rebuild or
+        # the "+N more" expansion must not reset the user's picks). When
+        # the group's state is not recorded yet — the first build of its
+        # cards — it is seeded with the default kept image, so the set
+        # always mirrors the widgets' state (a later "the user unchecked
+        # everything" empty state must not be mistaken for this).
+        group_paths = {_member_image(member).path for member in members}
+        group_key = self.dialog._group_key_of(self.group)
+        kept = self.dialog._kept_images & group_paths
+        if group_key not in self.dialog._kept_initialized:
+            if not kept:
+                kept = {self.keep_member.path}
+            self.dialog._record_group_kept(self.group, kept)
+            self.dialog._kept_initialized.add(group_key)
         for position, member in enumerate(shown):
-            card, radio, relation_label, info_label = \
+            card, keep_widget, relation_label, info_label = \
                 self.dialog._build_card(member, self)
-            if radio is not None:
-                radio.setChecked(_member_image(member) is self.keep_member)
-                radio.toggled.connect(
-                    lambda checked, m=member: self._on_keep_toggled(
-                        checked, m))
-                button_group.addButton(radio)
-                self.radio_members.append((radio, member))
+            if isinstance(keep_widget, QRadioButton):
+                # The exclusive "Keep" radio (Duplicates mode); the check
+                # boxes (Near Duplicates mode) never join the group.
+                button_group.addButton(keep_widget)
+            # The state first, then the connection: setting it during
+            # construction must not be recorded twice.
+            keep_widget.setChecked(_member_image(member).path in kept)
+            keep_widget.toggled.connect(
+                lambda checked, m=member: self._on_keep_toggled(
+                    checked, m))
+            self.keep_widgets.append((keep_widget, member))
             self.card_labels.append((relation_label, info_label, member))
             self.cards.append((card, member))
             cards_layout.addWidget(card)
@@ -2863,10 +2581,18 @@ class _GroupCards:
         self.update_relations()
 
     def _on_keep_toggled(self, checked: bool, member):
+        # A keep widget changed state (the user toggled a check box, or the
+        # exclusive radio group re-checked the radios). The group's kept
+        # images are now exactly its checked widgets, so the dialog's kept
+        # set is rebuilt from them.
+        kept = {_member_image(m).path
+                for widget, m in self.keep_widgets if widget.isChecked()}
+        self.dialog._record_group_kept(self.group, kept)
         if checked:
+            # The checked widget's image is remembered as the group's
+            # keeper for the relation labels (Duplicates mode).
             self.keep_member = _member_image(member)
-            self.dialog._record_keeper(self.group, _member_image(member))
-            self.update_relations()
+        self.update_relations()
 
     def update_relations(self):
         """Refresh the relation label on every shown card (the "Kept" /
@@ -2878,7 +2604,7 @@ class _GroupCards:
                 text, tip = self.dialog._card_relation_text(member)
                 if member is _group_members(self.group)[0]:
                     # The representative's label is bold, whatever the
-                    # keeper is.
+                    # kept images are.
                     relation_label.setText(f'<b>{text}</b>')
                 else:
                     relation_label.setText(text)
@@ -2888,15 +2614,12 @@ class _GroupCards:
                 text = describe_relation(image, self.keep_member)
                 relation_label.setText(
                     f'<b>{text}</b>' if image is self.keep_member else text)
-        for card, member in self.cards:
-            member_dimmed = isinstance(member, dict) and member['dimmed']
+        for (keep_widget, _member), (card, _card_member) in zip(
+                self.keep_widgets, self.cards):
             # An ignored group's cards are rendered in black and white by
-            # the disabled card area; the overlay is only for the
-            # display-only ignored-pair members of a group that is not
-            # ignored itself.
-            card.set_dimmed(member_dimmed and not self.ignored)
-            card.set_kept(not (member_dimmed or self.ignored)
-                          and _member_image(member) is self.keep_member)
+            # the disabled card area (and show no kept outline there
+            # either).
+            card.set_kept(keep_widget.isChecked() and not self.ignored)
 
     def refresh_info(self):
         """Refresh each shown card's details (e.g. its tag count)."""
@@ -2904,88 +2627,26 @@ class _GroupCards:
             info_label.setText(self.dialog._card_info_text(
                 _member_image(member)))
 
-    def set_keep(self, member):
-        """Make `member` (an `Image`) the keeper, expanding the group if it
-        is hidden. The pick is recorded on the dialog (`_record_keeper`) so
-        a rebuild can restore it."""
-        self.dialog._record_keeper(self.group, member)
-        if all(_member_image(shown) is not member
-               for _radio, shown in self.radio_members):
-            self.keep_member = member
+    def set_kept(self, kept: set):
+        """Make the given image paths (a set) the group's kept images: the
+        matching widgets are checked, the rest unchecked, and the kept set
+        is recorded on the dialog (`_record_group_kept`) so a rebuild can
+        restore it. A group with none of its images in `kept` is left
+        alone. A kept image hidden behind the "+N more" tile expands the
+        row first (the re-populate re-applies the recorded state)."""
+        group_paths = {_member_image(member).path
+                       for member in _group_members(self.group)}
+        kept = set(kept) & group_paths
+        if not kept:
+            return
+        self.dialog._record_group_kept(self.group, kept)
+        shown_paths = {_member_image(member).path
+                       for _widget, member in self.keep_widgets}
+        if not kept <= shown_paths:
             self.expand()
             return
-        for radio, shown in self.radio_members:
-            if _member_image(shown) is member:
-                radio.setChecked(True)
-                return
-
-    def set_member_ignored(self, member, ignored: bool):
-        """Apply a pair (un)ignore to the member's card in place: flip the
-        dim flag, disable/enable the "Keep" radio, dim/undim the overlay —
-        without rebuilding the group (an ignore click must not reorder or
-        flicker the results). While "Show ignored" is off the ignored
-        member is not shown at all, so its card is hidden in place — with
-        the same scroll-position treatment as an ignored group's box
-        (see `_hide_group_cards`): the focus is redirected out of the
-        results first (hiding the just-clicked, focused check box would
-        otherwise make Qt move the focus and synchronously scroll the
-        list), the row's re-layout is forced, and the scroll offset is
-        re-asserted, so nothing in the results list moves; un-ignoring it
-        then means turning "Show ignored" back on or "Clear group
-        ignores", both of which rebuild. If the ignored member was the
-        keeper, the group's representative takes over as the default
-        keeper. A member whose card is not shown yet (behind the "+N more"
-        tile) only has its flag flipped — its card is built with the
-        state when the row expands."""
-        if member.get('dimmed') == ignored:
-            return
-        member['dimmed'] = ignored
-        image = _member_image(member)
-        if not any(m is member for _card, m in self.cards):
-            # (Cannot be the keeper: keepers are always shown — picking a
-            # hidden member expands the row first.)
-            return
-        if ignored and not self.dialog.show_ignored_check_box.isChecked():
-            # Hide the card in place, with the same two-part treatment the
-            # group-level hide gets (see `_hide_group_cards`): the
-            # just-clicked check box has the focus and is inside the card
-            # being hidden, and hiding a focused widget makes Qt move the
-            # focus to a fallback widget and *synchronously* scroll the
-            # results list to make it visible — that is the jump, so the
-            # focus is redirected out of the results first. The scroll
-            # offset is re-asserted unconditionally afterwards: the row is
-            # fixed-height (the cards_scroll is), so the offset stands,
-            # but anything that still moved it during the hide is
-            # corrected here.
-            scroll_area = self.dialog.results_scroll_area
-            offset = scroll_area.verticalScrollBar().value()
-            self.dialog._redirect_focus_out_of_results()
-            for card, m in self.cards:
-                if m is member:
-                    card.hide()
-                    break
-            # Hiding the card only *posts* the row's re-layout: the
-            # siblings would shift left on the next event loop pass, so
-            # the first paint would still show the old row with a gap.
-            self.cards_layout.activate()
-            scroll_area.verticalScrollBar().setValue(offset)
-        for radio, shown in self.radio_members:
-            if shown is member:
-                # Enabling the radio re-arms the card's whole-area click
-                # handler: it is connected for every card in `_build_card`
-                # and refuses while the radio is disabled.
-                radio.setEnabled(not ignored)
-                break
-        if ignored and self.keep_member is image:
-            # The keeper is being ignored: the representative takes over.
-            representative = _member_image(_group_members(self.group)[0])
-            self.keep_member = representative
-            self.dialog._record_keeper(self.group, representative)
-            for radio, shown in self.radio_members:
-                if _member_image(shown) is representative:
-                    radio.setChecked(True)
-                    break
-        self.update_relations()
+        for widget, member in self.keep_widgets:
+            widget.setChecked(_member_image(member).path in kept)
 
     def expand(self):
         if self.expanded:
@@ -3049,9 +2710,10 @@ class _PreviewDialog(QDialog):
     whole group, with controls overlaid on the image and a full-screen
     toggle.
 
-    ``radio_members`` is a list of ``(QRadioButton | None, member)`` tuples
-    shared with the main dialog, so "Keep this image" here checks the
-    matching radio back in the results list.
+    ``keep_widgets`` is a list of ``(QCheckBox | QRadioButton | None,
+    member)`` tuples shared with the main dialog, so "Keep this image"
+    here checks (or un-checks, Near Duplicates mode) the matching widget
+    back in the results list.
 
     ``relations``, when given, maps a member's path to the text to
     show for its relation to the rest of the group (Near
@@ -3060,15 +2722,21 @@ class _PreviewDialog(QDialog):
     (the "Kept" / "Identical file" labels) is shown.
     """
 
-    def __init__(self, parent, radio_members, index, thumbnails=None,
+    def __init__(self, parent, keep_widgets, index, thumbnails=None,
                  stats=None, relations=None):
         super().__init__(parent)
-        self.radio_members = radio_members
+        # The widgets are shared with the results list (a keep toggle here
+        # toggles the matching card's widget); the member is normalized to
+        # its `Image` — the viewer and the info labels read `.path` and
+        # `.dimensions` directly, which a Near Duplicates member dict
+        # would not have.
+        self.keep_widgets = [(widget, _member_image(member))
+                             for widget, member in keep_widgets]
         self.index = index
         self._grid = False
         self._was_maximized = False
         self._zoomed_at_double_click = False
-        members = [member for _radio, member in radio_members]
+        members = [member for _widget, member in self.keep_widgets]
         self.model = _GroupImagesModel(members, thumbnails or {}, self)
         self._stats = stats or {}
         self._relations = relations or {}
@@ -3206,8 +2874,8 @@ class _PreviewDialog(QDialog):
             defaultValue=DEFAULT_SETTINGS['variant_grid_cell_cap'], type=int))
 
     def _kept_member(self):
-        for radio, member in self.radio_members:
-            if radio is not None and radio.isChecked():
+        for widget, member in self.keep_widgets:
+            if widget is not None and widget.isChecked():
                 return member
         return None
 
@@ -3233,8 +2901,8 @@ class _PreviewDialog(QDialog):
         return abs(self.viewer.zoom_factor - 1.0) < 1e-9
 
     def _update_info(self):
-        _radio, member = self.radio_members[self.index]
-        total = len(self.radio_members)
+        _widget, member = self.keep_widgets[self.index]
+        total = len(self.keep_widgets)
         self.setWindowTitle(
             f'{member.path}  \u2014  {self.index + 1} of {total}')
         self.name_label.setText(
@@ -3263,13 +2931,20 @@ class _PreviewDialog(QDialog):
         multiple = total > 1
         self.prev_button.setEnabled(multiple)
         self.next_button.setEnabled(multiple)
-        radio = self.radio_members[self.index][0]
-        if radio is None or not radio.isEnabled():
-            # No radio (a standalone image) or a disabled one (a
-            # display-only ignored-pair member): not keepable here.
+        widget = self.keep_widgets[self.index][0]
+        if widget is None or not widget.isEnabled():
+            # No keep widget (a standalone image) or a disabled one (the
+            # group's card area is disabled — an ignored group): not
+            # keepable here.
             self.keep_button.setText('Keep this image (K)')
             self.keep_button.setEnabled(False)
-        elif radio.isChecked():
+        elif isinstance(widget, QCheckBox) and widget.isChecked():
+            # Near Duplicates mode: the image is kept; the button un-keeps
+            # it (the same toggle as the card's check box).
+            self.keep_button.setText('\u2713 Keeping \u2014 click to un-keep')
+            self.keep_button.setEnabled(True)
+        elif widget.isChecked():
+            # Duplicates mode: this is the group's single keeper.
             self.keep_button.setText('\u2713 Keeping this image')
             self.keep_button.setEnabled(False)
         else:
@@ -3284,23 +2959,30 @@ class _PreviewDialog(QDialog):
         self._position_overlays()
 
     def _step(self, delta):
-        if len(self.radio_members) < 2:
+        if len(self.keep_widgets) < 2:
             return
-        self.index = (self.index + delta) % len(self.radio_members)
+        self.index = (self.index + delta) % len(self.keep_widgets)
         self._show_current(keep_zoom=True)
         self._show_overlays()
 
     def _keep_current(self):
-        radio, _member = self.radio_members[self.index]
-        # A disabled radio is a display-only ignored-pair member: it
-        # cannot be picked to keep (the card's check box restores it).
-        if radio is None or not radio.isEnabled() or radio.isChecked():
+        widget, _member = self.keep_widgets[self.index]
+        # A disabled widget (the group's card area is disabled — an
+        # ignored group) cannot be toggled.
+        if widget is None or not widget.isEnabled():
             return
-        radio.setChecked(True)
+        if isinstance(widget, QCheckBox):
+            # Near Duplicates mode: toggle the kept state (the same as the
+            # card's check box).
+            widget.setChecked(not widget.isChecked())
+        elif not widget.isChecked():
+            # Duplicates mode: the exclusive radio — check it (a group
+            # always keeps exactly one image).
+            widget.setChecked(True)
         self._update_info()
 
     def toggle_grid(self):
-        if not self._grid and len(self.radio_members) < 2:
+        if not self._grid and len(self.keep_widgets) < 2:
             return
         self._grid = not self._grid
         if self._grid:

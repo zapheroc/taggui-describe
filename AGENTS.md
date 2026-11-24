@@ -35,7 +35,7 @@ does not):
   in-memory group-by over `Image.content_hash` plus `os.stat` — no hashing
   or file reads — and runs automatically when the dialog opens. **Near
   Duplicates** reviews groups of visually similar images via 256-bit pHash
-  (`taggui/models/similarity.py` + the schema-v4 `phash` database cache);
+  (`taggui/models/similarity.py` + the schema-v5 `phash` database cache);
   the scan decodes every uncached image and always waits for an explicit
   "Scan". In database storage mode exact-duplicate copies share one tag
   record, so the tag actions (tag-as-`duplicate`, tag merge) are disabled
@@ -108,7 +108,7 @@ taggui/models/image_list_model.py  Core data model: Image list, directory load,
                                    undo/redo, ALL batch tag operations, disk I/O
                                    (reads/writes go through the active storage
                                    backend; syncs duplicate-content images)
-taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate; schema v4 adds the `phash` cache (256-bit pHash + mirror, hex TEXT) and the ignored-similarity pair/group tables (Find Duplicates, Near Duplicates mode)
+taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate; schema v4 adds the `phash` cache (256-bit pHash + mirror, hex TEXT) and the ignored-similarity group table, v5 drops the pair table an earlier v4 build created (Find Duplicates, Near Duplicates mode)
 taggui/models/similarity.py        pHash core for the Find Duplicates dialog's
                                     Near Duplicates mode: `compute_phash` /
                                     `compute_phash_mirrored` (ImageHash,
@@ -243,7 +243,7 @@ Fork addition: tags and descriptions do not have to live in `.txt` files.
   `MainWindow._apply_storage_backend` after a confirmed switch, which also
   reloads the directory so the in-memory data comes from the new storage).
 
-**Schema** (v3; version tracked in `PRAGMA user_version`, future changes
+**Schema** (v5; version tracked in `PRAGMA user_version`, future changes
 appended to `_MIGRATIONS`, each step in its own transaction, all DDL
 `IF NOT EXISTS` so concurrent first connections don't fail):
 
@@ -282,6 +282,22 @@ appended to `_MIGRATIONS`, each step in its own transaction, all DDL
   worker tasks have finished (fresh connection). Losing the buffer (crash)
   is safe: the rows are derived data and the files are simply re-hashed on
   the next load.
+- `phash(hash TEXT PRIMARY KEY, phash TEXT NOT NULL, phash_mirror TEXT,
+  phash_version INTEGER NOT NULL)` (v4) — the Find Duplicates dialog's
+  perceptual-hash cache (Near Duplicates mode), keyed by content hash:
+  `phash` is the 64-hex-char 256-bit pHash, `phash_mirror` the mirrored
+  image's pHash (NULL until a "Match mirrored versions" scan computes it),
+  `phash_version` distinguishes hash algorithms/parameters (old-version rows
+  are recomputed). Written in batches like `hash_cache` (the scan runs in
+  worker threads; `flush_phash_cache`). "Clear similarity cache" wipes it.
+- `ignored_similarity_groups(group_key TEXT PRIMARY KEY, seed_hash TEXT NOT
+  NULL, mode TEXT NOT NULL, threshold_key TEXT NOT NULL)` (v4) — the
+  dialog's group dismissals (`'phash:<threshold>:<seed_hash>'` /
+  `'exact:<content_hash>'`). An earlier build of the v4 step also created
+  an `ignored_similarity_pairs` table (the pairwise "never group these two
+  together" exclusions, removed with the per-pair ignore feature); the v5
+  step drops it again (`DROP TABLE IF EXISTS` — a no-op for databases that
+  migrated to the current v4, which never had it).
 
 **Semantics to preserve:**
 - `SqliteStorage.load_image` stats the file, resolves its content hash from
@@ -350,9 +366,17 @@ values):
   mode-dependent controls (slider, mirror option, clear-cache button) are
   shown only in Near Duplicates mode.
 
-Both modes show each group side by side and act on the non-kept members
-(delete to Recycle Bin, move to a folder, tag as `duplicate`), optionally
-copying their tags to the kept image first.
+Both modes show each group side by side. The user picks which images to
+keep — in Duplicates mode exactly one (an exclusive "Keep" radio, the keep
+rule's pick by default); in Near Duplicates mode one or more ("Keep" check
+boxes, the group's representative by default). The kept state is in memory
+only for the dialog's lifetime (the dialog's `_kept_images` path set,
+mirrored by the cards' widgets): it survives a "Show ignored" toggle and a
+regroup (picks follow their kept images), but is cleared by a fresh scan
+or a mode switch. The actions then act on the non-kept members of each
+non-ignored group (delete to Recycle Bin, move to a folder, tag as
+`duplicate`), optionally copying their tags to the kept images first — to
+every kept one, when a group keeps several.
 
 - **Duplicates scan** — an in-memory group-by over `Image.content_hash`
   plus one `os.stat` per image (size + `mtime_ns`, for the cards and the
@@ -394,10 +418,12 @@ copying their tags to the kept image first.
 - **Keep rules** — `Largest resolution`, `Largest file`, `Newest file`,
   `Oldest file` (a missing mtime counts as the newest, so it is never
   picked), `Most tags`; ties fall back to resolution then the earliest
-  member. "Apply to all groups" re-picks every non-ignored group. In
-  Duplicates mode the cards are built with the keep rule already applied;
-  in Near Duplicates mode the representative (first member) is the default
-  keeper.
+  member. In Duplicates mode the cards are built with the keep rule already
+  applied; in Near Duplicates mode the representative (first member) is the
+  default kept image. "Apply to all groups" re-picks every non-ignored
+  group: in Duplicates mode it re-picks the keep rule's keeper, in Near
+  Duplicates mode it resets the group to the single best image under the
+  rule (unchecking the other kept images).
 - **Settings** (QSettings-backed widgets, persisted): `duplicate_scan_scope`
   (`'All images'` default), `duplicate_keep_rule` (`'Largest resolution'`
   default), `duplicate_merge_tags` (default `False`), `similarity_mode`
@@ -410,7 +436,9 @@ copying their tags to the kept image first.
   change to one copy syncs to all copies (`_sync_duplicate_images`), so
   "tag only the extras" cannot exist, and the tag merge is a no-op. Near
   Duplicates groups are different content (different records), so the tag
-  actions work in both storage modes there.
+  actions work in both storage modes there; when a Near Duplicates group
+  keeps several images, the merge copies the non-kept members' missing
+  tags into **every** kept image.
 - **Delete** reuses `trash_images` (Recycle Bin; a caption still used by a
   remaining loaded image is kept). **Move** uses `move_images_to_folder`
   (`widgets/image_list.py`): existing files are never overwritten (a
@@ -440,11 +468,11 @@ copying their tags to the kept image first.
   is disabled (`_GroupCards` sets `setEnabled(not self.ignored)` at
   construction; the toggle flips it in place), and the Fusion style
   desaturates disabled widgets, so the thumbnails, labels, "+N more" tile
-  and the *kept but disabled* "Keep" radios all read as inert, like the
-  ignore behavior in taggui-plus (the radios are built for every
-  non-dimmed member, ignored groups included — the disabled card area
-  grays them out and makes them unclickable); the cards are also
-  unclickable (no preview, no keeper picking, no card menu). With the
+  and the *kept but disabled* "Keep" widgets all read as inert, like the
+  ignore behavior in taggui-plus (the keep widgets are built for every
+  member, ignored groups included — the disabled card area grays them out
+  and makes them unclickable); the cards are also
+  unclickable (no preview, no keep picking, no card menu). With the
   checkbox **off**, ignoring a group hides it **right away, in place**:
   `set_group_ignored` calls `_hide_group_cards`, which drops the group
   from `_groups`/`_group_cards` (exactly what the rebuild
@@ -484,20 +512,8 @@ copying their tags to the kept image first.
   group is shown ignored, its header (title and its controls) stays
   normal and fully usable, so it can still be un-ignored or opened as a
   selection.
-  Ignored/split *pairs*
-  (Near Duplicates: `ignored_similarity_pairs`, pairwise
-  `hash_a < hash_b`; a session-only "split" exclusion lives in memory only)
-  are **always** excluded from the neighbor graph, so the seed selection —
-  and therefore the groups' persisted keys — stays stable while "Show
-  ignored" is toggled; with it on, the ignored pair's members are
-  additionally appended as display-only *dimmed* members (no Keep radio,
-  skipped by every action, their card offers "Un-ignore pair") — unlike
-  ignored groups, those stay *interactive* (the card keeps a translucent,
-  mouse-transparent overlay and its "Un-ignore pair" menu), so the overlay
-  is only applied to them, never to an ignored group's cards. "Clear
-  group ignores" wipes both the group and pair ignore data.
   Everything that *structurally* changes the boxes — the "Show ignored"
-  toggle, pair ignore/un-ignore/split, a new scan — goes through
+  toggle, a new scan — goes through
   `_apply_grouping` → `_show_groups`, which rebuilds **atomically** (a
   visible rebuild must never flicker either): all replacement boxes are
   built first, parentless and therefore invisible (`processEvents()`
@@ -547,28 +563,32 @@ copying their tags to the kept image first.
   image list via the dialog's `select_paths_callback`
   (`MainWindow.select_image_paths`), driving the multi-image grid preview
   and the grouped tag view for tag consolidation before pruning.
-- **Keeper picker** — the whole card is clickable: `_DuplicateCard`
+- **Keep picker** — the whole card is clickable: `_DuplicateCard`
   emits `clicked` on a left press anywhere on the card except inside the
   thumbnail zone registered via `set_preview_zone`, and `_build_card`
-  connects it to checking the card's `Keep` radio (the per-group
-  exclusive `QButtonGroup` does the rest; the card shows a hand cursor
-  over its whole area). A left press on the thumbnail label opens the
-  preview and then propagates to the card (a `QLabel` ignores mouse
-  presses), where the zone check swallows it — so a thumbnail click never
-  changes the keeper.
+  connects it to the card's keep widget (Duplicates mode: checking the
+  exclusive `Keep` radio — the per-group `QButtonGroup` does the rest;
+  Near Duplicates mode: toggling the `Keep` check box; the card shows a
+  hand cursor over its whole area). A left press on the thumbnail label
+  opens the preview and then propagates to the card (a `QLabel` ignores
+  mouse presses), where the zone check swallows it — so a thumbnail click
+  never changes the kept state.
 - **Preview** — clicking a thumbnail opens `_PreviewDialog`, which reuses
   the shared `ImageViewer` with a standalone `_GroupImagesModel` (the
   `Image` via `UserRole`, its `thumbnail` `QIcon` via `DecorationRole` —
   the viewer only ever calls `data(index, role)`) and
   `load_image(index, preserve_view=True)` for zoom-preserving steps through
   the group (the new optional `ImageViewer.load_image` parameter; the
-  main-window paths are unchanged). The "Keep this image" button checks the
-  matching card's `Keep` radio (the `(QRadioButton | None, member)` tuples
-  are shared). The card thumbnails are the list thumbnails (already decoded)
+  main-window paths are unchanged). The "Keep this image" button toggles
+  the matching card's keep widget (the `(QCheckBox | QRadioButton | None,
+  member)` tuples are shared): in Near Duplicates mode a kept image shows
+  "✓ Keeping — click to un-keep" and the button un-keeps it, in Duplicates
+  mode the checked radio shows "✓ Keeping this image" (disabled). The card
+  thumbnails are the list thumbnails (already decoded)
   smoothly scaled to 140 px — no separate decode thread. In Near Duplicates
   mode the cards and the preview also carry the relation text per member
   (`'Representative'`, `'pHash difference: N / 256'`,
-  `'mirrored: N / 256'`, plus `'(ignored pair)'` on dimmed members).
+  `'mirrored: N / 256'`).
 - **Lazy import** — the dialog module (and with it `models.similarity` and
   its numpy import) is imported only in
   `MainWindow.show_find_duplicates_dialog`, never at app startup;
