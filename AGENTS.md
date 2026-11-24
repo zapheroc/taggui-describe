@@ -416,9 +416,10 @@ every kept one, when a group keeps several.
   `_applied_threshold`), never at the live slider value. "Clear
   similarity cache" wipes the `phash` rows only.
 - **Keep rules** — `Largest resolution`, `Largest file`, `Newest file`,
-  `Oldest file` (a missing mtime counts as the newest, so it is never
-  picked), `Most tags`; ties fall back to resolution then the earliest
-  member. In Duplicates mode the cards are built with the keep rule already
+  `Oldest file` (a missing mtime can never be picked by a file-date rule:
+  the "newest" rule maps it to the oldest possible date, the "oldest" rule
+  to the newest), `Most tags`; ties fall back to resolution then the
+  earliest member. In Duplicates mode the cards are built with the keep rule already
   applied; in Near Duplicates mode the representative (first member) is the
   default kept image. "Apply to all groups" re-picks every non-ignored
   group: in Duplicates mode it re-picks the keep rule's keeper, in Near

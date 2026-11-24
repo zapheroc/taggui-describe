@@ -423,7 +423,9 @@ def choose_keeper(members: list, rule: str, tag_counts: dict,
         entry = stats.get(member.path)
         size = entry[0] if entry else 0
         # A missing entry is an unknown date (in practice every grouped
-        # image is in `stats`), which counts as the newest.
+        # image is in `stats`); no file-date rule can pick it — the
+        # "newest" rule maps it to the oldest possible date and the
+        # "oldest" rule to the newest.
         mtime_ns = entry[1] if entry else None
         resolution = _resolution_key(member, stats)
         if rule == KEEP_LARGEST_FILE:
@@ -473,6 +475,11 @@ class _PhashScanTask(QObject, QRunnable):
     The `generation` number lets the dialog discard the result when a newer
     scan superseded it.
 
+    The task is handed the full model list and the in-scope model rows
+    (computed on the GUI thread before the scan starts): every row it
+    reports indexes the full list, which is how the dialog's grouping code
+    resolves them.
+
     The `finished` signal carries one dict with the in-memory scan state the
     dialog keeps for threshold changes and ignore actions (re-grouping
     without re-reading any file):
@@ -505,17 +512,21 @@ class _PhashScanTask(QObject, QRunnable):
     # was already cached).
     progress = Signal(int, int)
 
-    def __init__(self, images: list[Image], model: ImageListModel,
-                 generation: int, registry: set, scope: Scope | str,
-                 threshold: int, match_mirrored: bool,
+    def __init__(self, images: list[Image], generation: int,
+                 registry: set, scope_rows: list[int], threshold: int,
+                 match_mirrored: bool,
                  db_path, parent: QObject = None):
         QObject.__init__(self, parent)
         QRunnable.__init__(self)
+        # The full model list: `scope_rows` and every row in the result's
+        # `hash_rows` index into it.
         self.images = images
-        self.model = model
         self.generation = generation
         self.registry = registry
-        self.scope = scope
+        # The in-scope model rows, computed on the GUI thread before the
+        # scan starts (the scope check reads the proxy model and the
+        # selection, which the scan worker thread must not touch).
+        self.scope_rows = scope_rows
         self.threshold = threshold
         self.match_mirrored = match_mirrored
         self.db_path = db_path
@@ -531,11 +542,6 @@ class _PhashScanTask(QObject, QRunnable):
     @property
     def cancelled(self) -> bool:
         return self._cancelled
-
-    def _scope_rows(self) -> list[int]:
-        """The model rows of the in-scope images, in model order."""
-        return [i for i, image in enumerate(self.images)
-                if self.model.is_image_in_scope(self.scope, i, image)]
 
     @Slot()
     def run(self):
@@ -555,7 +561,7 @@ class _PhashScanTask(QObject, QRunnable):
 
     def _run_scan(self):
         images = self.images
-        rows = self._scope_rows()
+        rows = self.scope_rows
 
         # Group the in-scope rows by content hash: the pHash is a property
         # of the image's bytes, so each distinct hash is decoded and hashed
@@ -1217,9 +1223,19 @@ class FindDuplicatesDialog(QDialog):
         self._scanned_mirrored = self.match_mirrored_check_box.isChecked()
         self._scanned_paths = frozenset(image.path for image in images)
 
+        # The task works on the full model list: its result rows index
+        # `image_list_model.images` when the dialog builds the groups, so
+        # the in-scope rows are computed here (on the GUI thread — the
+        # scope check reads the proxy model and the selection, which the
+        # scan worker thread must not touch) and handed to it alongside
+        # the full list.
+        model_images = list(self.image_list_model.images)
+        scope_rows = [i for i, image in enumerate(model_images)
+                      if self.image_list_model.is_image_in_scope(
+                          self.scope, i, image)]
         scanner = _PhashScanTask(
-            images, self.image_list_model, self._scan_generation,
-            _phash_scan_registry, self.scope, self._scanned_threshold,
+            model_images, self._scan_generation,
+            _phash_scan_registry, scope_rows, self._scanned_threshold,
             self._scanned_mirrored, self.db_path)
         self._scanner = scanner
         # Bound methods (not lambdas) so the connections end when the dialog

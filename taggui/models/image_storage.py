@@ -902,8 +902,15 @@ def _flush_phash_buffer(db_path: Path) -> None:
                 'phash_version) VALUES (?, ?, ?, ?) '
                 'ON CONFLICT (hash) DO UPDATE SET phash = excluded.phash, '
                 'phash_version = excluded.phash_version, '
-                'phash_mirror = COALESCE(excluded.phash_mirror, '
-                'phash.phash_mirror)', rows)
+                # The mirror is merged only at the same version: a row
+                # written by a non-mirror scan must not wipe a stored
+                # mirror, but a version change (a hash algorithm bump)
+                # makes the stored mirror stale, so the new row's mirror
+                # (None for a non-mirror scan) replaces it.
+                'phash_mirror = CASE '
+                'WHEN excluded.phash_version = phash.phash_version THEN '
+                'COALESCE(excluded.phash_mirror, phash.phash_mirror) '
+                'ELSE excluded.phash_mirror END', rows)
     except (OSError, sqlite3.Error) as exception:
         with _phash_pending_lock:
             _phash_pending[:0] = rows
@@ -920,8 +927,11 @@ def buffer_phash_row(db_path: Path, content_hash: str, phash_hex: str,
     Queue a computed `phash` row, flushing the buffer when it is full.
 
     `phash_mirror_hex` (the mirrored image's hash, when the scan computed
-    it) is merged with `COALESCE` on conflict, so a row written without a
-    mirror never wipes one that was computed by an earlier mirror scan.
+    it) is merged with `COALESCE` on conflict at the same `phash_version`,
+    so a row written without a mirror never wipes one that was computed by
+    an earlier mirror scan. A row at a different version (a hash algorithm
+    change) replaces the stored mirror — it was computed by the old
+    algorithm and is stale.
 
     Called by the scan worker threads (which never share a connection with
     a directory load, so the batch flush opens its own fresh connection).

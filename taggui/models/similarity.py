@@ -200,7 +200,6 @@ def _chunk_distances(chunk: np.ndarray, all_bytes: np.ndarray) -> np.ndarray:
 
 def compute_neighbors(hashes: list[int], threshold: int,
                       mirrored_hashes: list[int] | None = None,
-                      excluded: set[tuple[int, int]] | None = None,
                       worker_count: int = 8,
                       should_cancel=None,
                       max_pairs: int | None = None) -> list:
@@ -212,9 +211,6 @@ def compute_neighbors(hashes: list[int], threshold: int,
     256-bit pHash of each image's left-right mirrored version: the pair
     distance is `min(direct, mirrored)` and the `mirrored` flag says which
     was smaller.
-
-    `excluded` is a set of (min(a, b), max(a, b)) index pairs whose links
-    are dropped (ignored and split pairs).
 
     The distance pass runs in a thread pool (the numpy calls release the
     GIL); it checks `should_cancel()` between batches of chunks and raises
@@ -231,7 +227,6 @@ def compute_neighbors(hashes: list[int], threshold: int,
     mirror_bytes = (hashes_to_bytes(mirrored_hashes)
                     if mirrored_hashes is not None else None)
     count = len(hashes)
-    excluded = excluded or set()
     neighbors: list = [[] for _ in range(count)]
     starts = list(range(0, count, _DISTANCE_CHUNK))
     # Shared across the pool threads: the total number of stored links,
@@ -259,9 +254,6 @@ def compute_neighbors(hashes: list[int], threshold: int,
             indices = np.nonzero(row_distances <= threshold)[0]
             row_neighbours = neighbors[i]
             for j in indices.tolist():
-                pair = (i, j) if i < j else (j, i)
-                if pair in excluded:
-                    continue
                 row_neighbours.append(
                     (int(j), int(row_distances[j]),
                      bool(row_mask[j]) if mask is not None else False))
@@ -302,7 +294,7 @@ def seed_group(neighbors: list, order_keys: list) -> list:
     The seed-based (non-transitive) groups of the neighbor lists.
 
     `neighbors[i]` is the (index, distance, mirrored) list of the images
-    within the threshold of i (self and excluded links already removed).
+    within the threshold of i (its own entry removed).
     `order_keys[i]` is a comparable tuple, larger first — the caller puts
     in (degree, area, size, path) — used to order the candidate seeds.
 
