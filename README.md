@@ -20,7 +20,8 @@ models.
   classic `.txt` caption files), so tags follow each image across folders
 - Duplicate file handling: byte-identical copies are detected in both
   storage modes, with an `n/k` indicator, a `Duplicates` filter, a
-  `Find Duplicates...` review dialog, and a cleanup action
+  `Find Duplicates...` review dialog (for exact and near duplicates),
+  and cleanup actions
 - Background-generated thumbnails with an on-disk cache, so re-opening a
   folder is fast
 - Caption models that run on llama.cpp, including Gemma 4 31B and Qwen 3.8 27B
@@ -635,52 +636,144 @@ TagGUI makes duplicates easy to spot and clean up:
 
 ## Find Duplicates
 
-Use **`Tools` -> `Find Duplicates...`** to find loaded images with
-**byte-for-byte identical content** and review each group side by side.
-Scanning uses the same content hash the app already computes for
-[duplicate detection](#duplicate-files), so it is instant even for large
-folders — no image is re-read or decoded.
+Use **`Tools` -> `Find Duplicates...`** to review groups of duplicate
+images side by side and clean them up.
+The **`Mode`** dropdown (remembered between sessions) switches the
+dialog between two kinds of duplicates:
 
-- **Scope** — which images to scan: `All images`, `Filtered images`, or
-  `Selected images` (remembered between scans).
-- Each group shows its images with their name, resolution, file size,
-  modified date and tag count. You choose **which image to keep** (click
-  the image's card, or use a keep rule, below); the kept image is marked
-  **Kept** and the others **Identical file**.
-  The other images can be:
-  - **deleted to the Recycle Bin**, or
-  - **moved to a folder** — existing files are never overwritten (a
-    colliding name gets a numeric suffix, `b.jpg`, `b_1.jpg`, ...),
-    captions travel with their images, and a caption shared by two images
-    is copied rather than moved, so the image that stays keeps its tags, or
-  - **tagged as `duplicate`** for later review.
-- **Keep in each group** — how the kept image is picked: `Largest
-  resolution`, `Largest file`, `Newest file` or `Oldest file` (compares the
-  modified date shown on each image), or `Most tags`.
-  `Apply to all groups` re-picks the keeper in every group (clicking any
-  image's card overrides the pick); tick `Ignore this group` to leave a
-  whole group untouched.
-- **Copy the tags of the other images to the kept image** — checked, the
-  tags of the other images are copied to the kept image before acting
-  (text-file storage mode only).
-  In database storage mode this option and "Tag as `duplicate`" are
-  disabled, because the copies of a duplicate share one tag record there:
-  tagging one copy would tag every copy of the group.
+- **`Duplicates`** (the default) finds loaded images with
+  **byte-for-byte identical content** — the same file saved more than
+  once.
+  Scanning uses the same content hash the app already computes for
+  [duplicate detection](#duplicate-files), so it is instant even for
+  large folders — no image is re-read or decoded — and it runs
+  automatically when the dialog opens.
+- **`Near Duplicates`** finds images that *look alike* — near-identical
+  files, such as generations of the same prompt with small variations —
+  using a perceptual hash of each image's contents.
+  Pressing **`Scan`** hashes every image that has no cached hash yet
+  (each such image is decoded once; later scans use the cache).
+  - **`Max pHash difference`** (0–100, default `6`) — images join a
+    group when their perceptual hashes differ by at most this many bits,
+    so lower is stricter. Moving the slider changes nothing until you
+    press `Scan` again.
+  - **`Match mirrored versions`** — also compare the left-right flipped
+    version of each image, so a mirrored copy is grouped with its
+    original.
+    Like the slider, it takes effect on the next `Scan`.
+  - **`Clear similarity cache`** — delete the cached perceptual hashes,
+    so the next scan re-decodes and re-hashes every image.
+    (Ignored groups are kept.)
+
+Grouping in `Near Duplicates` mode is non-transitive: an image joins a
+group only if it is within the threshold of that group's
+**representative** (the image the group is built around), so a chain of
+mutually similar images is not collapsed into one giant group.
+
+**`Scope`** — which images to scan: `All images`, `Filtered images`, or
+`Selected images` (remembered between scans).
+
+### Choosing the images to keep
+
+Each group shows its images as cards with their name, resolution, file
+size, modified date and tag count.
+The cleanup actions below apply to the images you do **not** keep, so
+pick the keepers first:
+
+- **Clicking anywhere on a card** (except its thumbnail) changes that
+  image's kept state: in `Duplicates` mode it selects the image as the
+  group's keeper, in `Near Duplicates` mode it toggles the image's
+  `Keep` check box.
+- In **`Duplicates`** mode each group keeps **exactly one** image.
+  The cards carry an exclusive **`Keep`** radio, checked on the image
+  picked by the keep rule (below) when the group is built; the kept
+  image is marked **Kept** and the others **Identical file**.
+- In **`Near Duplicates`** mode a group can keep **one or more**
+  images — or none: uncheck them all to act on the whole group.
+  The cards carry **`Keep`** check boxes, checked on the group's
+  representative when the group is built, and the **`Select all`**
+  button in a group's header keeps every image of the group at once.
+  Each card also shows how far the image is from the representative
+  (`pHash difference: N / 256`, or `mirrored: N / 256` when the
+  mirrored version is the better match).
+  - **`Shift`+click a card** to make that image the group's *only*
+    kept image: it is checked and every other image of the group is
+    unchecked.
+- Kept images are outlined in the group.
+  Your kept choices live in the dialog only — a new scan or a mode
+  switch resets them — but they survive the rest of the dialog's
+  regrouping (toggling `Show ignored`, re-applying a threshold), so
+  you can keep adjusting picks while you work through the list.
+
+**`Keep in each group`** — how the kept image is picked automatically:
+`Largest resolution`, `Largest file`, `Newest file` or `Oldest file`
+(compares the modified date shown on each image), or `Most tags`.
+**`Apply to all groups`** re-picks the keeper in every group: in
+`Duplicates` mode it re-checks the keep rule's pick, in `Near
+Duplicates` mode it resets each group to the single best image under
+the rule (unchecking the other images you had kept).
+
+### Cleaning up
+
+The **`Other images:`** buttons act on every non-kept image of every
+group that is not ignored:
+
+- **`Delete to Recycle Bin`** — moves the images (and any `.txt`
+  caption files next to them) to the Recycle Bin.
+- **`Move to folder...`** — moves them to a folder you choose.
+  Existing files are never overwritten (a colliding name gets a numeric
+  suffix, `b.jpg`, `b_1.jpg`, ...), captions travel with their images,
+  and a caption shared by two images is copied rather than moved, so
+  the image that stays keeps its tags.
+- **`Tag as "duplicate"`** — tags the images `duplicate` for later
+  review.
+
+**`Copy the tags of the other images to the kept image`** — checked,
+the tags of the images being deleted, moved or tagged are copied to
+the kept image first — to *every* kept image, when a group keeps
+several.
+In `Duplicates` mode with database storage, this option and `Tag as
+"duplicate"` are disabled, because the copies of an exact duplicate
+share one tag record there: tagging one copy would tag every copy of
+the group.
+(`Near Duplicates` groups are different files with different records,
+so both work in every storage mode there.)
+
+After a delete or move, the main image list is reloaded and the
+dialog's results are cleared — click `Scan` again to check what
+remains.
+
+### Ignoring groups
+
+- **`Ignore this group (leave all its images untouched)`** — the
+  checkbox in each group's header excludes the whole group from the
+  action buttons.
+  The ignore is remembered, so the group comes back ignored on the
+  next scan.
+- **`Show ignored`** (on by default) keeps ignored groups visible in
+  the list, rendered in black and white so they clearly read as "not
+  to be acted on"; with it off, an ignored group is hidden from the
+  list right away.
+- **`Clear group ignores`** — forget every ignored group (both modes).
+
+### Looking at a group
+
+- **Click a thumbnail** to open a large viewer of the group (clicking
+  anywhere else on the card changes that image's kept state): zoom
+  with the mouse wheel or `+`/`-` (also `Ctrl`+`+`/`Ctrl`+`-`), drag to
+  pan, and `0`/`Ctrl`+`0` or a double-click to reset the view (stepping
+  through the group keeps the zoom, so the same detail can be
+  compared).
+  `←`/`→` step through the group, `G` toggles a grid of the whole
+  group (a double-click or `Enter` opens the shown cell in the single
+  view), `K` or `Enter` keeps the shown image — or un-keeps it, in
+  `Near Duplicates` mode — back in the results, `F11` toggles full
+  screen, and `Esc` leaves full screen or closes the viewer.
 - Mouse-wheel scrolling over a group's row scrolls the results list;
   `Shift`+wheel scrolls along the row.
-- **Click a thumbnail** to open a large viewer of the group (clicking
-  anywhere else on the card picks that image to keep): zoom with the
-  mouse wheel or `+`/`-` (also `Ctrl`+`+`/`Ctrl`+`-`), drag to pan, and
-  `0`/`Ctrl`+`0` or a double-click to reset the view (stepping through the
-  group keeps the zoom, so the same detail can be compared).
-  `←`/`→` step through the group, `G` toggles a grid of the whole group
-  (a double-click or `Enter` opens the shown cell in the single view),
-  `K` or `Enter` keeps the shown image (which checks its `Keep` radio
-  back in the results), `F11` toggles full screen, and `Esc` leaves full
-  screen or closes the viewer.
-
-Near-duplicate ("look-alike") detection is not part of this dialog: it only
-finds byte-identical files.
+- Large results are shown in pages (**`Show next 100 groups`** button),
+  and large groups show their first 12 images until you expand them
+  with the **`+N more`** tile.
 
 ## Acknowledgments
 

@@ -15,7 +15,6 @@ from utils.clip_tokenizer import ClipTokenizer
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.export_images_dialog import ExportImagesDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
-from dialogs.find_duplicates_dialog import FindDuplicatesDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import (ImageListModel, RefreshScanner,
                                      get_image_suffixes)
@@ -841,10 +840,57 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def show_find_duplicates_dialog(self):
+        # Imported here (not at the top of the module) so the dialog's
+        # dependencies (numpy in `models.similarity`, imagehash/scipy in the
+        # scan worker — used by its Near Duplicates mode) are only loaded
+        # when the dialog is opened.
+        from dialogs.find_duplicates_dialog import FindDuplicatesDialog
         find_duplicates_dialog = FindDuplicatesDialog(
             parent=self, image_list_model=self.image_list_model,
-            reload_callback=self.reload_directory)
+            reload_callback=self.reload_directory,
+            select_paths_callback=self.select_image_paths)
         find_duplicates_dialog.exec()
+
+    @Slot(list)
+    def select_image_paths(self, paths: list):
+        """Select the images at `paths` (a list of `Path`) in the image
+        list, driving the multi-image grid preview and the grouped tag
+        view. Called by the Find Duplicates dialog ("Open in image list")."""
+        from pathlib import Path
+        selected_paths = set(paths)
+        # The image list shows the filtered images; select the proxy rows
+        # whose source image is in `paths` (and that pass the filter).
+        selection_model = self.image_list_selection_model
+        proxy_model = self.image_list_model.proxy_image_list_model
+        selection_model.clearSelection()
+        selected_count = 0
+        first_index = None
+        for row in range(proxy_model.rowCount()):
+            proxy_index = proxy_model.index(row, 0)
+            source_index = proxy_model.mapToSource(proxy_index)
+            image = (self.image_list_model.data(source_index,
+                                                Qt.ItemDataRole.UserRole)
+                     if source_index.isValid() else None)
+            if image is not None and image.path in selected_paths:
+                selection_model.select(
+                    proxy_index, QItemSelectionModel.SelectionFlag.Select)
+                selected_count += 1
+                if first_index is None:
+                    first_index = proxy_index
+        if first_index is not None:
+            # Selecting the first match makes it the current image (and
+            # switches the central view to the image viewer).
+            self.image_list.list_view.set_current_image_index(first_index)
+        if selected_count != len(selected_paths):
+            # Some of the paths are not in the (filtered) image list any
+            # more (e.g. the directory reloaded in between).
+            QMessageBox.information(
+                self, 'Find Duplicates',
+                f'{selected_count} of {len(selected_paths)} selected '
+                'images are shown in the image list'
+                + (' (the rest do not match the current filter)'
+                   if proxy_model.rowCount()
+                   < self.image_list_model.rowCount() else ''))
 
     @Slot()
     def show_batch_reorder_tags_dialog(self):
@@ -964,6 +1010,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(export_images_action)
         # No keyboard shortcut: taggui-plus ships none either, and the
         # natural candidates (Ctrl+D, Ctrl+Shift+D) are taken or reserved.
+        # The dialog's module (and its numpy/imagehash dependencies, used by
+        # its Near Duplicates mode) is imported lazily when it is opened, so
+        # they are never loaded at startup.
         find_duplicates_action = QAction('Find Duplicates...', parent=self)
         find_duplicates_action.triggered.connect(
             self.show_find_duplicates_dialog)
