@@ -197,14 +197,16 @@ class _DuplicateCard(QFrame):
     (except the thumbnail, which opens the preview) changes the image's
     kept state — picking it to be kept (the "Keep" radio, Duplicates mode)
     or toggling it (the "Keep" check box, Near Duplicates mode) — so the
-    click target is the whole card, not just the widget.
+    click target is the whole card, not just the widget. In Near Duplicates
+    mode a click with Shift held makes this image the group's only kept
+    image (the `clicked` signal carries the shift state).
 
     The cards of an ignored group are rendered differently: the group's
     whole card area is disabled, which the Fusion style draws in black and
     white (and makes unclickable), so the group reads as "not to be acted
     on"."""
 
-    clicked = Signal()
+    clicked = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -222,7 +224,10 @@ class _DuplicateCard(QFrame):
                 and (self._preview_zone is None
                      or not self._preview_zone.rect().contains(
                          event.position().toPoint()))):
-            self.clicked.emit()
+            shift = bool(
+                event.modifiers()
+                & Qt.KeyboardModifier.ShiftModifier)
+            self.clicked.emit(shift)
         super().mousePressEvent(event)
 
     def set_kept(self, kept: bool):
@@ -1954,25 +1959,19 @@ class FindDuplicatesDialog(QDialog):
             # default): a "Keep" check box that toggles this image's kept
             # state.
             keep_widget = QCheckBox('Keep')
-            # A click anywhere on the card (the name, the details, the
-            # check box's text, the background) toggles the check box. A
-            # click on the check box itself toggles it as usual, and one
-            # on the thumbnail opens the preview. The isEnabled guard
-            # matters: a programmatic setChecked works on a disabled
-            # check box (an ignored group's card area is disabled), so
-            # without it a card click would toggle it anyway.
-            card.clicked.connect(
-                lambda w=keep_widget: w.setChecked(not w.isChecked())
-                if w.isEnabled() else None)
         else:
             # The exclusive "Keep" radio (one keeper per group): a click
             # anywhere on the card checks the radio, selecting this image
-            # to be kept. A click on the radio itself checks it as usual,
-            # and one on the thumbnail opens the preview.
+            # to be kept.
             keep_widget = QRadioButton('Keep')
-            card.clicked.connect(
-                lambda w=keep_widget: w.setChecked(True)
-                if w.isEnabled() else None)
+        # A click anywhere on the card (the name, the details, the check
+        # box's text, the background) changes the image's kept state — see
+        # `_on_keep_card_clicked`. A click on the keep widget itself
+        # toggles/checks it as usual, and one on the thumbnail opens the
+        # preview.
+        card.clicked.connect(
+            lambda shift, w=keep_widget, gc=group_cards, m=member:
+                self._on_keep_card_clicked(gc, m, w, shift))
         _make_indicator_visible(keep_widget)
         card_layout.addWidget(keep_widget)
 
@@ -1982,6 +1981,33 @@ class FindDuplicatesDialog(QDialog):
             lambda pos, m=member, gc=group_cards: self._show_card_menu(
                 m, gc, card.mapToGlobal(pos)))
         return card, keep_widget, relation_label, info_label
+
+    def _on_keep_card_clicked(self, group_cards, member, keep_widget,
+                              shift: bool):
+        """A click on a card's body (not its keep widget, not the
+        thumbnail) should change this image's kept state.
+
+        In Near Duplicates mode, where one or more images can be kept, a
+        click with Shift held makes this image the group's *only* kept
+        image: every other keep check box is unchecked and this one
+        checked (a no-op when it already is the only kept one). The rest
+        is the plain behavior: a click toggles the check box (Near
+        Duplicates mode) or checks the exclusive "Keep" radio (Duplicates
+        mode — where a plain click already selects exactly one image, so
+        shift has no extra effect there).
+
+        The `isEnabled` guard matters: a programmatic `setChecked` works on
+        a disabled check box (an ignored group's card area is disabled), so
+        without it a card click would toggle it anyway.
+        """
+        if not keep_widget.isEnabled():
+            return
+        if shift and self.mode == MODE_NEAR_DUPPLICATES:
+            group_cards.set_kept({_member_image(member).path})
+        elif isinstance(keep_widget, QCheckBox):
+            keep_widget.setChecked(not keep_widget.isChecked())
+        else:
+            keep_widget.setChecked(True)
 
     # ------------------------------------------------------------------
     # Thumbnails
@@ -2095,14 +2121,6 @@ class FindDuplicatesDialog(QDialog):
     # ------------------------------------------------------------------
     # Opening results in the main window
     # ------------------------------------------------------------------
-
-    def open_group_as_selection(self, group):
-        """Select every image of the group in the main window's image list
-        (driving its multi-image grid preview and the grouped tag view)."""
-        if self.select_paths_callback is not None:
-            self.select_paths_callback(
-                [_member_image(member).path
-                 for member in _group_members(group)])
 
     def open_in_image_list(self, image: Image):
         if self.select_paths_callback is not None:
@@ -2467,12 +2485,20 @@ class _GroupCards:
         self.ignore_check_box.setChecked(self.ignored)
         self.ignore_check_box.toggled.connect(self._on_ignore_toggled)
         _make_indicator_visible(self.ignore_check_box)
-        self.open_button = QPushButton('Open as selection')
-        self.open_button.setFont(normal_font)
-        self.open_button.clicked.connect(self._on_open_as_selection)
+        # The "Select all" button is only offered in Near Duplicates mode:
+        # it checks the keep check box of every image of the group, so
+        # all of them are kept (it never touches the main window's image
+        # list). Duplicates mode keeps exactly one image (the exclusive
+        # "Keep" radio), so it has no such button.
+        self.open_button = None
+        if dialog.mode == MODE_NEAR_DUPPLICATES:
+            self.open_button = QPushButton('Select all')
+            self.open_button.setFont(normal_font)
+            self.open_button.clicked.connect(self._on_select_all)
         header.addWidget(self.ignore_check_box)
         header.addStretch()
-        header.addWidget(self.open_button)
+        if self.open_button is not None:
+            header.addWidget(self.open_button)
         box_layout.addLayout(header)
 
         self.cards_scroll = QScrollArea()
@@ -2492,7 +2518,7 @@ class _GroupCards:
         # Fusion style desaturates disabled widgets) and are unclickable,
         # like taggui-plus: the whole group reads as "not to be acted on".
         # The header above stays enabled, so the group can still be
-        # un-ignored or opened as a selection.
+        # un-ignored or (in Near Duplicates mode) its images selected.
         self.cards_scroll.setEnabled(not self.ignored)
         self._populate()
 
@@ -2505,8 +2531,17 @@ class _GroupCards:
         # so this cannot fire during construction.
         self.dialog.set_group_ignored(self.group, self, checked)
 
-    def _on_open_as_selection(self):
-        self.dialog.open_group_as_selection(self.group)
+    def _on_select_all(self):
+        # Check the keep check box of every image of the group, so all of
+        # them are kept (`set_kept` records the state for rebuilds and
+        # expands the row when kept images are hidden behind the "+N more"
+        # tile). An ignored group's kept state is not changed from the
+        # header: like the action buttons, it never acts on ignored
+        # groups.
+        if self.ignored:
+            return
+        self.set_kept({_member_image(member).path
+                       for member in _group_members(self.group)})
 
     def _populate(self):
         button_group = QButtonGroup(self.box)

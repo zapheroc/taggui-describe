@@ -855,8 +855,7 @@ class MainWindow(QMainWindow):
     def select_image_paths(self, paths: list):
         """Select the images at `paths` (a list of `Path`) in the image
         list, driving the multi-image grid preview and the grouped tag
-        view. Called by the Find Duplicates dialog ("Open as selection" /
-        "Open in image list")."""
+        view. Called by the Find Duplicates dialog ("Open in image list")."""
         from pathlib import Path
         selected_paths = set(paths)
         # The image list shows the filtered images; select the proxy rows

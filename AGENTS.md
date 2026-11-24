@@ -559,20 +559,30 @@ every kept one, when a group keeps several.
   the viewport's — the helper resizes it now (viewport width × layout
   height, the scroll area's own target, which its later pass then
   recomputes as a no-op).
-- **Open as selection** — selects the group's images in the main window's
-  image list via the dialog's `select_paths_callback`
-  (`MainWindow.select_image_paths`), driving the multi-image grid preview
-  and the grouped tag view for tag consolidation before pruning.
+- **Select all** — a button in each group's header, shown **only in Near
+  Duplicates mode** (the Duplicates mode keeps exactly one image via the
+  exclusive "Keep" radio, so it has no such button). It checks the "Keep"
+  check box of **every** image of the group, so all of them are kept —
+  via `set_kept`, which records the state for rebuilds and expands the
+  "+N more" row when kept images are hidden behind it — and never touches
+  the main window's image list. An ignored group's kept state is not
+  changed by it (like the action buttons, it never acts on ignored
+  groups).
 - **Keep picker** — the whole card is clickable: `_DuplicateCard`
-  emits `clicked` on a left press anywhere on the card except inside the
-  thumbnail zone registered via `set_preview_zone`, and `_build_card`
-  connects it to the card's keep widget (Duplicates mode: checking the
-  exclusive `Keep` radio — the per-group `QButtonGroup` does the rest;
-  Near Duplicates mode: toggling the `Keep` check box; the card shows a
-  hand cursor over its whole area). A left press on the thumbnail label
-  opens the preview and then propagates to the card (a `QLabel` ignores
-  mouse presses), where the zone check swallows it — so a thumbnail click
-  never changes the kept state.
+  emits `clicked(bool)` on a left press anywhere on the card except inside
+  the thumbnail zone registered via `set_preview_zone` (the argument is
+  whether Shift was held), and `_build_card` connects it to
+  `_on_keep_card_clicked` (Duplicates mode: checking the exclusive `Keep`
+  radio — the per-group `QButtonGroup` does the rest; Near Duplicates mode:
+  toggling the `Keep` check box; the card shows a hand cursor over its whole
+  area). In Near Duplicates mode a press with Shift held makes that image
+  the group's *only* kept image (`group_cards.set_kept({path})` — the
+  others' check boxes are unchecked, a no-op when it already is the only
+  kept one); in Duplicates mode a plain click already selects exactly one,
+  so Shift has no extra effect. A left press on the thumbnail label opens
+  the preview and then propagates to the card (a `QLabel` ignores mouse
+  presses), where the zone check swallows it — so a thumbnail click never
+  changes the kept state.
 - **Preview** — clicking a thumbnail opens `_PreviewDialog`, which reuses
   the shared `ImageViewer` with a standalone `_GroupImagesModel` (the
   `Image` via `UserRole`, its `thumbnail` `QIcon` via `DecorationRole` —
