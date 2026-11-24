@@ -16,7 +16,7 @@ from utils.utils import pluralize
 
 # The version of the database schema currently in use. A database that was
 # created (or last upgraded) at version N has `PRAGMA user_version` set to N.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # The size (in bytes) of the chunks read when computing content hashes.
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -82,7 +82,10 @@ _MIGRATIONS = [
     # Version 4.
     #
     # The Find Duplicates dialog's Near Duplicates mode: the perceptual
-    # hashes and the user's ignored pairs/groups.
+    # hashes and the user's ignored groups. (An earlier build of this step
+    # also created the `ignored_similarity_pairs` table — the pairwise
+    # "never group these two together" exclusions, which the dialog no
+    # longer has; version 5 drops it again.)
     #
     # One 256-bit pHash per distinct image content. The hash is the 64-
     # character hex form of the integer (a 256-bit value does not fit in a
@@ -105,14 +108,6 @@ _MIGRATIONS = [
          'phash         TEXT NOT NULL, '
          'phash_mirror  TEXT, '
          'phash_version INTEGER NOT NULL)'),
-        # Pairwise exclusions: "these two images must never be grouped
-        # together". Pairs are stored with hash_a < hash_b (the accessors
-        # normalize); pairwise, not opaque groups, because the groups
-        # themselves change with the slider/model/dataset.
-        ('CREATE TABLE IF NOT EXISTS ignored_similarity_pairs ('
-         'hash_a TEXT NOT NULL, '
-         'hash_b TEXT NOT NULL, '
-         'PRIMARY KEY (hash_a, hash_b))'),
         # Mode/threshold-specific group dismissal: `group_key` is
         # 'phash:<threshold>:<seed_hash>' in Near Duplicates mode (so
         # ignoring a group at one threshold does not hide it at another) or
@@ -124,6 +119,17 @@ _MIGRATIONS = [
          'seed_hash     TEXT NOT NULL, '
          'mode          TEXT NOT NULL, '
          'threshold_key TEXT NOT NULL)'),
+    ),
+    # Version 5.
+    #
+    # The Find Duplicates dialog lost its pairwise "ignore this pair"
+    # feature (keeping several images of a near-duplicate group replaced
+    # it): the `ignored_similarity_pairs` table of the earlier version-4
+    # build is dropped. Databases that migrated to the current version 4
+    # never had the table (this code's version-4 step does not create
+    # it), so the drop is a no-op for them.
+    (
+        'DROP TABLE IF EXISTS ignored_similarity_pairs',
     ),
 ]
 
@@ -853,7 +859,7 @@ def get_database_tag_names(db_path: Path) -> list[str]:
 
 
 # --- Find Duplicates (Near Duplicates mode): the perceptual hash cache
-# and the ignored pairs/groups.
+# and the ignored groups.
 #
 # These are plain module functions taking a `db_path` (like
 # `get_database_tag_names`), so they are storage-agnostic: the similarity
@@ -957,53 +963,6 @@ def load_phashes(db_path: Path) -> dict[str, tuple[str, str | None, int]]:
         connection.close()
 
 
-def load_ignored_pairs(db_path: Path) -> list[tuple[str, str]]:
-    """
-    The ignored similarity pairs of the database at `db_path`, as
-    (hash_a, hash_b) with hash_a < hash_b.
-    """
-    connection = _connect(db_path)
-    try:
-        return [(row[0], row[1]) for row in connection.execute(
-            'SELECT hash_a, hash_b FROM ignored_similarity_pairs')]
-    finally:
-        connection.close()
-
-
-def store_ignored_pair(db_path: Path, hash_a: str, hash_b: str) -> None:
-    """
-    Ignore the pair of images with the given content hashes (they must
-    never be grouped together). The order of the two hashes does not
-    matter; they are stored with hash_a < hash_b.
-    """
-    if hash_a == hash_b:
-        return
-    first, second = (hash_a, hash_b) if hash_a < hash_b else (hash_b, hash_a)
-    connection = _connect(db_path)
-    try:
-        with connection:
-            connection.execute(
-                'INSERT OR IGNORE INTO ignored_similarity_pairs '
-                '(hash_a, hash_b) VALUES (?, ?)', (first, second))
-    finally:
-        connection.close()
-
-
-def remove_ignored_pair(db_path: Path, hash_a: str, hash_b: str) -> None:
-    """Un-ignore a pair (the inverse of `store_ignored_pair`)."""
-    if hash_a == hash_b:
-        return
-    first, second = (hash_a, hash_b) if hash_a < hash_b else (hash_b, hash_a)
-    connection = _connect(db_path)
-    try:
-        with connection:
-            connection.execute(
-                'DELETE FROM ignored_similarity_pairs '
-                'WHERE hash_a = ? AND hash_b = ?', (first, second))
-    finally:
-        connection.close()
-
-
 def load_ignored_groups(db_path: Path) -> list[tuple[str, str, str, str]]:
     """
     The ignored similarity groups of the database at `db_path`, as
@@ -1051,10 +1010,9 @@ def remove_ignored_group(db_path: Path, group_key: str) -> None:
 
 def clear_group_ignores(db_path: Path) -> int:
     """
-    Delete all the rows of the `ignored_similarity_groups` and
-    `ignored_similarity_pairs` tables of the database at `db_path` (the
-    "Clear group ignores" action). The `phash` cache is kept. Return the
-    number of rows that were cleared.
+    Delete all the rows of the `ignored_similarity_groups` table of the
+    database at `db_path` (the "Clear group ignores" action). The `phash`
+    cache is kept. Return the number of rows that were cleared.
     """
     connection = _connect(db_path)
     try:
@@ -1062,12 +1020,8 @@ def clear_group_ignores(db_path: Path) -> int:
             groups = connection.execute(
                 'SELECT COUNT(*) FROM ignored_similarity_groups'
             ).fetchone()[0]
-            pairs = connection.execute(
-                'SELECT COUNT(*) FROM ignored_similarity_pairs'
-            ).fetchone()[0]
             connection.execute('DELETE FROM ignored_similarity_groups')
-            connection.execute('DELETE FROM ignored_similarity_pairs')
-        return groups + pairs
+        return groups
     finally:
         connection.close()
 
@@ -1075,8 +1029,9 @@ def clear_group_ignores(db_path: Path) -> int:
 def clear_similarity_cache(db_path: Path) -> int:
     """
     Delete all the `phash` rows of the database at `db_path` (the
-    "Clear similarity cache" action). The `ignored_*` tables are user
-    intent and are kept. Return the number of rows that were cleared.
+    "Clear similarity cache" action). The `ignored_similarity_groups`
+    table is user intent and is kept. Return the number of rows that were
+    cleared.
     """
     connection = _connect(db_path)
     try:
