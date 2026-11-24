@@ -2495,10 +2495,13 @@ class _GroupCards:
             self.open_button = QPushButton('Select all')
             self.open_button.setFont(normal_font)
             self.open_button.clicked.connect(self._on_select_all)
+        # The button (Near Duplicates mode) sits right after the ignore
+        # checkbox, left aligned: a stretch after it would push it to the
+        # far right of wide windows, out of easy reach.
         header.addWidget(self.ignore_check_box)
-        header.addStretch()
         if self.open_button is not None:
             header.addWidget(self.open_button)
+        header.addStretch()
         box_layout.addLayout(header)
 
         self.cards_scroll = QScrollArea()
