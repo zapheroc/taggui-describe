@@ -1,14 +1,18 @@
-accelerate==1.15.0
+accelerate==1.16.0
 bitsandbytes==0.50.2
 ExifRead==3.5.1
 imagesize==2.0.1
 # Fast content hashing (xxh3-128) for the image identity used by the
 # database and the thumbnail cache.
 xxhash==4.1.0
+# 256-bit perceptual hashes (pHash) for the Find Similar Images dialog.
+# Pure Python wheel (pulls in scipy and PyWavelets); imported only when the
+# dialog is used, never at startup.
+ImageHash==4.3.2
 pillow==13.0.0
 pyparsing==3.3.3
 PySide6==6.12.0
-transformers==5.22.2
+transformers==5.24.0
 
 # Florence-2
 timm==1.0.31
@@ -22,7 +26,7 @@ onnxruntime-gpu==1.32.0; platform_system != "Darwin"
 onnxruntime==1.32.0; platform_system == "Darwin"
 
 # PyTorch
-torch==2.14.1
+torch==2.15.0
 # Needed by the PixAI Tagger's custom code (`tagger_pipeline.py`).
 torchvision==0.29.2
 
@@ -37,7 +41,7 @@ torchvision==0.29.2
 
 # Install CUDA accelerated llama-cpp-python
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu132
-llama-cpp-python==0.3.37
+llama-cpp-python==0.3.38
 # CUDA runtime libraries that the CUDA build of llama-cpp-python links
 # against (libcudart.so.13, libcublas.so.13, libcublasLt.so.13). They
 # normally arrive as transitive dependencies of torch, but are pinned

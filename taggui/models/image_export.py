@@ -27,7 +27,7 @@ class ExportResult:
     failed: list[tuple[Image, str]] = field(default_factory=list)
 
 
-def _unique_name(base_name: str, used_names: set[str]) -> str:
+def unique_name(base_name: str, used_names: set[str]) -> str:
     """
     `base_name` if it is not used, otherwise the first of
     `stem_1.suffix`, `stem_2.suffix`, ... that is not used.
@@ -45,7 +45,22 @@ def _unique_name(base_name: str, used_names: set[str]) -> str:
     return f'{stem}_{number}{suffix}'
 
 
-def plan_export_names(images: list[Image], destination: Path
+def list_existing_names(destination: Path) -> set[str]:
+    """The casefolded names of the files already in `destination`.
+
+    An empty set is returned when the folder does not exist yet (or is not a
+    directory): nothing can be overwritten. Other errors (for example a
+    permission error) are deliberately not caught: silently skipping the
+    check would let a later operation overwrite files without confirmation.
+    """
+    try:
+        return {path.name.casefold() for path in destination.iterdir()}
+    except (FileNotFoundError, NotADirectoryError):
+        return set()
+
+
+def plan_export_names(images: list[Image], destination: Path,
+                      write_text_files: bool = True
                       ) -> tuple[list[tuple[Image, Path]], list[str]]:
     """
     Plan where each image will be exported to in the flat `destination`
@@ -54,7 +69,8 @@ def plan_export_names(images: list[Image], destination: Path
 
     Returns a list of (image, destination image path) pairs in input order,
     and the names of the files already in `destination` that the plan will
-    overwrite (image files and caption files).
+    overwrite (image files and, when `write_text_files` is true, the caption
+    files).
 
     Renaming only happens when two images in the export set collide: an
     exported image that matches a file already in `destination` keeps its
@@ -62,31 +78,23 @@ def plan_export_names(images: list[Image], destination: Path
     it). Name comparisons are case-insensitive so that `Cat.jpg` and
     `cat.jpg` do not collide on case-insensitive file systems.
     """
-    try:
-        existing_names = {path.name.casefold()
-                          for path in destination.iterdir()}
-    except (FileNotFoundError, NotADirectoryError):
-        # The destination does not exist yet (it is created when the export
-        # runs); nothing can be overwritten. Other errors (for example a
-        # permission error) are deliberately not caught: silently skipping
-        # the check would let the export overwrite files without the
-        # override confirmation.
-        existing_names = set()
+    existing_names = list_existing_names(destination)
     used_names = set()
     planned = []
     overrides = []
     for image in images:
-        name = _unique_name(image.path.name, used_names)
+        name = unique_name(image.path.name, used_names)
         used_names.add(name.casefold())
         destination_path = destination / name
         same_location = image.path.resolve() == destination_path.resolve()
         if not same_location:
             if name.casefold() in existing_names:
                 overrides.append(name)
-            # The caption file follows the (possibly renamed) image name.
-            text_name = f'{destination_path.stem}.txt'
-            if text_name.casefold() in existing_names:
-                overrides.append(text_name)
+            if write_text_files:
+                # The caption file follows the (possibly renamed) image name.
+                text_name = f'{destination_path.stem}.txt'
+                if text_name.casefold() in existing_names:
+                    overrides.append(text_name)
         planned.append((image, destination_path))
     return planned, overrides
 
@@ -112,10 +120,9 @@ def _export_image_file(source: Path, destination: Path,
     if mode == ExportMode.COPY:
         shutil.copy(source, destination)
     elif mode == ExportMode.SYMLINK:
-        # A relative link stays valid if the export folder is moved along
-        # with the source folder.
-        destination.symlink_to(
-            os.path.relpath(source, destination.parent))
+        # Always write an absolute link so the link works regardless of
+        # where the export folder (or the source) is later moved.
+        destination.symlink_to(source.resolve())
     elif mode == ExportMode.HARDLINK:
         os.link(source, destination)
     else:
@@ -123,12 +130,14 @@ def _export_image_file(source: Path, destination: Path,
 
 
 def export_images(images: list[Image], tag_separator: str, destination: Path,
-                  mode: ExportMode | str = ExportMode.COPY) -> ExportResult:
+                  mode: ExportMode | str = ExportMode.COPY,
+                  write_text_files: bool = True) -> ExportResult:
     """
     Export the given images (in input order) to the flat `destination`
     folder: each image is copied, symlinked, or hard linked according to
-    `mode`, and an image with tags or a description gets a caption file
-    written next to its exported copy, in the standard format.
+    `mode`, and — when `write_text_files` is true — an image with tags or a
+    description gets a caption file written next to its exported copy, in
+    the standard format.
 
     The destination folder is created if it does not exist; a failure to
     create it raises `OSError`. Failures on individual images do not stop
@@ -140,18 +149,19 @@ def export_images(images: list[Image], tag_separator: str, destination: Path,
         raise OSError(f'Failed to create the output folder '
                       f'{destination}: {exception}') from exception
     mode = ExportMode(mode)
-    planned, _ = plan_export_names(images, destination)
+    planned, _ = plan_export_names(images, destination, write_text_files)
     result = ExportResult()
     for image, destination_path in planned:
         try:
             _export_image_file(image.path, destination_path, mode)
-            if image.tags or image.description:
-                text_file_path = write_caption_file(
-                    destination_path, image.tags, image.description,
-                    tag_separator)
-                result.written_text_files.append(text_file_path)
-            else:
-                result.skipped_text_files += 1
+            if write_text_files:
+                if image.tags or image.description:
+                    text_file_path = write_caption_file(
+                        destination_path, image.tags, image.description,
+                        tag_separator)
+                    result.written_text_files.append(text_file_path)
+                else:
+                    result.skipped_text_files += 1
             # Only an image whose image file *and* caption file (if it has
             # tags or a description) were written counts as exported.
             result.exported_images.append(destination_path)

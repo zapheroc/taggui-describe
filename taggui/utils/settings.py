@@ -38,6 +38,31 @@ DEFAULT_SETTINGS = {
     # Location of the database file. Empty means the platform-appropriate
     # default location.
     'database_path': '',
+    # Find Duplicates dialog (Tools -> Find Duplicates...).
+    # Which images a scan covers; values are the Scope enum's.
+    'duplicate_scan_scope': 'All images',
+    # Which image to keep in each group when "Apply to all groups" is used.
+    'duplicate_keep_rule': 'Largest resolution',
+    # When deleting/moving/tagging the non-kept copies of a group, first copy
+    # their tags to the kept image (text-file mode only; in database mode the
+    # copies share one tag record).
+    'duplicate_merge_tags': False,
+    # The Find Duplicates dialog's mode: 'Duplicates' (byte-for-byte
+    # identical content; an instant in-memory scan, run automatically when
+    # the dialog opens) or 'Near Duplicates' (256-bit perceptual hash; the
+    # scan decodes the uncached images, so it waits for a Scan press).
+    'similarity_mode': 'Duplicates',
+    # Maximum pHash difference (0-100; 6 is the default, 8 conservative,
+    # 28 broad) for an image to join a near-duplicate group.
+    'similarity_phash_max_distance': 6,
+    # When enabled, a second hash of each image's left-right mirrored
+    # version is compared too, so mirrored variants are matched (the card
+    # then shows "mirrored: N / 256"). pHash is not mirror-invariant, so
+    # this is off by default.
+    'similarity_match_mirrored': False,
+    # Whether the Find Duplicates dialog shows ignored groups (in black
+    # and white) or hides them entirely.
+    'similarity_show_ignored': True,
     # Maximum size of the on-disk thumbnail cache (see
     # `utils/thumbnail_cache.py`), in MiB. Entries are regenerated from the
     # images when evicted, so this only bounds disk usage. 4 GiB holds the

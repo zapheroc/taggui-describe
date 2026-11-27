@@ -15,6 +15,41 @@ class TagCounterModel(QAbstractListModel):
         self.tag_counter = Counter()
         self.most_common_tags = []
         self.all_tags_list = None
+        # While a captioning run is in flight, the per-caption updates in
+        # `count_tags` / `apply_tag_delta` refresh the counts without
+        # resetting the model. The All Tags view reset re-lays out every tag
+        # row (tens of milliseconds with a large tag vocabulary), and the
+        # user is watching the captioning console, not the All Tags list,
+        # while a run is in flight, so the view is updated once, at the end
+        # of the run (`flush_view_reset`) or when the user interacts with
+        # the All Tags pane. The main window sets the flag for the duration
+        # of a run (see `AutoCaptioner.is_captioning_changed`).
+        self.defer_view_reset = False
+        self._view_reset_pending = False
+
+    def _notify_all_tags_view(self):
+        """
+        Refresh the All Tags view for the new `most_common_tags`, or mark
+        it stale while a captioning run defers the reset (see
+        `defer_view_reset`). While deferred, the view keeps showing the
+        counts and order of the last reset until `flush_view_reset` runs.
+        """
+        if self.defer_view_reset:
+            self._view_reset_pending = True
+        else:
+            self.beginResetModel()
+            self.endResetModel()
+
+    def flush_view_reset(self):
+        """
+        Apply the All Tags view reset deferred by a captioning run, if
+        one is pending. A no-op when nothing is deferred, so it is cheap
+        to call from every interaction with the All Tags pane.
+        """
+        if self._view_reset_pending:
+            self._view_reset_pending = False
+            self.beginResetModel()
+            self.endResetModel()
 
     def rowCount(self, parent=None) -> int:
         return len(self.most_common_tags)
@@ -38,6 +73,10 @@ class TagCounterModel(QAbstractListModel):
         new_tag = value
         if not new_tag or role != Qt.ItemDataRole.EditRole:
             return False
+        # The commit can land while a captioning run has deferred the view
+        # reset: apply it first so the selected rows (and the edited one)
+        # still map to the tags the user was looking at.
+        self.flush_view_reset()
         old_tag = self.data(index, Qt.ItemDataRole.EditRole)
         if new_tag == old_tag:
             return False
@@ -68,12 +107,11 @@ class TagCounterModel(QAbstractListModel):
 
     @Slot()
     def count_tags(self, images: list[Image]):
-        self.beginResetModel()
         self.tag_counter.clear()
         for image in images:
             self.tag_counter.update(image.tags)
         self.most_common_tags = self.tag_counter.most_common()
-        self.endResetModel()
+        self._notify_all_tags_view()
 
     def apply_tag_delta(self, old_tags: list[str], new_tags: list[str]):
         """
@@ -90,6 +128,5 @@ class TagCounterModel(QAbstractListModel):
             else:
                 del self.tag_counter[tag]
         self.tag_counter.update(new_tags)
-        self.beginResetModel()
         self.most_common_tags = self.tag_counter.most_common()
-        self.endResetModel()
+        self._notify_all_tags_view()

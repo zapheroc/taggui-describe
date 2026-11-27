@@ -12,10 +12,11 @@ import xxhash
 from utils.image import Image
 from utils.settings import (DEFAULT_SETTINGS, get_settings,
                             get_tag_separator)
+from utils.utils import pluralize
 
 # The version of the database schema currently in use. A database that was
 # created (or last upgraded) at version N has `PRAGMA user_version` set to N.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # The size (in bytes) of the chunks read when computing content hashes.
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -77,6 +78,58 @@ _MIGRATIONS = [
          'ctime_ns INTEGER NOT NULL, '
          'inode    INTEGER NOT NULL, '
          'hash     TEXT    NOT NULL)'),
+    ),
+    # Version 4.
+    #
+    # The Find Duplicates dialog's Near Duplicates mode: the perceptual
+    # hashes and the user's ignored groups. (An earlier build of this step
+    # also created the `ignored_similarity_pairs` table — the pairwise
+    # "never group these two together" exclusions, which the dialog no
+    # longer has; version 5 drops it again.)
+    #
+    # One 256-bit pHash per distinct image content. The hash is the 64-
+    # character hex form of the integer (a 256-bit value does not fit in a
+    # SQLite INTEGER, which would silently overflow to a REAL); it is keyed
+    # by the content hash, so it is correct by construction when files
+    # change (a new content is a new key) and it needs no mtime/size fields.
+    # There is deliberately no foreign key to `images`: in text-file
+    # storage mode no `images` record exists for the content (the tags stay
+    # in the caption files), and orphan rows (records cleared, content gone
+    # from the dataset) are bounded and removed by "Clear similarity cache".
+    # `phash_mirror` is the hash of the left-right mirrored image (the
+    # optional "match mirrored versions" setting); it is NULL until a scan
+    # with that option on has computed it, and it is keyed by the same
+    # content hash, so it needs no invalidation of its own.
+    # `phash_version` distinguishes hash algorithms/parameters: rows with
+    # an old version are recomputed instead of compared.
+    (
+        ('CREATE TABLE IF NOT EXISTS phash ('
+         'hash          TEXT PRIMARY KEY, '
+         'phash         TEXT NOT NULL, '
+         'phash_mirror  TEXT, '
+         'phash_version INTEGER NOT NULL)'),
+        # Mode/threshold-specific group dismissal: `group_key` is
+        # 'phash:<threshold>:<seed_hash>' in Near Duplicates mode (so
+        # ignoring a group at one threshold does not hide it at another) or
+        # 'exact:<content_hash>' in Duplicates mode. `mode` is the dialog's
+        # mode name ('Duplicates' / 'Near Duplicates'); `threshold_key` is
+        # the slider value that produced the group ('' in Duplicates mode).
+        ('CREATE TABLE IF NOT EXISTS ignored_similarity_groups ('
+         'group_key     TEXT PRIMARY KEY, '
+         'seed_hash     TEXT NOT NULL, '
+         'mode          TEXT NOT NULL, '
+         'threshold_key TEXT NOT NULL)'),
+    ),
+    # Version 5.
+    #
+    # The Find Duplicates dialog lost its pairwise "ignore this pair"
+    # feature (keeping several images of a near-duplicate group replaced
+    # it): the `ignored_similarity_pairs` table of the earlier version-4
+    # build is dropped. Databases that migrated to the current version 4
+    # never had the table (this code's version-4 step does not create
+    # it), so the drop is a no-op for them.
+    (
+        'DROP TABLE IF EXISTS ignored_similarity_pairs',
     ),
 ]
 
@@ -397,6 +450,34 @@ def _flush_hash_cache(db_path: Path) -> None:
         connection.close()
 
 
+def _prune_hash_cache(db_path: Path, paths) -> None:
+    """
+    Drop the `hash_cache` rows of the given file paths (their files were
+    removed).
+
+    Best-effort: the cache is derived data, and a stale row is harmless
+    (a file re-created at the same path has a new ctime, so it would not
+    match a cached row), so a failure is reported but never raised.
+    """
+    paths = [str(path) for path in paths]
+    if not paths:
+        return
+    connection = _connect(db_path)
+    try:
+        with connection:
+            # `executemany` with one parameter per path avoids the limit on
+            # the number of bound parameters of a single `IN (...)` clause.
+            connection.executemany(
+                'DELETE FROM hash_cache WHERE path = ?',
+                [(path,) for path in paths])
+    except (OSError, sqlite3.Error) as exception:
+        print(f'Failed to prune the hash cache rows of '
+              f'{len(paths)} {pluralize("path", len(paths))} '
+              f'(first: {paths[0]}): {exception}', file=sys.stderr)
+    finally:
+        connection.close()
+
+
 def _resolve_content_hash(connection: sqlite3.Connection, image_path: Path,
                           file_stat: os.stat_result) -> str:
     """
@@ -449,12 +530,44 @@ class ImageStorage(ABC):
     def save_image(self, image: Image) -> None:
         """Save the tags and description of one image."""
 
+    def save_images(self, images: list[Image]) -> list[Image]:
+        """
+        Save the tags and descriptions of several images, and return the
+        images that could not be saved (an empty list when all were saved).
+
+        The default saves one image at a time and collects the failures, so
+        backends keep working when only `save_image` is implemented (the
+        text-file backend uses it: one caption file per image is the format).
+        `SqliteStorage` overrides it to write all the records in a single
+        atomic transaction.
+        """
+        failed = []
+        for image in images:
+            try:
+                self.save_image(image)
+            except (OSError, sqlite3.Error) as exception:
+                print(f'Failed to save tags for {image.path}: {exception}',
+                      file=sys.stderr)
+                failed.append(image)
+        return failed
+
     def flush_hash_cache(self) -> None:
         """
         Write any pending derived data computed during a directory load.
 
         A no-op for backends without a derived cache; called by the model
         when a directory load completes, on the GUI thread.
+        """
+
+    def prune_hash_cache(self, paths) -> None:
+        """
+        Drop the derived cache entries of the given file paths (their files
+        were removed).
+
+        Best-effort and a no-op for backends without such a cache (or when
+        there is nothing to prune): the cache is derived data, so failing to
+        prune it must never matter. Called by the model after a directory
+        refresh removed files, on the GUI thread.
         """
 
 
@@ -507,6 +620,10 @@ class TextFileStorage(ImageStorage):
         (see `_flush_hash_cache`).
         """
         _flush_hash_cache(self.db_path)
+
+    def prune_hash_cache(self, paths) -> None:
+        """Drop the `hash_cache` rows of the given (removed) files."""
+        _prune_hash_cache(self.db_path, paths)
 
 
 class SqliteStorage(ImageStorage):
@@ -597,12 +714,93 @@ class SqliteStorage(ImageStorage):
         finally:
             connection.close()
 
+    def save_images(self, images: list[Image]) -> list[Image]:
+        """
+        Save several images' records with one connection and one all-or-
+        nothing transaction.
+
+        `save_image` pays a connect + commit per image, which dominates a
+        batch operation over thousands of images. The statements are the
+        same as `_upsert_image`'s, just batched: upsert the records, remove
+        the old tag assignments, register the new tag names (rows are never
+        deleted — suggestions rely on them), resolve the names' ids in one
+        query, insert the assignments. A failure rolls the whole batch back
+        and all the input images are reported as failed.
+
+        Loaded images that share a content (duplicate copies) share one
+        record: the last one seen wins, as with sequential `save_image`
+        calls.
+        """
+        entries = []
+        failed = []
+        for image in images:
+            # Hashing is file I/O, not part of the atomic write: resolve it
+            # before opening the transaction.
+            try:
+                content_hash = (image.content_hash
+                                or compute_content_hash(image.path))
+            except OSError:
+                failed.append(image)
+                continue
+            entries.append((content_hash, image.tags, image.description))
+        if not entries:
+            return failed
+        by_hash = {}
+        for entry in entries:
+            by_hash[entry[0]] = entry
+        entries = list(by_hash.values())
+        connection = _connect(self.db_path)
+        try:
+            with connection:
+                connection.executemany(
+                    'INSERT INTO images (hash, description) VALUES (?, ?) '
+                    'ON CONFLICT (hash) DO UPDATE SET '
+                    'description = excluded.description',
+                    [(content_hash, description)
+                     for content_hash, _, description in entries])
+                connection.executemany(
+                    'DELETE FROM image_tags WHERE image_hash = ?',
+                    [(content_hash,) for content_hash, _, _ in entries])
+                tag_names = set()
+                for _, tags, _ in entries:
+                    tag_names.update(tags)
+                name_to_id = {}
+                if tag_names:
+                    connection.executemany(
+                        'INSERT OR IGNORE INTO tags (name) VALUES (?)',
+                        [(name,) for name in tag_names])
+                    # SQLite's bound-parameter limit: chunk the IN list.
+                    names = list(tag_names)
+                    for start in range(0, len(names), 999):
+                        chunk = names[start:start + 999]
+                        name_to_id.update(connection.execute(
+                            'SELECT name, id FROM tags '
+                            'WHERE name IN (' + ','.join('?' * len(chunk))
+                            + ')', chunk))
+                connection.executemany(
+                    'INSERT INTO image_tags (image_hash, tag_id, position) '
+                    'VALUES (?, ?, ?)',
+                    [(content_hash, name_to_id[tag], position)
+                     for content_hash, tags, _ in entries
+                     for position, tag in enumerate(tags)])
+        except (OSError, sqlite3.Error):
+            # The `with connection` context manager rolled the batch back;
+            # report every input image as unsaved.
+            return list(images)
+        finally:
+            connection.close()
+        return failed
+
     def flush_hash_cache(self) -> None:
         """
         Write the `hash_cache` rows buffered during the directory load
         (see `_flush_hash_cache`).
         """
         _flush_hash_cache(self.db_path)
+
+    def prune_hash_cache(self, paths) -> None:
+        """Drop the `hash_cache` rows of the given (removed) files."""
+        _prune_hash_cache(self.db_path, paths)
 
 
 def clear_database(db_path: Path) -> int:
@@ -656,6 +854,202 @@ def get_database_tag_names(db_path: Path) -> list[str]:
     try:
         return [row[0] for row in connection.execute(
             'SELECT name FROM tags ORDER BY name')]
+    finally:
+        connection.close()
+
+
+# --- Find Duplicates (Near Duplicates mode): the perceptual hash cache
+# and the ignored groups.
+#
+# These are plain module functions taking a `db_path` (like
+# `get_database_tag_names`), so they are storage-agnostic: the similarity
+# scan works in both storage modes, and in text-file mode they touch only
+# the `phash` / `ignored_*` tables — never `images`, `tags` or
+# `image_tags` (the D1 rule).
+
+# The `phash` rows computed by a similarity scan are written in batches
+# rather than one commit per image: the scan computes the hashes in worker
+# threads, and a per-image commit would make them contend for the database's
+# single write lock (the same reason the `hash_cache` rows are batched).
+# The buffer is module-global like the hash-cache buffer; its rows are
+# content-addressed and `INSERT OR REPLACE` is idempotent, so flushing from
+# a fresh connection (the scan is the only writer) is always safe.
+_phash_pending: list[tuple] = []
+_phash_pending_lock = threading.Lock()
+_PHASH_FLUSH_THRESHOLD = 256
+
+
+def _flush_phash_buffer(db_path: Path) -> None:
+    """
+    Write the pending `phash` rows in a single transaction.
+
+    Best-effort: on a write failure the rows are re-queued (so they are not
+    lost and are retried on the next flush) and the error is not propagated,
+    because the scan's result does not depend on the cache write — the rows
+    are derived data and are simply recomputed on the next scan if the write
+    never happens.
+    """
+    with _phash_pending_lock:
+        if not _phash_pending:
+            return
+        rows = _phash_pending[:]
+        _phash_pending.clear()
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.executemany(
+                'INSERT INTO phash (hash, phash, phash_mirror, '
+                'phash_version) VALUES (?, ?, ?, ?) '
+                'ON CONFLICT (hash) DO UPDATE SET phash = excluded.phash, '
+                'phash_version = excluded.phash_version, '
+                # The mirror is merged only at the same version: a row
+                # written by a non-mirror scan must not wipe a stored
+                # mirror, but a version change (a hash algorithm bump)
+                # makes the stored mirror stale, so the new row's mirror
+                # (None for a non-mirror scan) replaces it.
+                'phash_mirror = CASE '
+                'WHEN excluded.phash_version = phash.phash_version THEN '
+                'COALESCE(excluded.phash_mirror, phash.phash_mirror) '
+                'ELSE excluded.phash_mirror END', rows)
+    except (OSError, sqlite3.Error) as exception:
+        with _phash_pending_lock:
+            _phash_pending[:0] = rows
+        print(f'Failed to write the phash cache: {exception}',
+              file=sys.stderr)
+    finally:
+        connection.close()
+
+
+def buffer_phash_row(db_path: Path, content_hash: str, phash_hex: str,
+                     phash_version: int,
+                     phash_mirror_hex: str | None = None) -> None:
+    """
+    Queue a computed `phash` row, flushing the buffer when it is full.
+
+    `phash_mirror_hex` (the mirrored image's hash, when the scan computed
+    it) is merged with `COALESCE` on conflict at the same `phash_version`,
+    so a row written without a mirror never wipes one that was computed by
+    an earlier mirror scan. A row at a different version (a hash algorithm
+    change) replaces the stored mirror — it was computed by the old
+    algorithm and is stale.
+
+    Called by the scan worker threads (which never share a connection with
+    a directory load, so the batch flush opens its own fresh connection).
+    """
+    with _phash_pending_lock:
+        _phash_pending.append(
+            (content_hash, phash_hex, phash_mirror_hex, phash_version))
+        should_flush = len(_phash_pending) >= _PHASH_FLUSH_THRESHOLD
+    if should_flush:
+        _flush_phash_buffer(db_path)
+
+
+def flush_phash_cache(db_path: Path) -> None:
+    """
+    Write the `phash` rows buffered by a similarity scan
+    (see `_flush_phash_buffer`).
+
+    Called by the scan task when it finishes (or is cancelled), so the
+    remainder of the last partial batch is not left unwritten.
+    """
+    with _phash_pending_lock:
+        pending = len(_phash_pending) > 0
+    if not pending:
+        return
+    _flush_phash_buffer(db_path)
+
+
+def load_phashes(db_path: Path) -> dict[str, tuple[str, str | None, int]]:
+    """
+    The stored perceptual hashes of the database at `db_path`: a mapping
+    content hash -> (64-character hex phash, the mirrored image's hex phash
+    or None, phash_version).
+    """
+    connection = _connect(db_path)
+    try:
+        return {row[0]: (row[1], row[2], row[3]) for row in connection.execute(
+            'SELECT hash, phash, phash_mirror, phash_version FROM phash')}
+    finally:
+        connection.close()
+
+
+def load_ignored_groups(db_path: Path) -> list[tuple[str, str, str, str]]:
+    """
+    The ignored similarity groups of the database at `db_path`, as
+    (group_key, seed_hash, mode, threshold_key).
+    """
+    connection = _connect(db_path)
+    try:
+        return [(row[0], row[1], row[2], row[3]) for row in
+                connection.execute(
+                    'SELECT group_key, seed_hash, mode, threshold_key '
+                    'FROM ignored_similarity_groups')]
+    finally:
+        connection.close()
+
+
+def store_ignored_group(db_path: Path, group_key: str, seed_hash: str,
+                        mode: str, threshold_key: str) -> None:
+    """
+    Ignore a similarity group at a specific mode and threshold
+    (`group_key` is 'phash:<threshold>:<seed_hash>').
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'INSERT OR REPLACE INTO ignored_similarity_groups '
+                '(group_key, seed_hash, mode, threshold_key) '
+                'VALUES (?, ?, ?, ?)',
+                (group_key, seed_hash, mode, threshold_key))
+    finally:
+        connection.close()
+
+
+def remove_ignored_group(db_path: Path, group_key: str) -> None:
+    """Un-ignore a group (the inverse of `store_ignored_group`)."""
+    connection = _connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                'DELETE FROM ignored_similarity_groups WHERE group_key = ?',
+                (group_key,))
+    finally:
+        connection.close()
+
+
+def clear_group_ignores(db_path: Path) -> int:
+    """
+    Delete all the rows of the `ignored_similarity_groups` table of the
+    database at `db_path` (the "Clear group ignores" action). The `phash`
+    cache is kept. Return the number of rows that were cleared.
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            groups = connection.execute(
+                'SELECT COUNT(*) FROM ignored_similarity_groups'
+            ).fetchone()[0]
+            connection.execute('DELETE FROM ignored_similarity_groups')
+        return groups
+    finally:
+        connection.close()
+
+
+def clear_similarity_cache(db_path: Path) -> int:
+    """
+    Delete all the `phash` rows of the database at `db_path` (the
+    "Clear similarity cache" action). The `ignored_similarity_groups`
+    table is user intent and is kept. Return the number of rows that were
+    cleared.
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            cleared_count = connection.execute(
+                'SELECT COUNT(*) FROM phash').fetchone()[0]
+            connection.execute('DELETE FROM phash')
+        return cleared_count
     finally:
         connection.close()
 
