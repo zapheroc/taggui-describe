@@ -690,8 +690,9 @@ pick the keepers first:
   image is marked **Kept** and the others **Identical file**.
 - In **`Near Duplicates`** mode a group can keep **one or more**
   images — or none: uncheck them all to act on the whole group.
-  The cards carry **`Keep`** check boxes, checked on the group's
-  representative when the group is built, and the **`Select all`**
+  The cards carry **`Keep`** check boxes, checked on the images you
+  previously kept (or on the group's representative if you haven't
+  made any picks in the group yet), and the **`Select all`**
   button in a group's header keeps every image of the group at once.
   Each card also shows how far the image is from the representative
   (`pHash difference: N / 256`, or `mirrored: N / 256` when the
@@ -700,10 +701,21 @@ pick the keepers first:
     kept image: it is checked and every other image of the group is
     unchecked.
 - Kept images are outlined in the group.
-  Your kept choices live in the dialog only — a new scan or a mode
-  switch resets them — but they survive the rest of the dialog's
-  regrouping (toggling `Show ignored`, re-applying a threshold), so
-  you can keep adjusting picks while you work through the list.
+  In **`Near Duplicates`** mode your kept choices are **remembered by
+  the image's content** (the same hash that identifies the file for
+  [tag storage](#tag-and-description-storage)), so they survive
+  closing and reopening the dialog, switching modes, and a new scan:
+  each group is re-seeded from your remembered picks (an image you
+  explicitly kept stays kept, one you explicitly un-kept stays
+  un-kept, and otherwise the group's representative is kept). When you
+  delete or move images, their remembered picks are forgotten, so a
+  stale decision cannot resurface for a byte-identical file you load
+  later.
+  In **`Duplicates`** mode your kept choices live in the dialog only
+  — a new scan or a mode switch resets them — but they survive the
+  rest of the dialog's regrouping (toggling `Show ignored`, re-applying
+  a threshold), so you can keep adjusting picks while you work through
+  the list.
 
 **`Keep in each group`** — how the kept image is picked automatically:
 `Largest resolution`, `Largest file`, `Newest file` or `Oldest file`

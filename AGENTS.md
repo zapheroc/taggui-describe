@@ -35,7 +35,7 @@ does not):
   in-memory group-by over `Image.content_hash` plus `os.stat` — no hashing
   or file reads — and runs automatically when the dialog opens. **Near
   Duplicates** reviews groups of visually similar images via 256-bit pHash
-  (`taggui/models/similarity.py` + the schema-v5 `phash` database cache);
+  (`taggui/models/similarity.py` + the `phash` database cache);
   the scan decodes every uncached image and always waits for an explicit
   "Scan". In database storage mode exact-duplicate copies share one tag
   record, so the tag actions (tag-as-`duplicate`, tag merge) are disabled
@@ -108,7 +108,7 @@ taggui/models/image_list_model.py  Core data model: Image list, directory load,
                                    undo/redo, ALL batch tag operations, disk I/O
                                    (reads/writes go through the active storage
                                    backend; syncs duplicate-content images)
-taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate; schema v4 adds the `phash` cache (256-bit pHash + mirror, hex TEXT) and the ignored-similarity group table, v5 drops the pair table an earlier v4 build created (Find Duplicates, Near Duplicates mode)
+taggui/models/image_storage.py           Storage layer: ImageStorage ABC + TextFileStorage (.txt) and SqliteStorage (SQLite keyed by content hash); schema/migrations, content hashing, DB tag names, import/export, clear/migrate; schema v4 adds the `phash` cache (256-bit pHash + mirror, hex TEXT) and the ignored-similarity group table, v5 drops the pair table an earlier v4 build created, v6 adds the `similarity_kept_images` table the Find Duplicates dialog's Near Duplicates mode remembers its keep picks in
 taggui/models/similarity.py        pHash core for the Find Duplicates dialog's
                                     Near Duplicates mode: `compute_phash` /
                                     `compute_phash_mirrored` (ImageHash,
@@ -243,7 +243,7 @@ Fork addition: tags and descriptions do not have to live in `.txt` files.
   `MainWindow._apply_storage_backend` after a confirmed switch, which also
   reloads the directory so the in-memory data comes from the new storage).
 
-**Schema** (v5; version tracked in `PRAGMA user_version`, future changes
+**Schema** (v6; version tracked in `PRAGMA user_version`, future changes
 appended to `_MIGRATIONS`, each step in its own transaction, all DDL
 `IF NOT EXISTS` so concurrent first connections don't fail):
 
@@ -298,6 +298,21 @@ appended to `_MIGRATIONS`, each step in its own transaction, all DDL
   together" exclusions, removed with the per-pair ignore feature); the v5
   step drops it again (`DROP TABLE IF EXISTS` — a no-op for databases that
   migrated to the current v4, which never had it).
+- `similarity_kept_images(hash TEXT PRIMARY KEY, kept INTEGER NOT NULL)`
+  (v6) — the dialog's remembered keep picks (Near Duplicates mode only),
+  keyed by the image's content hash. Three states: **no row** = default
+  (kept only when the image is its group's representative), `kept = 1` =
+  the user explicitly kept it, `kept = 0` = the user explicitly un-kept it
+  (an explicit "no" that wins over the representative default). Only
+  deviations from the default are stored (one row per image the user
+  actually touched); a content back in its default state has its row
+  deleted, and the dialog's destructive actions (delete/move) remove the
+  rows of the images they act on. The dialog holds an in-memory mirror
+  (`_kept_picks`, loaded in `__init__`) and batches each group's new picks
+  into one `update_similarity_kept` connection. No foreign key to `images`,
+  like the `phash` cache and ignored groups: in text-file storage mode no
+  `images` record exists for the content, and orphan rows are bounded by
+  the destructive actions.
 
 **Semantics to preserve:**
 - `SqliteStorage.load_image` stats the file, resolves its content hash from
@@ -369,14 +384,25 @@ values):
 Both modes show each group side by side. The user picks which images to
 keep — in Duplicates mode exactly one (an exclusive "Keep" radio, the keep
 rule's pick by default); in Near Duplicates mode one or more ("Keep" check
-boxes, the group's representative by default). The kept state is in memory
-only for the dialog's lifetime (the dialog's `_kept_images` path set,
-mirrored by the cards' widgets): it survives a "Show ignored" toggle and a
-regroup (picks follow their kept images), but is cleared by a fresh scan
-or a mode switch. The actions then act on the non-kept members of each
-non-ignored group (delete to Recycle Bin, move to a folder, tag as
-`duplicate`), optionally copying their tags to the kept images first — to
-every kept one, when a group keeps several.
+boxes, the group's representative by default). The current results' kept
+state is in memory (the dialog's `_kept_images` path set, mirrored by the
+cards' widgets) and survives a "Show ignored" toggle and a regroup (picks
+follow their kept images). In **Near Duplicates mode only**, the picks are
+also **remembered in the database** (`similarity_kept_images`, schema v6 —
+the user's per-image decisions, keyed by content hash): they survive a
+close/reopen, a mode switch and a rescan (a fresh scan still clears the
+in-memory `_kept_images`, but each group's cards are re-seeded from the
+persisted picks — kept when the user explicitly kept the content, otherwise
+the representative by default, and an explicit `0` wins over the
+representative default). Only deviations from the default are stored, and
+returning an image to its default state deletes its row. The destructive
+actions (delete/move) forget the picks of the images they act on, so a
+stale decision does not resurface for a byte-identical file loaded later.
+Duplicates mode is deliberately unchanged: its picks are in-memory only
+(seeded from the keep rule) and nothing is written. The actions then act
+on the non-kept members of each non-ignored group (delete to Recycle Bin,
+move to a folder, tag as `duplicate`), optionally copying their tags to
+the kept images first — to every kept one, when a group keeps several.
 
 - **Duplicates scan** — an in-memory group-by over `Image.content_hash`
   plus one `os.stat` per image (size + `mtime_ns`, for the cards and the

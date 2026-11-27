@@ -26,7 +26,7 @@ onnxruntime-gpu==1.32.0; platform_system != "Darwin"
 onnxruntime==1.32.0; platform_system == "Darwin"
 
 # PyTorch
-torch==2.15.0
+torch==2.14.1
 # Needed by the PixAI Tagger's custom code (`tagger_pipeline.py`).
 torchvision==0.29.2
 
