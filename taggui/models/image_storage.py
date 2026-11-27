@@ -16,7 +16,7 @@ from utils.utils import pluralize
 
 # The version of the database schema currently in use. A database that was
 # created (or last upgraded) at version N has `PRAGMA user_version` set to N.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The size (in bytes) of the chunks read when computing content hashes.
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -130,6 +130,29 @@ _MIGRATIONS = [
     # it), so the drop is a no-op for them.
     (
         'DROP TABLE IF EXISTS ignored_similarity_pairs',
+    ),
+    # Version 6.
+    #
+    # The Find Duplicates dialog's Near Duplicates mode now remembers the
+    # user's keep picks (which images of each group to keep) across
+    # close/reopen, a mode switch and a rescan. A pick is a per-image
+    # decision stored by the image's content hash (so it survives a rename
+    # or a move, and the rare byte-identical copies of one content in a
+    # group share one decision): `kept` is 1 (the user kept the image) or 0
+    # (the user un-kept it — an explicit "no" that wins over the
+    # representative default). An image with no row is in its default
+    # state: kept only when it is its group's representative. Rows are
+    # written in one batch per keep toggle (the dialog's
+    # `update_similarity_kept`) and removed when an image is deleted or
+    # moved away (the dialog's destructive actions) or returns to its
+    # default state. Like the `phash` cache and the ignored groups, there
+    # is deliberately no foreign key to `images`: in text-file storage mode
+    # no `images` record exists for the content, and orphan rows are bounded
+    # by the destructive actions removing the rows of the images they touch.
+    (
+        ('CREATE TABLE IF NOT EXISTS similarity_kept_images ('
+         'hash TEXT PRIMARY KEY, '
+         'kept INTEGER NOT NULL)'),
     ),
 ]
 
@@ -1050,6 +1073,66 @@ def clear_similarity_cache(db_path: Path) -> int:
                 'SELECT COUNT(*) FROM phash').fetchone()[0]
             connection.execute('DELETE FROM phash')
         return cleared_count
+    finally:
+        connection.close()
+
+
+def load_similarity_kept(db_path: Path) -> dict[str, int]:
+    """
+    The remembered keep picks of the Find Duplicates dialog's Near
+    Duplicates mode, as {content hash: kept} (`kept` is 1 or 0 — see the
+    schema-version-6 note; an absent hash is the default state).
+    """
+    connection = _connect(db_path)
+    try:
+        return {row[0]: row[1] for row in
+                connection.execute(
+                    'SELECT hash, kept FROM similarity_kept_images')}
+    finally:
+        connection.close()
+
+
+def update_similarity_kept(db_path: Path, upserts: dict[str, int],
+                           removals: list[str]) -> None:
+    """
+    Store a group's new keep picks: upsert the {content hash: kept} rows
+    and delete the `removals` rows (the images that returned to their
+    default state), in one connection.
+    """
+    connection = _connect(db_path)
+    try:
+        with connection:
+            if upserts:
+                connection.executemany(
+                    'INSERT INTO similarity_kept_images (hash, kept) '
+                    'VALUES (?, ?) '
+                    'ON CONFLICT (hash) DO UPDATE SET kept = excluded.kept',
+                    list(upserts.items()))
+            if removals:
+                connection.executemany(
+                    'DELETE FROM similarity_kept_images WHERE hash = ?',
+                    [(hash,) for hash in removals])
+    finally:
+        connection.close()
+
+
+def remove_similarity_kept(db_path: Path,
+                           content_hashes: list[str]) -> int:
+    """
+    Forget the keep picks of the given images (their files were deleted or
+    moved away by the dialog's destructive actions). Return the number of
+    rows that were removed.
+    """
+    content_hashes = [hash for hash in content_hashes if hash is not None]
+    if not content_hashes:
+        return 0
+    connection = _connect(db_path)
+    try:
+        with connection:
+            cursor = connection.executemany(
+                'DELETE FROM similarity_kept_images WHERE hash = ?',
+                [(hash,) for hash in content_hashes])
+            return cursor.rowcount
     finally:
         connection.close()
 

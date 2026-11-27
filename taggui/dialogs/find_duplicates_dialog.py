@@ -66,7 +66,8 @@ from models.image_list_model import ImageListModel, Scope
 from models.image_storage import (
     buffer_phash_row, clear_group_ignores, clear_similarity_cache,
     flush_phash_cache, load_ignored_groups, load_phashes,
-    remove_ignored_group, store_ignored_group)
+    load_similarity_kept, remove_ignored_group, remove_similarity_kept,
+    store_ignored_group, update_similarity_kept)
 from models.similarity import (PHASH_BITS, PHASH_VERSION, ScanCancelled,
                                TooManyMatches, compute_neighbors,
                                compute_phash, compute_phash_mirrored,
@@ -867,6 +868,16 @@ class FindDuplicatesDialog(QDialog):
         # The persisted group dismissals (the dismissed group keys).
         self._ignored_groups: set = set(
             row[0] for row in load_ignored_groups(self.db_path))
+        # The remembered keep picks of the Near Duplicates mode (the
+        # `similarity_kept_images` rows, {content hash: kept}): the in-memory
+        # mirror of the database, loaded once here and kept in sync by the
+        # persist/forget methods below, so seeding a group's cards never
+        # re-queries the database. Unlike `_kept_images` (the current
+        # results' kept state, cleared by a fresh scan or a mode switch),
+        # these are the user's per-image decisions and survive both — that
+        # is what makes the picks persist across close/reopen, a mode
+        # switch and a rescan.
+        self._kept_picks: dict = load_similarity_kept(self.db_path)
         # In database storage mode the copies of an exact duplicate share
         # one tag record, so the tag actions below are disabled there in
         # Duplicates mode (near-duplicate images are different content and
@@ -1671,7 +1682,7 @@ class FindDuplicatesDialog(QDialog):
             return group.group_key
         return self._exact_group_key(group)
 
-    def _record_group_kept(self, group, kept: set):
+    def _record_group_kept(self, group, kept: set, persist: bool = False):
         """Remember a group's kept images (`_kept_images`: the dialog-wide
         set of kept image paths) so a rebuild can restore them: the cards
         are rebuilt with the recorded state (`_populate`), and a "Show
@@ -1679,11 +1690,98 @@ class FindDuplicatesDialog(QDialog):
         The group's contribution to the set is replaced: all of the
         group's members leave the set, then its kept images re-enter it.
         The groups' memberships are disjoint (each image is in at most one
-        group), so this only ever touches this group's images."""
+        group), so this only ever touches this group's images.
+
+        `persist` is set only for user-initiated changes (a keep toggle,
+        "Select all", the keep rule): it also remembers the group's picks
+        in the database (`_persist_group_kept`), Near Duplicates mode only.
+        The seeding of a group's cards and the re-application after a
+        rebuild record the state the user already set, so they leave the
+        database alone."""
         self._kept_images.difference_update(
             _member_image(member).path
             for member in _group_members(group))
         self._kept_images.update(kept)
+        if persist:
+            self._persist_group_kept(group, kept)
+
+    def _persist_group_kept(self, group, kept: set):
+        """Remember a group's kept images in the database (Near Duplicates
+        mode only), so the picks survive a close, a mode switch and a
+        rescan. Each content hash's kept state is compared to its default
+        (kept only when it is the group's representative's content — a
+        group can hold several byte-identical copies of one content, and
+        they share one decision), and the deviations are stored by the
+        image's content hash: an explicit pick is an upsert, and a content
+        back in its default state has its stored decision removed. The
+        in-memory `_kept_picks` is updated first, and the database is
+        written only when something actually changes — the common case
+        (the representative kept, nothing else) writes nothing."""
+        if self.mode != MODE_NEAR_DUPPLICATES:
+            return
+        members = _group_members(group)
+        representative_hash = _member_image(members[0]).content_hash
+        # Per content hash: is the content kept (any of its copies is)?
+        content_kept: dict = {}
+        for member in members:
+            image = _member_image(member)
+            content_hash = image.content_hash
+            if content_hash is None:
+                continue
+            if image.path in kept:
+                content_kept[content_hash] = True
+            else:
+                content_kept.setdefault(content_hash, False)
+        upserts = {}
+        removals = []
+        for content_hash, is_kept in content_kept.items():
+            is_default = (content_hash == representative_hash)
+            if is_kept != is_default:
+                upserts[content_hash] = 1 if is_kept else 0
+            elif content_hash in self._kept_picks:
+                # Back in the default state: forget the stored decision.
+                removals.append(content_hash)
+                del self._kept_picks[content_hash]
+        for content_hash, value in upserts.items():
+            self._kept_picks[content_hash] = value
+        if upserts or removals:
+            update_similarity_kept(self.db_path, upserts, removals)
+
+    def _seed_near_kept(self, members, representative) -> set:
+        """A near-duplicate group's kept images from the remembered picks
+        (`_kept_picks`) when its cards are first built: an image is kept
+        when the user explicitly kept it (a `1` row), or — with no stored
+        decision — when it is the group's representative (the default kept
+        image). An explicitly un-kept image (a `0` row) is not kept even
+        when it is the representative."""
+        kept = set()
+        representative_path = _member_image(representative).path
+        for member in members:
+            image = _member_image(member)
+            decision = self._kept_picks.get(image.content_hash)
+            if decision == 1:
+                kept.add(image.path)
+            elif decision is None and image.path == representative_path:
+                kept.add(image.path)
+        return kept
+
+    def _forget_kept_picks(self, content_hashes) -> None:
+        """Forget the remembered picks of the given images (their files
+        were deleted or moved away by a destructive action), so a stale
+        decision does not resurface if a byte-identical file is loaded
+        later. Updates the in-memory `_kept_picks` and the database.
+
+        Near Duplicates mode only: in Duplicates mode no picks are stored,
+        and deleting one exact copy does not invalidate a pick about the
+        other surviving copies of the same content."""
+        if self.mode != MODE_NEAR_DUPPLICATES:
+            return
+        content_hashes = [hash for hash in content_hashes if hash is not None]
+        if not content_hashes:
+            return
+        remove_similarity_kept(self.db_path, content_hashes)
+        for hash in content_hashes:
+            self._kept_picks.pop(hash, None)
 
     def _restore_keeper_selections(self):
         """Re-apply the kept images (see `_record_group_kept`) to the
@@ -1694,13 +1792,15 @@ class FindDuplicatesDialog(QDialog):
         already built with the recorded state in `_populate` (which seeds
         a group's default when it has none recorded), so this only does
         real work for a kept image hidden behind a group's "+N more"
-        tile — whose `set_kept` expands the row first."""
+        tile — whose `set_kept` expands the row first. This is a
+        re-application of the state the user already set (persisted when
+        the change was made), so it does not touch the database."""
         for group_cards in self._group_cards:
             kept = {_member_image(member).path
                     for member in _group_members(group_cards.group)
                     if _member_image(member).path in self._kept_images}
             if kept:
-                group_cards.set_kept(kept)
+                group_cards.set_kept(kept, persist=False)
 
     def _restore_scroll_anchor(self, scroll_area, old_group_cards,
                                new_group_cards, old_offset, anchor_key,
@@ -2311,6 +2411,9 @@ class FindDuplicatesDialog(QDialog):
         if not deleted:
             self.status_label.setText('Nothing was deleted.')
             return
+        # The deleted images' remembered picks are stale: forget them so a
+        # byte-identical file loaded later starts from its default state.
+        self._forget_kept_picks(member.content_hash for member in targets)
         self._finish_destructive_action(
             f'Moved {len(deleted)} {pluralize("image", len(deleted))} to '
             f'the Recycle Bin.')
@@ -2343,6 +2446,9 @@ class FindDuplicatesDialog(QDialog):
         if not moved:
             self.status_label.setText('Nothing was moved.')
             return
+        # The moved images' remembered picks are stale: forget them so a
+        # byte-identical file loaded later starts from its default state.
+        self._forget_kept_picks(member.content_hash for member in targets)
         self._finish_destructive_action(
             f'Moved {len(moved)} {pluralize("image", len(moved))} to '
             f'{destination}.')
@@ -2607,7 +2713,14 @@ class _GroupCards:
         kept = self.dialog._kept_images & group_paths
         if group_key not in self.dialog._kept_initialized:
             if not kept:
-                kept = {self.keep_member.path}
+                if self.dialog.mode == MODE_NEAR_DUPPLICATES:
+                    # The remembered picks (the dialog's `_kept_picks`),
+                    # with the representative kept by default when it has
+                    # no stored decision — the picks survive a rescan.
+                    kept = self.dialog._seed_near_kept(
+                        members, self.keep_member)
+                else:
+                    kept = {self.keep_member.path}
             self.dialog._record_group_kept(self.group, kept)
             self.dialog._kept_initialized.add(group_key)
         for position, member in enumerate(shown):
@@ -2657,10 +2770,11 @@ class _GroupCards:
         # A keep widget changed state (the user toggled a check box, or the
         # exclusive radio group re-checked the radios). The group's kept
         # images are now exactly its checked widgets, so the dialog's kept
-        # set is rebuilt from them.
+        # set is rebuilt from them and the picks are remembered in the
+        # database (Near Duplicates mode).
         kept = {_member_image(m).path
                 for widget, m in self.keep_widgets if widget.isChecked()}
-        self.dialog._record_group_kept(self.group, kept)
+        self.dialog._record_group_kept(self.group, kept, persist=True)
         if checked:
             # The checked widget's image is remembered as the group's
             # keeper for the relation labels (Duplicates mode).
@@ -2700,26 +2814,47 @@ class _GroupCards:
             info_label.setText(self.dialog._card_info_text(
                 _member_image(member)))
 
-    def set_kept(self, kept: set):
+    def set_kept(self, kept: set, persist: bool = True):
         """Make the given image paths (a set) the group's kept images: the
         matching widgets are checked, the rest unchecked, and the kept set
         is recorded on the dialog (`_record_group_kept`) so a rebuild can
-        restore it. A group with none of its images in `kept` is left
-        alone. A kept image hidden behind the "+N more" tile expands the
-        row first (the re-populate re-applies the recorded state)."""
+        restore it — and, for user-initiated changes (`persist`, the
+        default), remembered in the database. A group with none of its
+        images in `kept` is left alone. A kept image hidden behind the
+        "+N more" tile expands the row first (the re-populate re-applies
+        the recorded state).
+
+        The checks are applied with the widgets' signals blocked, so the
+        per-widget `toggled` handlers do not fire on the intermediate
+        states: the final kept set is recorded (and persisted) exactly
+        once, and the handlers' post-processing (the keeper for the
+        relation labels, the kept outlines) runs once for the final state
+        instead."""
         group_paths = {_member_image(member).path
                        for member in _group_members(self.group)}
         kept = set(kept) & group_paths
         if not kept:
             return
-        self.dialog._record_group_kept(self.group, kept)
+        self.dialog._record_group_kept(self.group, kept, persist=persist)
         shown_paths = {_member_image(member).path
                        for _widget, member in self.keep_widgets}
         if not kept <= shown_paths:
             self.expand()
             return
+        for widget, _member in self.keep_widgets:
+            widget.blockSignals(True)
+        try:
+            for widget, member in self.keep_widgets:
+                widget.setChecked(_member_image(member).path in kept)
+        finally:
+            for widget, _member in self.keep_widgets:
+                widget.blockSignals(False)
+        # The toggled handlers are blocked, so do their post-processing
+        # once for the final state.
         for widget, member in self.keep_widgets:
-            widget.setChecked(_member_image(member).path in kept)
+            if widget.isChecked():
+                self.keep_member = _member_image(member)
+        self.update_relations()
 
     def expand(self):
         if self.expanded:
