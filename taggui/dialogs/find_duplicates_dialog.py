@@ -2248,6 +2248,9 @@ class FindDuplicatesDialog(QDialog):
         group_cards.ignored = ignored
         group_cards.cards_scroll.setEnabled(not ignored)
         group_cards.update_relations()
+        # The group's own action buttons follow (they never act on an
+        # ignored group).
+        group_cards._update_action_buttons()
         if ignored and not self.show_ignored_check_box.isChecked():
             # "Show ignored" is off: the group is not shown at all, so it
             # is hidden in place right away (see `_hide_group_cards`).
@@ -2280,28 +2283,35 @@ class FindDuplicatesDialog(QDialog):
                                    self._tag_counts, self._stats)
             group_cards.set_kept({keeper.path})
 
+    def _keeper_pair(self, group_cards):
+        """Return (kept images, [non-kept images]) for one group — or
+        `None` when the group is ignored or keeps all of its images
+        (nothing to act on). Includes images hidden behind the group's
+        "+N more" tile."""
+        if group_cards.ignored:
+            return None
+        kept = {_member_image(member).path
+                for member in _group_members(group_cards.group)
+                if _member_image(member).path in self._kept_images}
+        kept_images = []
+        others = []
+        for member in _group_members(group_cards.group):
+            image = _member_image(member)
+            if image.path in kept:
+                kept_images.append(image)
+            else:
+                others.append(image)
+        if not others:
+            return None
+        return (kept_images, others)
+
     def _keeper_targets(self) -> list:
         """Return (kept images, [non-kept images]) for every shown group
-        that is not ignored. Includes images hidden behind a group's "+N
-        more" tile."""
-        pairs = []
-        for group_cards in self._group_cards:
-            if group_cards.ignored:
-                continue
-            kept = {_member_image(member).path
-                    for member in _group_members(group_cards.group)
-                    if _member_image(member).path in self._kept_images}
-            kept_images = []
-            others = []
-            for member in _group_members(group_cards.group):
-                image = _member_image(member)
-                if image.path in kept:
-                    kept_images.append(image)
-                else:
-                    others.append(image)
-            if others:
-                pairs.append((kept_images, others))
-        return pairs
+        that is not ignored (see `_keeper_pair`)."""
+        return [pair for pair in
+                (self._keeper_pair(group_cards)
+                 for group_cards in self._group_cards)
+                if pair is not None]
 
     def _tag_actions_allowed(self) -> bool:
         """Whether the tag button and the merge checkbox may be enabled: in
@@ -2325,6 +2335,10 @@ class FindDuplicatesDialog(QDialog):
         # storage mode in Duplicates mode (the copies share one tag record;
         # see __init__).
         self._update_tag_action_state()
+        # The per-group buttons follow the same "are there results" state
+        # (each group computes its own enable condition from it).
+        for group_cards in self._group_cards:
+            group_cards._update_action_buttons()
 
     # ------------------------------------------------------------------
     # Actions
@@ -2376,7 +2390,15 @@ class FindDuplicatesDialog(QDialog):
 
     @Slot()
     def delete_others(self):
-        pairs = self._keeper_targets()
+        self._perform_delete(self._keeper_targets(), None)
+
+    def _perform_delete(self, pairs, group_cards):
+        """Move the groups' non-kept images to the Recycle Bin (both the
+        dialog's global delete button and a group's own delete button go
+        through here). `pairs` are the (kept images, [non-kept images])
+        pairs to act on; `group_cards` is `None` for the global button —
+        the results are then cleared as usual — or the acted-on group,
+        which is removed from the results in place instead."""
         targets = [member for _kept, others in pairs for member in others]
         if not targets:
             self._warn_no_targets()
@@ -2414,13 +2436,24 @@ class FindDuplicatesDialog(QDialog):
         # The deleted images' remembered picks are stale: forget them so a
         # byte-identical file loaded later starts from its default state.
         self._forget_kept_picks(member.content_hash for member in targets)
-        self._finish_destructive_action(
-            f'Moved {len(deleted)} {pluralize("image", len(deleted))} to '
-            f'the Recycle Bin.')
+        summary = (f'Moved {len(deleted)} {pluralize("image", len(deleted))} '
+                   f'to the Recycle Bin.')
+        if group_cards is None:
+            self._finish_destructive_action(summary)
+        else:
+            self._finish_group_action(group_cards, summary)
 
     @Slot()
     def move_others(self):
-        pairs = self._keeper_targets()
+        self._perform_move(self._keeper_targets(), None)
+
+    def _perform_move(self, pairs, group_cards):
+        """Move the groups' non-kept images to a folder (both the
+        dialog's global move button and a group's own move button go
+        through here). `pairs` are the (kept images, [non-kept images])
+        pairs to act on; `group_cards` is `None` for the global button —
+        the results are then cleared as usual — or the acted-on group,
+        which is removed from the results in place instead."""
         targets = [member for _kept, others in pairs for member in others]
         if not targets:
             self._warn_no_targets()
@@ -2449,9 +2482,12 @@ class FindDuplicatesDialog(QDialog):
         # The moved images' remembered picks are stale: forget them so a
         # byte-identical file loaded later starts from its default state.
         self._forget_kept_picks(member.content_hash for member in targets)
-        self._finish_destructive_action(
-            f'Moved {len(moved)} {pluralize("image", len(moved))} to '
-            f'{destination}.')
+        summary = (f'Moved {len(moved)} {pluralize("image", len(moved))} '
+                   f'to {destination}.')
+        if group_cards is None:
+            self._finish_destructive_action(summary)
+        else:
+            self._finish_group_action(group_cards, summary)
 
     @Slot()
     def tag_others(self):
@@ -2534,6 +2570,39 @@ class FindDuplicatesDialog(QDialog):
         self.status_label.setText(
             f'{summary} The directory is reloading \u2014 click "Scan" '
             f'again to check for any remaining {word}.')
+
+    def _finish_group_action(self, group_cards, summary: str):
+        """The end of a per-group delete/move: remove only the acted-on
+        group from the results (in place, preserving the user's position
+        in the list), so the remaining groups can be worked through one
+        by one without a rescan. The directory is reloaded as in the
+        global actions (asynchronously, in the background) — the
+        remaining groups' cards keep showing the old model data until
+        the next scan, which is fine: every later action on them rebuilds
+        its paths and its lookup from the current model, and the kept
+        picks are keyed by the images' content."""
+        # Drop the removed group's kept state from the in-memory
+        # bookkeeping. `_kept_initialized` must lose the group's key, too:
+        # on a rescan the same group can re-form (in Near Duplicates mode
+        # the kept images may regroup with other images), and a stale key
+        # would seed the rebuilt cards with an empty kept set instead of
+        # the remembered picks.
+        self._record_group_kept(group_cards.group, set())
+        self._kept_initialized.discard(
+            self._group_key_of(group_cards.group))
+        self._hide_group_cards(group_cards)
+        self.scan_button.setEnabled(True)
+        self.clear_cache_button.setEnabled(True)
+        if callable(self.reload_callback):
+            self.reload_callback()
+        if self._groups:
+            self.status_label.setText(
+                f'{summary} The remaining groups are still shown '
+                f'\u2014 click "Scan" to refresh.')
+        else:
+            self.status_label.setText(
+                f'{summary} No groups are left \u2014 click "Scan" to '
+                f'look again.')
 
     def _warn_no_targets(self):
         if self.mode == MODE_NEAR_DUPPLICATES:
@@ -2636,12 +2705,26 @@ class _GroupCards:
             self.open_button = QPushButton('Select all')
             self.open_button.setFont(normal_font)
             self.open_button.clicked.connect(self._on_select_all)
-        # The button (Near Duplicates mode) sits right after the ignore
-        # checkbox, left aligned: a stretch after it would push it to the
-        # far right of wide windows, out of easy reach.
+        # The group's own delete/move buttons (both modes): they act on
+        # this group's non-kept images only (the same rule as the
+        # dialog's global "Other images:" buttons) and afterwards remove
+        # just this group from the results. Their state (enabled, count)
+        # is managed by `_update_action_buttons`.
+        self.group_delete_button = QPushButton('Delete')
+        self.group_delete_button.setFont(normal_font)
+        self.group_delete_button.clicked.connect(self._on_group_delete)
+        self.group_move_button = QPushButton('Move')
+        self.group_move_button.setFont(normal_font)
+        self.group_move_button.clicked.connect(self._on_group_move)
+        # The buttons (and "Select all" in Near Duplicates mode) sit right
+        # after the ignore checkbox, left aligned: a stretch after them
+        # would push them to the far right of wide windows, out of easy
+        # reach.
         header.addWidget(self.ignore_check_box)
         if self.open_button is not None:
             header.addWidget(self.open_button)
+        header.addWidget(self.group_delete_button)
+        header.addWidget(self.group_move_button)
         header.addStretch()
         box_layout.addLayout(header)
 
@@ -2686,6 +2769,43 @@ class _GroupCards:
             return
         self.set_kept({_member_image(member).path
                        for member in _group_members(self.group)})
+
+    def _on_group_delete(self):
+        # This group's delete button: act on the group's non-kept images
+        # only. The dialog's `_perform_delete` does the rest (confirmation,
+        # trash, tag merge, pick cleanup) and removes this group from the
+        # results in place.
+        pair = self.dialog._keeper_pair(self)
+        if pair is not None:
+            self.dialog._perform_delete([pair], self)
+
+    def _on_group_move(self):
+        # This group's move button (see `_on_group_delete`).
+        pair = self.dialog._keeper_pair(self)
+        if pair is not None:
+            self.dialog._perform_move([pair], self)
+
+    def _update_action_buttons(self):
+        """The group's own Delete/Move buttons: enabled while there are
+        results and the group is neither ignored nor keeps all of its
+        images; the count in the label is exactly what the buttons act on
+        (the group's non-kept images — the same targets as the dialog's
+        global "Other images:" buttons, for this group only)."""
+        non_kept = sum(1 for member in _group_members(self.group)
+                       if _member_image(member).path
+                       not in self.dialog._kept_images)
+        enabled = (self.dialog._actions_enabled and not self.ignored
+                   and non_kept > 0)
+        self.group_delete_button.setEnabled(enabled)
+        self.group_move_button.setEnabled(enabled)
+        self.group_delete_button.setText(f'Delete ({non_kept})')
+        self.group_move_button.setText(f'Move ({non_kept})')
+        self.group_delete_button.setToolTip(
+            'Move the non-kept images of this group to the Recycle Bin. '
+            'The other groups are not touched.')
+        self.group_move_button.setToolTip(
+            'Move the non-kept images of this group to a folder. '
+            'The other groups are not touched.')
 
     def _populate(self):
         button_group = QButtonGroup(self.box)
@@ -2765,6 +2885,10 @@ class _GroupCards:
         self.cards_scroll.setWidget(cards_widget)
         self.shown_count = len(shown)
         self.update_relations()
+        # The group's kept state is seeded/recorded above, so the header
+        # buttons' count and enable state are final only now (the header
+        # is built before `_populate`, when it is not yet).
+        self._update_action_buttons()
 
     def _on_keep_toggled(self, checked: bool, member):
         # A keep widget changed state (the user toggled a check box, or the
@@ -2780,6 +2904,8 @@ class _GroupCards:
             # keeper for the relation labels (Duplicates mode).
             self.keep_member = _member_image(member)
         self.update_relations()
+        # The group's non-kept count changed with the toggle.
+        self._update_action_buttons()
 
     def update_relations(self):
         """Refresh the relation label on every shown card (the "Kept" /
@@ -2855,6 +2981,10 @@ class _GroupCards:
             if widget.isChecked():
                 self.keep_member = _member_image(member)
         self.update_relations()
+        # The group's non-kept count changed with the new kept set (the
+        # expand-and-return path above updates the buttons via
+        # `_populate`).
+        self._update_action_buttons()
 
     def expand(self):
         if self.expanded:

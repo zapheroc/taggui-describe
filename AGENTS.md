@@ -403,6 +403,9 @@ Duplicates mode is deliberately unchanged: its picks are in-memory only
 on the non-kept members of each non-ignored group (delete to Recycle Bin,
 move to a folder, tag as `duplicate`), optionally copying their tags to
 the kept images first — to every kept one, when a group keeps several.
+The global "Other images:" buttons act on all groups at once; each
+group's header additionally carries its own `Delete (n)` / `Move (n)`
+buttons that act on that group alone (see "Per-group Delete/Move" below).
 
 - **Duplicates scan** — an in-memory group-by over `Image.content_hash`
   plus one `os.stat` per image (size + `mtime_ns`, for the cards and the
@@ -605,6 +608,46 @@ the kept images first — to every kept one, when a group keeps several.
   the main window's image list. An ignored group's kept state is not
   changed by it (like the action buttons, it never acts on ignored
   groups).
+- **Per-group Delete/Move** — each group's header also carries a
+  `Delete (n)` and a `Move (n)` button (**both modes**, no per-group
+  "Tag as duplicate"), where `n` is the group's current count of
+  **non-kept** images (the same targets the global "Other images:"
+  buttons use, for this group alone — uncheck all "Keep" boxes to act on
+  the whole group). The slots `_GroupCards._on_group_delete` /
+  `_on_group_move` compute the group's pair via
+  `FindDuplicatesDialog._keeper_pair` (one group's worth of
+  `_keeper_targets`, `None` for an ignored group or one that keeps all
+  of its images) and call the shared
+  `FindDuplicatesDialog._perform_delete` / `_perform_move(pairs,
+  group_cards)` — the bodies of the global `delete_others` /
+  `move_others` (which are thin wrappers passing `group_cards=None`):
+  confirmation, `trash_images` / `move_images_to_folder` on a fresh
+  `_image_lookup()`, the optional tag merge (the same "Copy the tags..."
+  checkbox; `_merge_tags_by_row` + `_add_tags_by_row`), and
+  `_forget_kept_picks` for the acted-on images are identical for both
+  scopes. Only the finish differs: `None` runs the existing
+  `_finish_destructive_action` (clear all results, reload, "click Scan
+  again"); a group runs `_finish_group_action(group_cards, summary)`,
+  which (1) drops the group's kept state from the bookkeeping —
+  `_record_group_kept(group, set())` **and** `_kept_initialized.discard`
+  of the group's key, so a rescan that re-forms the same group re-seeds
+  from the remembered picks instead of a stale empty set — (2) removes
+  the box in place via `_hide_group_cards` (scroll/focus preserved, the
+  other boxes untouched), (3) calls `reload_callback` as the global
+  actions do, and (4) sets the status to the summary plus "The remaining
+  groups are still shown — click \"Scan\" to refresh." (or "No groups are
+  left — click \"Scan\" to look again." for the last group, whose removal
+  also disables the global action buttons via `_hide_group_cards`). The
+  remaining groups' cards keep showing the old model data until the next
+  scan, deliberately: every later action on them rebuilds its paths and
+  lookup from the current model, and the picks are content-keyed. The
+  button labels, tooltips and enabled state are managed by
+  `_GroupCards._update_action_buttons` (enabled iff
+  `dialog._actions_enabled and not ignored and n > 0`), called from
+  `_populate` (the header is built before the kept state is seeded, so
+  the construction-time state is not final), `_on_keep_toggled`,
+  `set_kept`, `set_group_ignored`, and the dialog's
+  `_set_actions_enabled` (which loops the shown groups).
 - **Keep picker** — the whole card is clickable: `_DuplicateCard`
   emits `clicked(bool)` on a left press anywhere on the card except inside
   the thumbnail zone registered via `set_preview_zone` (the argument is
