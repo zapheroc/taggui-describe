@@ -728,17 +728,21 @@ the rule (unchecking the other images you had kept).
 ### Cleaning up
 
 The **`Other images:`** buttons act on every non-kept image of every
-group that is not ignored:
+group that is not ignored, and each group's header carries its own
+**`Delete (n)`** and **`Move (n)`** buttons that do the same for that
+one group alone (`n` is how many of the group's images are not kept —
+uncheck all the group's `Keep` boxes to act on the whole group).
+Everything below applies to both:
 
-- **`Delete to Recycle Bin`** — moves the images (and any `.txt`
-  caption files next to them) to the Recycle Bin.
-- **`Move to folder...`** — moves them to a folder you choose.
-  Existing files are never overwritten (a colliding name gets a numeric
-  suffix, `b.jpg`, `b_1.jpg`, ...), captions travel with their images,
-  and a caption shared by two images is copied rather than moved, so
-  the image that stays keeps its tags.
+- **`Delete to Recycle Bin`** / a group's **`Delete (n)`** — moves the
+  images (and any `.txt` caption files next to them) to the Recycle Bin.
+- **`Move to folder...`** / a group's **`Move (n)`** — moves them to a
+  folder you choose. Existing files are never overwritten (a colliding
+  name gets a numeric suffix, `b.jpg`, `b_1.jpg`, ...), captions travel
+  with their images, and a caption shared by two images is copied
+  rather than moved, so the image that stays keeps its tags.
 - **`Tag as "duplicate"`** — tags the images `duplicate` for later
-  review.
+  review (a global action only; there is no per-group version of it).
 
 **`Copy the tags of the other images to the kept image`** — checked,
 the tags of the images being deleted, moved or tagged are copied to
@@ -751,9 +755,12 @@ the group.
 (`Near Duplicates` groups are different files with different records,
 so both work in every storage mode there.)
 
-After a delete or move, the main image list is reloaded and the
-dialog's results are cleared — click `Scan` again to check what
-remains.
+After a delete or move, the main image list is reloaded in the
+background. The `Other images:` buttons also clear the dialog's
+results — click `Scan` again to check what remains. A group's own
+buttons remove only that group from the list (your place in the list is
+preserved), so you can work through the groups one by one; the other
+groups stay until you click `Scan`.
 
 ### Ignoring groups
 
